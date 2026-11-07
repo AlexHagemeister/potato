@@ -13,6 +13,7 @@ import type { Card, DeckPage, DeckRequest } from "./types";
 
 export * from "./constants";
 export * from "./types";
+export { cardUserState, type UserStateRow } from "./user-state";
 export { createDeckService, type DeckLibrary, type DeckService, type DeckServiceDeps, type DeckTmdb } from "./service";
 
 /** The library core, in the shape the deck service reads. */
