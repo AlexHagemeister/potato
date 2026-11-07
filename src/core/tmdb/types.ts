@@ -68,7 +68,7 @@ export interface DiscoverFilters {
   genreIds?: number[];
   /** Inclusive year bounds on release year (movie) or first air year (series). */
   era?: { fromYear?: number; toYear?: number };
-  /** Only titles streaming by subscription on at least one of these services in `watchRegion`. */
+  /** Only titles streaming (subscription, free, or with ads) on at least one of these services in `watchRegion`. */
   providerIds?: number[];
   /** ISO 3166-1 country code. Required when providerIds is set. */
   watchRegion?: string;

@@ -16,6 +16,10 @@ export const IMDB_RATINGS_URL = "https://datasets.imdbws.com/title.ratings.tsv.g
  * the file, because the card shows the IMDb rating (VISION invariant 5) and
  * any search result opens a card, however obscure the title. The deck's own
  * vote thresholds still decide what the deck deals.
+ *
+ * Both guards follow this value, so changing it needs no other edit: the
+ * absolute guard counts titles in the file, not rows kept, and the shrink
+ * guard compares against stored rows at or above the floor.
  */
 export const IMDB_MIN_VOTES = 0;
 
@@ -23,32 +27,45 @@ export const IMDB_MIN_VOTES = 0;
 export const IMDB_BATCH_SIZE = 10_000;
 
 /**
- * A load that keeps fewer rows than this is treated as broken (a truncated
- * download or a format change) and is not swapped in. The 2026-11-06 file
- * had 1,729,431 titles, and the file only grows. The relative guard
- * (IMDB_MIN_FRACTION_OF_CURRENT) catches smaller drops once the table is full.
+ * A file with fewer titles than this is treated as broken (a truncated
+ * download or a format change) and is not swapped in. It counts every data
+ * line, whatever the vote floor keeps. The 2026-11-06 file had 1,729,431
+ * titles, and the file only grows.
  */
-export const IMDB_MIN_EXPECTED_ROWS = 1_500_000;
+export const IMDB_MIN_EXPECTED_TITLES = 1_500_000;
 
 /**
- * A load that writes fewer rows than this share of the rows already stored is
- * treated as broken and is not swapped in. A healthy daily file changes by a
- * fraction of a percent, so a 10% drop means a partial file, not real churn.
- * The target checks it inside its transaction, against the count it is about
- * to replace. An empty table (the first load) always passes.
+ * A load that writes fewer rows than this share of the comparable rows
+ * already stored is treated as broken and is not swapped in. The target
+ * checks it inside its transaction, against the table it is about to
+ * replace, counting only stored rows at or above the vote floor. An empty
+ * table (the first load) always passes.
  */
 export const IMDB_MIN_FRACTION_OF_CURRENT = 0.9;
 
+/** How long the download may go without delivering data (headers, then each chunk) before the load fails. */
+export const IMDB_STALL_TIMEOUT_MS = 30_000;
+
 export interface ReplaceGuard {
-  /** Abort unless rows written >= this fraction of the rows currently stored. */
+  /** Abort unless rows written >= this fraction of the comparable rows currently stored. */
   minFractionOfCurrent: number;
+  /** The vote floor of this load. Only stored rows with at least this many votes are compared. */
+  minVotes: number;
+}
+
+/** Thrown when a guard stops a load. The cron route reports it as a failed run. */
+export class ImdbLoadGuardError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ImdbLoadGuardError";
+  }
 }
 
 /** Throws when a load would shrink the table by more than the guard allows. */
 export function checkAgainstCurrent(written: number, current: number, guard: ReplaceGuard): void {
   if (written < current * guard.minFractionOfCurrent) {
-    throw new Error(
-      `IMDb load wrote ${written} rows, under ${guard.minFractionOfCurrent * 100}% of the ${current} stored; not swapping in`,
+    throw new ImdbLoadGuardError(
+      `IMDb load wrote ${written} rows, under ${guard.minFractionOfCurrent * 100}% of the ${current} stored with at least ${guard.minVotes} votes; not swapping in`,
     );
   }
 }
@@ -66,12 +83,13 @@ export interface RatingsLoadTarget {
 
 export interface LoadImdbRatingsOptions {
   target: RatingsLoadTarget;
-  fetch?: (url: string) => Promise<Response>;
+  fetch?: (url: string, init?: RequestInit) => Promise<Response>;
   url?: string;
   minVotes?: number;
   batchSize?: number;
-  minExpectedRows?: number;
+  minExpectedTitles?: number;
   minFractionOfCurrent?: number;
+  stallTimeoutMs?: number;
   now?: () => number;
 }
 
@@ -83,11 +101,12 @@ export interface LoadImdbRatingsResult extends ParseStats {
 export async function loadImdbRatings(options: LoadImdbRatingsOptions): Promise<LoadImdbRatingsResult> {
   const now = options.now ?? (() => Date.now());
   const started = now();
-  const doFetch = options.fetch ?? ((url: string) => fetch(url));
+  const doFetch = options.fetch ?? ((url: string, init?: RequestInit) => fetch(url, init));
   const minVotes = options.minVotes ?? IMDB_MIN_VOTES;
-  const minExpectedRows = options.minExpectedRows ?? IMDB_MIN_EXPECTED_ROWS;
+  const minExpectedTitles = options.minExpectedTitles ?? IMDB_MIN_EXPECTED_TITLES;
+  const stallTimeoutMs = options.stallTimeoutMs ?? IMDB_STALL_TIMEOUT_MS;
 
-  const res = await doFetch(options.url ?? IMDB_RATINGS_URL);
+  const res = await withStallTimeout(stallTimeoutMs, "response headers", (signal) => doFetch(options.url ?? IMDB_RATINGS_URL, { signal }));
   if (!res.ok || !res.body) {
     await res.body?.cancel();
     throw new Error(`IMDb dataset download failed: HTTP ${res.status}`);
@@ -97,31 +116,66 @@ export async function loadImdbRatings(options: LoadImdbRatingsOptions): Promise<
   const stats: ParseStats = { linesRead: 0, rowsKept: 0, belowMinVotes: 0, malformed: 0 };
 
   async function* checkedBatches(): AsyncGenerator<ImdbRatingRow[]> {
-    yield* batch(parseRatings(splitLines(readStream(text)), minVotes, stats), options.batchSize ?? IMDB_BATCH_SIZE);
+    const lines = splitLines(readStream(text, stallTimeoutMs));
+    yield* batch(parseRatings(lines, minVotes, stats), options.batchSize ?? IMDB_BATCH_SIZE);
     // Thrown inside the target's transaction, so a short file never replaces a good table.
-    if (stats.rowsKept < minExpectedRows) {
-      throw new Error(`IMDb load kept only ${stats.rowsKept} rows (expected at least ${minExpectedRows}); not swapping in`);
+    if (stats.linesRead < minExpectedTitles) {
+      throw new ImdbLoadGuardError(
+        `IMDb file had only ${stats.linesRead} titles (expected at least ${minExpectedTitles}); not swapping in`,
+      );
     }
   }
 
-  const rowsWritten = await options.target.replaceAll(checkedBatches(), {
-    minFractionOfCurrent: options.minFractionOfCurrent ?? IMDB_MIN_FRACTION_OF_CURRENT,
+  try {
+    const rowsWritten = await options.target.replaceAll(checkedBatches(), {
+      minFractionOfCurrent: options.minFractionOfCurrent ?? IMDB_MIN_FRACTION_OF_CURRENT,
+      minVotes,
+    });
+    return { ...stats, rowsWritten, durationMs: now() - started };
+  } catch (err) {
+    // If the target failed before pulling a batch (a connection error, say),
+    // nothing has read the stream yet, so close the download here. When
+    // readStream holds the stream, this rejects harmlessly: it has already
+    // cancelled.
+    await text.cancel().catch(() => {});
+    throw err;
+  }
+}
+
+/** Runs `start` with an abort signal that fires if it has not settled within `ms`. */
+async function withStallTimeout<T>(ms: number, what: string, start: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stalled = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(`IMDb download stalled: no ${what} within ${ms} ms`);
+      controller.abort(err);
+      reject(err);
+    }, ms);
   });
-  return { ...stats, rowsWritten, durationMs: now() - started };
+  try {
+    return await Promise.race([start(controller.signal), stalled]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
  * A web ReadableStream as an async iterable, without relying on the stream's
  * own async iterator typing. If the consumer stops early (a parse error, the
  * row guard, a database error), the stream is cancelled, which closes the
- * download instead of leaving it open until garbage collection.
+ * download instead of leaving it open until garbage collection. With
+ * `stallTimeoutMs`, a read that waits longer than that throws. The wait
+ * counts only time spent waiting for data, not time the consumer spends
+ * between reads.
  */
-export async function* readStream<T>(stream: ReadableStream<T>): AsyncGenerator<T> {
+export async function* readStream<T>(stream: ReadableStream<T>, stallTimeoutMs?: number): AsyncGenerator<T> {
   const reader = stream.getReader();
   let finished = false;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } =
+        stallTimeoutMs === undefined ? await reader.read() : await withStallTimeout(stallTimeoutMs, "data", () => reader.read());
       if (done) {
         finished = true;
         return;
@@ -149,7 +203,8 @@ export class MemoryLoadTarget implements RatingsLoadTarget {
         if (this.keepRows) staged.set(r.tconst, { rating: r.averageRating, votes: r.numVotes });
       }
     }
-    checkAgainstCurrent(count, this.rows.size, guard);
+    const comparable = [...this.rows.values()].filter((r) => r.votes >= guard.minVotes).length;
+    checkAgainstCurrent(count, comparable, guard);
     this.rows = staged;
     return count;
   }

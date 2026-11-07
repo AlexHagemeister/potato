@@ -68,8 +68,13 @@ export function createPostgresRatingsLoadTarget(): RatingsLoadTarget {
           written += result.rowCount ?? 0;
         }
 
-        // Under the advisory lock, so no other load changes the count between this check and the swap.
-        const current = await client.query<{ n: number }>("SELECT count(*)::int AS n FROM imdb_ratings");
+        // Under the advisory lock, so no other load changes the count between
+        // this check and the swap. Only rows at or above this load's vote
+        // floor compare, so raising the floor is not mistaken for a shrink.
+        const current = await client.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM imdb_ratings WHERE num_votes >= $1",
+          [guard.minVotes],
+        );
         checkAgainstCurrent(written, current.rows[0].n, guard);
 
         await client.query(

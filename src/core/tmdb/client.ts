@@ -128,29 +128,53 @@ export function createTmdbClient(options: TmdbClientOptions) {
   const detailsKey = (id: TitleId) => cacheKey("details", buildPath(titlePath(id), { language: TMDB_LANGUAGE }));
   const providersKey = (id: TitleId) => cacheKey("providers", `${titlePath(id)}/watch/providers`);
 
+  /** Full-details fetches in flight, by title key, so parallel callers on a cold cache share one request. */
+  const inflight = new Map<string, Promise<{ core: DetailsCore; providers: ProvidersByCountry } | null>>();
+
   /**
    * Details and providers come from one request (append_to_response) but are
    * cached apart: details for 7 days, providers for 12 hours. When only the
-   * providers have gone stale, only they are refetched. If that refresh
-   * fails, the card still shows: with the expired providers if there are
-   * any, or with none.
+   * providers have gone stale, only they are refetched.
+   *
+   * Expired entries are a fallback (judgment call 16): if a refetch fails,
+   * the expired copy is served instead of failing the card. `providers` is
+   * undefined when availability is unknown (needProviders false, or a failed
+   * refresh with nothing cached).
    */
   async function loadDetails(id: TitleId, needProviders: boolean): Promise<{ core: DetailsCore; providers?: ProvidersByCountry } | null> {
     const [core, providers] = await Promise.all([
-      readCache<DetailsCore>(detailsKey(id)),
+      readCacheEntry<DetailsCore>(detailsKey(id)),
       needProviders ? readCacheEntry<ProvidersByCountry>(providersKey(id)) : Promise.resolve(undefined),
     ]);
 
-    if (core !== undefined) {
-      if (!needProviders || providers?.fresh) return { core, providers: providers?.data };
+    if (core?.fresh) {
+      if (!needProviders || providers?.fresh) return { core: core.data, providers: providers?.data };
+      let fresh: ProvidersByCountry | null = null;
       try {
-        return { core, providers: (await getTitleProviders(id)) ?? providers?.data ?? {} };
+        fresh = await refreshProviders(id, providers?.data);
       } catch (err) {
-        console.warn(`tmdb providers refresh failed for ${formatTitleKey(id)}, serving stale:`, err);
-        return { core, providers: providers?.data ?? {} };
+        console.warn(`tmdb providers refresh failed for ${formatTitleKey(id)}, availability unknown:`, err);
       }
+      return { core: core.data, providers: fresh ?? providers?.data };
     }
 
+    const key = formatTitleKey(id);
+    let pending = inflight.get(key);
+    if (!pending) {
+      pending = fetchDetails(id).finally(() => inflight.delete(key));
+      inflight.set(key, pending);
+    }
+    try {
+      return await pending;
+    } catch (err) {
+      if (core === undefined) throw err;
+      console.warn(`tmdb details refetch failed for ${key}, serving stale:`, err);
+      return { core: core.data, providers: providers?.data };
+    }
+  }
+
+  /** One request for a title's details and providers, both written to the cache. Null when TMDB has no such title. */
+  async function fetchDetails(id: TitleId): Promise<{ core: DetailsCore; providers: ProvidersByCountry } | null> {
     const raw = (await tmdbGet(
       http,
       buildPath(titlePath(id), {
@@ -178,16 +202,32 @@ export function createTmdbClient(options: TmdbClientOptions) {
     return { ...loaded.core, providersByCountry: loaded.providers ?? {} };
   }
 
-  /** Where a title streams, all countries. Null when TMDB has no such title. */
+  /**
+   * Where a title streams, all countries. Null when TMDB has no such title.
+   * An expired entry is served if the refresh fails.
+   */
   async function getTitleProviders(id: TitleId): Promise<ProvidersByCountry | null> {
-    const path = `${titlePath(id)}/watch/providers`;
-    const key = providersKey(id);
-    const hit = await readCache<ProvidersByCountry>(key);
-    if (hit !== undefined) return hit;
-    const raw = (await tmdbGet(http, path)) as RawWatchProviders | null;
+    const entry = await readCacheEntry<ProvidersByCountry>(providersKey(id));
+    if (entry?.fresh) return entry.data;
+    return refreshProviders(id, entry?.data);
+  }
+
+  /**
+   * Fetches a title's providers and caches them. If the fetch throws and an
+   * expired copy exists, returns that instead. A 404 resolves to null.
+   */
+  async function refreshProviders(id: TitleId, stale: ProvidersByCountry | undefined): Promise<ProvidersByCountry | null> {
+    let raw: RawWatchProviders | null;
+    try {
+      raw = (await tmdbGet(http, `${titlePath(id)}/watch/providers`)) as RawWatchProviders | null;
+    } catch (err) {
+      if (stale === undefined) throw err;
+      console.warn(`tmdb providers refresh failed for ${formatTitleKey(id)}, serving stale:`, err);
+      return stale;
+    }
     if (raw === null) return null;
     const providers = normalizeProviders(raw);
-    await writeCache(key, providers, TMDB_TTL_MS.titleProviders);
+    await writeCache(providersKey(id), providers, TMDB_TTL_MS.titleProviders);
     return providers;
   }
 
@@ -312,21 +352,24 @@ export function createTmdbClient(options: TmdbClientOptions) {
    * Returns copies of the candidates with providerIds set to the services
    * that stream each title in `country` (subscription, free, or with ads;
    * not rent or buy), the field the deck's "on my services" filter reads.
-   * A title TMDB does not know, or whose lookup fails, keeps providerIds
-   * undefined (unknown). A title with no listing in the country gets []
-   * (known, streaming nowhere).
+   * A title TMDB does not know, or whose lookup fails with nothing cached,
+   * keeps providerIds undefined (unknown). A title with no listing in the
+   * country gets [] (known, streaming nowhere).
+   *
+   * It reads through the same details path as resolveImdbIds, so on a cold
+   * cache one request per title serves both helpers, in either order or in
+   * parallel.
    */
   async function attachProviderIds<T extends Candidate>(candidates: readonly T[], country: string): Promise<T[]> {
     const region = checkCountry(country);
     return mapWithConcurrency(candidates, TMDB_FANOUT_CONCURRENCY, async (c) => {
-      let providers: ProvidersByCountry | null;
+      let providers: ProvidersByCountry | undefined;
       try {
-        providers = await getTitleProviders(c);
+        providers = (await loadDetails(c, true))?.providers;
       } catch (err) {
         console.warn(`tmdb providers lookup failed for ${formatTitleKey(c)}:`, err);
-        return { ...c };
       }
-      if (providers === null) return { ...c };
+      if (providers === undefined) return { ...c };
       return { ...c, providerIds: streamingProviderIds(providers[region]) };
     });
   }

@@ -5,7 +5,7 @@ import { createTmdbClient } from "./client";
 import { TMDB_MAX_BACKOFF_MS, TMDB_TTL_MS } from "./constants";
 import { retryDelayMs, TmdbError } from "./http";
 import { posterUrl, logoUrl } from "./images";
-import { breakingBadDetails, json, matrixDetails, matrixProviders, notFound, scriptedFetch, status } from "./test-fixtures";
+import { breakingBadDetails, json, matrixDetails, notFound, scriptedFetch, status } from "./test-fixtures";
 
 const HOUR = 60 * 60 * 1000;
 
@@ -22,6 +22,11 @@ async function quietly<T>(fn: () => Promise<T>): Promise<T> {
 
 const timeout = () => {
   throw new DOMException("The operation timed out.", "TimeoutError");
+};
+
+/** What fetch throws in Node and Bun when the socket is reset. */
+const reset = () => {
+  throw new TypeError("fetch failed", { cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }) });
 };
 
 function setup(routes: Parameters<typeof scriptedFetch>[0], cache: CacheStore = new MemoryCacheStore()) {
@@ -186,6 +191,30 @@ describe("HTTP 429 and errors", () => {
     expect((await client.getTitleDetails("movie", 603))?.title).toBe("The Matrix");
     expect(signal).toBeInstanceOf(AbortSignal);
     expect(scripted.calls).toHaveLength(2);
+  });
+
+  test("a connection reset is retried, then succeeds", async () => {
+    const { client, calls, sleeps } = setup({ "/movie/603": [reset, json(matrixDetails)] });
+    expect((await client.getTitleDetails("movie", 603))?.title).toBe("The Matrix");
+    expect(calls).toHaveLength(2);
+    expect(sleeps).toEqual([1000]);
+  });
+
+  test("a persistent connection reset ends in TmdbError after the retry bound", async () => {
+    const { client, calls } = setup({ "/discover/movie": reset });
+    const err = await client.discover("popular", { mediaType: "movie" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TmdbError);
+    expect((err as TmdbError).status).toBe(0);
+    expect((err as TmdbError).message).toContain("ECONNRESET");
+    expect(calls).toHaveLength(4);
+  });
+
+  test("a 200 whose body is not JSON throws TmdbError at once", async () => {
+    const { client, calls } = setup({ "/movie/603": () => new Response("<html>oops", { status: 200 }) });
+    const err = await client.getTitleDetails("movie", 603).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TmdbError);
+    expect((err as TmdbError).message).toContain("not JSON");
+    expect(calls).toHaveLength(1);
   });
 
   test("gives up after the retry bound when every attempt times out", async () => {
@@ -399,10 +428,13 @@ describe("fan-out helpers", () => {
   test("attachProviderIds counts free and ad-supported services, not rent or buy", async () => {
     const provider = (id: number) => ({ provider_id: id, provider_name: `p${id}`, logo_path: null, display_priority: id });
     const { client } = setup({
-      "/movie/603/watch/providers": json({
-        results: { US: { flatrate: [provider(8)], free: [provider(191)], ads: [provider(73), provider(8)], rent: [provider(2)], buy: [provider(10)] } },
+      "/movie/603": json({
+        ...matrixDetails,
+        "watch/providers": {
+          results: { US: { flatrate: [provider(8)], free: [provider(191)], ads: [provider(73), provider(8)], rent: [provider(2)], buy: [provider(10)] } },
+        },
       }),
-      "/tv/1396/watch/providers": status(500),
+      "/tv/1396": status(500),
     });
     const base = { title: "x", year: 2000, genreIds: [], popularity: 1, tmdbVoteAverage: 7, tmdbVoteCount: 10 };
     const out = await quietly(() =>
@@ -418,11 +450,11 @@ describe("fan-out helpers", () => {
     expect(out.map((c) => c.providerIds)).toEqual([[8, 191, 73], undefined]);
   });
 
-  test("attachProviderIds sets subscription providers for the country", async () => {
+  test("attachProviderIds sets streaming providers for the country", async () => {
     const { client } = setup({
-      "/movie/603/watch/providers": json(matrixProviders),
-      "/tv/1396/watch/providers": json({ results: {} }),
-      "/movie/404/watch/providers": notFound,
+      "/movie/603": json(matrixDetails),
+      "/tv/1396": json({ ...breakingBadDetails, "watch/providers": { results: {} } }),
+      "/movie/404": notFound,
     });
     const base = { title: "x", year: 2000, genreIds: [], popularity: 1, tmdbVoteAverage: 7, tmdbVoteCount: 10 };
     const out = await client.attachProviderIds<Candidate>(
@@ -434,6 +466,51 @@ describe("fan-out helpers", () => {
       "US",
     );
     expect(out.map((c) => c.providerIds)).toEqual([[2528], [], undefined]);
+  });
+
+  test("attachProviderIds and resolveImdbIds in parallel on a cold cache share one request per title", async () => {
+    const { client, calls } = setup({ "/movie/603": json(matrixDetails), "/tv/1396": json(breakingBadDetails) });
+    const base = { title: "x", year: 2000, genreIds: [], popularity: 1, tmdbVoteAverage: 7, tmdbVoteCount: 10 };
+    const candidates: Candidate[] = [
+      { ...base, mediaType: "movie", tmdbId: 603 },
+      { ...base, mediaType: "tv", tmdbId: 1396 },
+    ];
+    const [withProviders, imdbIds] = await Promise.all([client.attachProviderIds(candidates, "US"), client.resolveImdbIds(candidates)]);
+    expect(calls.map((c) => c.path).sort()).toEqual(["/movie/603", "/tv/1396"]);
+    expect(withProviders.map((c) => c.providerIds)).toEqual([[2528], [8]]);
+    expect(Object.fromEntries(imdbIds)).toEqual({ "movie:603": "tt0133093", "tv:1396": "tt0903747" });
+  });
+
+  test("attachProviderIds serves expired providers when their refresh fails", async () => {
+    const { client, advance } = setup({
+      "/movie/603": json(matrixDetails),
+      "/movie/603/watch/providers": status(503),
+    });
+    const base = { title: "x", year: 2000, genreIds: [], popularity: 1, tmdbVoteAverage: 7, tmdbVoteCount: 10 };
+    const candidates: Candidate[] = [{ ...base, mediaType: "movie", tmdbId: 603 }];
+    await client.attachProviderIds(candidates, "US");
+    advance(TMDB_TTL_MS.titleProviders + 1);
+    const out = await quietly(() => client.attachProviderIds(candidates, "US"));
+    expect(out[0].providerIds).toEqual([2528]);
+  });
+});
+
+describe("expired details", () => {
+  test("served when the refetch fails, so the card and its IMDb ID survive an outage", async () => {
+    const { client, calls, advance } = setup({ "/movie/603": [json(matrixDetails), status(503)] });
+    await client.getTitleDetails("movie", 603);
+    advance(TMDB_TTL_MS.details + 1);
+    const d = await quietly(() => client.getTitleDetails("movie", 603));
+    expect(d?.title).toBe("The Matrix");
+    expect(d?.providersByCountry.US.flatrate.map((p) => p.id)).toEqual([2528]);
+    const ids = await quietly(() => client.resolveImdbIds([{ mediaType: "movie", tmdbId: 603 }]));
+    expect(ids.get("movie:603")).toBe("tt0133093");
+    expect(calls.length).toBeGreaterThan(1); // the refetch was attempted
+  });
+
+  test("a failed fetch with nothing cached still throws", async () => {
+    const { client } = setup({ "/movie/603": status(503) });
+    await expect(client.getTitleDetails("movie", 603)).rejects.toBeInstanceOf(TmdbError);
   });
 });
 
