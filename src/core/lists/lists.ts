@@ -19,6 +19,11 @@ import { LIST_STATUSES, type DeckFilters, type ImdbRating, type ListStatus, type
 /** Rows per page. Enough to fill several screens, small enough that a cold metadata cache stays quick. */
 export const LISTS_PAGE_SIZE = 50;
 
+/** The list an address names (`?list=seen`). Anything else opens the Watchlist. */
+export function listFromParam(value: unknown): ListStatus {
+  return (LIST_STATUSES as readonly unknown[]).includes(value) ? (value as ListStatus) : "watchlist";
+}
+
 /** One row of a list, ready to display. */
 export interface ListRow extends TitleId {
   status: ListStatus;

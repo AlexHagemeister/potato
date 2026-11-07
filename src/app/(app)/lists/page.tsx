@@ -1,7 +1,6 @@
 import { filterChoiceFromParams, toDeckFilters } from "@/core/filters";
-import { getAllLists } from "@/core/lists";
+import { getAllLists, listFromParam } from "@/core/lists";
 import { getUserSettings } from "@/core/settings/user-settings";
-import { LIST_STATUSES, type ListStatus } from "@/core/types";
 import { getCurrentUserForRequest } from "@/lib/current-user";
 import { SignedOutScreen } from "../_shell/signed-out";
 import { ListsScreen } from "./lists-screen";
@@ -14,8 +13,7 @@ export default async function ListsPage({ searchParams }: PageProps<"/lists">) {
   // ?list=seen keeps the chosen list across a reload. Anything else opens the Watchlist.
   // The filter parameters (type, genre, era, mine) keep the filters the same way.
   const params = await searchParams;
-  const { list } = params;
-  const initialList = (LIST_STATUSES as readonly unknown[]).includes(list) ? (list as ListStatus) : "watchlist";
+  const initialList = listFromParam(params.list);
   const filters = filterChoiceFromParams(params);
 
   const [result, settings] = await Promise.all([

@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useLayoutEffect, useRef, useState, useTransition } from "react";
 import { DEFAULT_FILTER_CHOICE, filterChoiceToParams, isDefaultFilterChoice, type FilterChoice } from "@/core/filters";
 import type { ActionOutcome, TitleRecord } from "@/core/library/types";
-import type { ListRow, ListRowsPage } from "@/core/lists";
+import { listFromParam, type ListRow, type ListRowsPage } from "@/core/lists";
 import { formatTitleKey } from "@/core/title-id";
 import type { ListStatus, TitleId } from "@/core/types";
 import { FilterControl } from "../_components/filter-control";
@@ -58,6 +59,15 @@ type Refill = {
   filters: FilterChoice;
   jobs: Partial<Record<ListStatus, { cursor: string; have: number; want: number }>>;
 };
+
+/**
+ * Where the list's scroll position is kept, in the history entry's state. It is written as the screen is left by a
+ * link (a row's card, a tab), so Back, and a reload, land on the same rows.
+ */
+const SCROLL_KEY = "potatoListsScroll";
+
+/** Space between the Undo toast's top edge and a row it is kept clear of. */
+const TOAST_CLEARANCE = 12;
 
 /** The address for a list and filters, so a reload reopens both. */
 function listsUrl(status: ListStatus, filters: FilterChoice): string {
@@ -114,6 +124,8 @@ interface Toast {
   id: number;
   message: string;
   undo?: () => Promise<void>;
+  /** The row the toast is about (the one edited, or the one now in a moved row's place), kept clear of it. */
+  keep?: string;
 }
 
 type Sheet = { mode: "markSeen" | "edit"; row: ListRow };
@@ -130,16 +142,24 @@ export function ListsScreen({
   filters: FilterChoice;
   hasServices: boolean;
 }) {
+  const router = useRouter();
   const [lists, setLists] = useState(() => toLists(fromServer));
   const [filters, setFilters] = useState(filtersFromServer);
   const filtersRef = useRef(filters);
   useEffect(() => {
     filtersRef.current = filters;
   }, [filters]);
-  const [filtering, setFiltering] = useState(false);
-  // A navigation back to this tab brings new server data: start from it.
-  const [synced, setSynced] = useState(fromServer);
+  // The list and filters live in the address, so Back from a card and a reload restore exactly what was showing
+  // (issue 67). A tab tap writes the address directly (see select), so after Back the router's copy of this page
+  // can carry an older `initialList` than the address: the list comes from the address.
+  const searchParams = useSearchParams();
+  const [active, setActive] = useState(() => listFromParam(searchParams.get("list")));
+  // A filter change is a router navigation to the new address, and its server render brings the filtered lists.
+  const [filtering, startFiltering] = useTransition();
   const [refill, setRefill] = useState<Refill | null>(null);
+  // New server data (a filter change, the Lists tab while on Lists, a refresh after a change on a card): start
+  // from it, on the list and filters its address names.
+  const [synced, setSynced] = useState(fromServer);
   // Counts list loads, so a slower, older load never overwrites a newer one,
   // or the server data a navigation brought in meanwhile.
   const loadSeq = useRef(0);
@@ -149,11 +169,10 @@ export function ListsScreen({
   if (fromServer !== synced) {
     setSynced(fromServer);
     setLists(toLists(fromServer));
+    setActive(initialList);
     setFilters(filtersFromServer);
-    setFiltering(false);
     setRefill(null);
   }
-  const [active, setActive] = useState(initialList);
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -204,7 +223,44 @@ export function ListsScreen({
   }, [toast]);
 
   const toastSeq = useRef(0);
-  const show = (message: string, undo?: () => Promise<void>) => setToast({ id: ++toastSeq.current, message, undo });
+  const show = (message: string, undo?: () => Promise<void>, keep?: string) =>
+    setToast({ id: ++toastSeq.current, message, undo, keep });
+
+  // The toast sits over the bottom of the list (issue 68). The spacer below the list leaves room to scroll any
+  // row clear of it, and the row the toast is about is scrolled clear as it appears, so a saved rating or the
+  // next row's button is never left under it.
+  const panel = useRef<HTMLElement>(null);
+  const toastEl = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const main = panel.current?.closest("main");
+    if (!toast?.keep || !main || !toastEl.current) return;
+    const row = [...main.querySelectorAll<HTMLElement>("li[data-title-key]")].find((li) => li.dataset.titleKey === toast.keep);
+    if (!row) return;
+    const overlap = row.getBoundingClientRect().bottom - (toastEl.current.getBoundingClientRect().top - TOAST_CLEARANCE);
+    if (overlap <= 0) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    main.scrollBy({ top: overlap, behavior: reduce ? "auto" : "smooth" });
+  }, [toast]);
+
+  // Back to this screen (or a reload) puts the list where it was. The rows are the router's copy of the page as
+  // it was left, so the position fits them. Rows added with Show more aren't in that copy.
+  useLayoutEffect(() => {
+    const main = panel.current?.closest("main");
+    if (!main) return;
+    const saved = (window.history.state as Record<string, unknown> | null)?.[SCROLL_KEY];
+    if (typeof saved === "number") main.scrollTop = saved;
+    const save = (e: MouseEvent) => {
+      if (!(e.target instanceof Element) || !e.target.closest("a[href]")) return;
+      try {
+        // Next's own state rides along (it carries `__NA`), so Next passes this write straight through.
+        window.history.replaceState({ ...window.history.state, [SCROLL_KEY]: main.scrollTop }, "");
+      } catch {
+        // Safari limits history writes. Losing the position is harmless.
+      }
+    };
+    document.addEventListener("click", save, true);
+    return () => document.removeEventListener("click", save, true);
+  }, []);
 
   /** A write failed. Say why, and reload the lists when the title changed elsewhere. */
   function failed(result: { error: string; stale?: boolean }) {
@@ -224,8 +280,6 @@ export function ListsScreen({
     const shown = lists;
     const result = await call(() => loadListsAction(using), FILTER_FAILED);
     if (seq !== loadSeq.current) return;
-    // This load replaced any filter load still running.
-    setFiltering(false);
     if (!result.ok) return;
     const fresh = toLists(result.value);
     const jobs: Refill["jobs"] = {};
@@ -238,28 +292,32 @@ export function ListsScreen({
     setRefill(Object.keys(jobs).length > 0 ? { filters: using, jobs } : null);
   }
 
-  /** New filters from the control: load all three lists under them, or keep the old ones if that fails. */
-  async function applyFilters(next: FilterChoice) {
-    const seq = ++loadSeq.current;
-    const previous = filters;
+  /** Goes to the address for a list and filters through the router, so its copy of this page holds both. */
+  function navigate(status: ListStatus, using: FilterChoice) {
+    startFiltering(() => router.replace(listsUrl(status, using), { scroll: false }));
+  }
+
+  /**
+   * New filters from the control. The router goes to their address, and the page's server render brings all
+   * three lists under them, so the rows and the address change together. The router's copy of the page, which
+   * Back restores, then matches both.
+   */
+  function applyFilters(next: FilterChoice) {
+    // A router fetch that fails falls back to a full page load, which offline is the browser's error page.
+    if (!navigator.onLine) return show(FILTER_FAILED);
     setFilters(next);
-    setFiltering(true);
     setRefill(null);
-    window.history.replaceState(null, "", listsUrl(active, next));
-    const result = await call(() => loadListsAction(next), FILTER_FAILED);
-    if (seq !== loadSeq.current) return;
-    setFiltering(false);
-    if (!result.ok) {
-      setFilters(previous);
-      window.history.replaceState(null, "", listsUrl(active, previous));
-      return failed(result);
-    }
-    setLists(toLists(result.value));
+    navigate(active, next);
   }
 
   function select(status: ListStatus) {
+    if (status === active) return;
     setActive(status);
-    // Keeps the chosen list and filters across a reload, without a navigation.
+    // While a filter change is on its way, the tab joins it: a direct write would cancel that navigation, and
+    // the filters' rows would never arrive.
+    if (filtering) return navigate(status, filters);
+    // The rows don't depend on the list (all three are loaded), so a tab tap writes the address directly, with
+    // no server render, and works offline like the rest of the screen. Back reads the list from the address.
     window.history.replaceState(null, "", listsUrl(status, filters));
   }
 
@@ -286,9 +344,14 @@ export function ListsScreen({
     }
     const index = lists.watchlist.rows.findIndex((r) => keyOf(r) === key);
     const moved = withRecord(row, result.value.current);
+    const next = lists.watchlist.rows[index + 1];
     setLists((prev) => insertAt(without(prev, "watchlist", key), "seen", moved, 0));
     setSheet(null);
-    show("Moved to Seen", undoer(ref, result.value, (prev) => insertAt(without(prev, "seen", key), "watchlist", row, index)));
+    show(
+      "Moved to Seen",
+      undoer(ref, result.value, (prev) => insertAt(without(prev, "seen", key), "watchlist", row, index)),
+      next && keyOf(next),
+    );
     return null;
   }
 
@@ -303,7 +366,7 @@ export function ListsScreen({
     }
     setLists((prev) => replaced(prev, "seen", withRecord(row, result.value.current)));
     setSheet(null);
-    show("Rating saved", undoer(ref, result.value, (prev) => replaced(prev, "seen", row)));
+    show("Rating saved", undoer(ref, result.value, (prev) => replaced(prev, "seen", row)), keyOf(row));
     return null;
   }
 
@@ -311,6 +374,7 @@ export function ListsScreen({
     const ref = refOf(row);
     const key = keyOf(row);
     const index = lists.passed.rows.findIndex((r) => keyOf(r) === key);
+    const next = lists.passed.rows[index + 1];
     const putBack = (prev: Lists) => insertAt(without(prev, "watchlist", key), "passed", row, index);
     // Moves on tap, with the row's button disabled until the move saves. A failure puts the row back.
     setRowPending(key, true);
@@ -322,7 +386,7 @@ export function ListsScreen({
       return failed(result);
     }
     setLists((prev) => replaced(prev, "watchlist", withRecord(row, result.value.current)));
-    show("Moved to Watchlist", undoer(ref, result.value, putBack));
+    show("Moved to Watchlist", undoer(ref, result.value, putBack), next && keyOf(next));
   }
 
   async function showMore() {
@@ -371,6 +435,7 @@ export function ListsScreen({
       </div>
 
       <section
+        ref={panel}
         id="list-panel"
         role="tabpanel"
         aria-labelledby={`list-tab-${active}`}
@@ -433,8 +498,12 @@ export function ListsScreen({
         )}
       </section>
 
+      {/* Room to scroll the last row above the Undo toast: the toast and its gap over the tab bar, less the screen's own bottom padding. */}
+      <div aria-hidden="true" data-slot="toast-room" className="h-14" />
+
       {toast && (
         <div
+          ref={toastEl}
           role="status"
           className="fixed inset-x-4 z-40 flex min-h-12 items-center justify-between gap-3 rounded-2xl bg-surface-raised py-1 pr-1 pl-4 shadow-lg shadow-black/40"
           style={{ bottom: "calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + 0.75rem)" }}
