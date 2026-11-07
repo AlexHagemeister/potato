@@ -65,7 +65,6 @@ Two controls shape what the deck shows you.
 - popular
 - deep cuts (good titles fewer people know)
 - top rated
-- box office
 - for you (based on your own ratings)
 
 The default mode is a blend of these. "For you" needs ratings to work. Until you have rated enough titles, choosing "For you" shows an empty state that asks you to rate more titles to unlock it.
