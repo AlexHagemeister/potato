@@ -8,7 +8,9 @@
     "start": "next start",
     "typecheck": "next typegen && tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint",
-    "test": "bun test --no-env-file"
+    "test": "bun test --no-env-file",
+    "tmdb:smoke": "bun run scripts/tmdb-smoke.ts",
+    "imdb:load:dev": "bun --no-env-file --env-file=.env.development.local scripts/load-imdb-ratings.ts"
   },
   "dependencies": {
     "next": "16.4.5",
