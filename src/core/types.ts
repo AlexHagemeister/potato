@@ -60,8 +60,8 @@ export interface Candidate extends TitleId {
   /** Absent when the title has no IMDb mapping or no row in the IMDb dataset. */
   imdb?: ImdbRating;
   /**
-   * TMDB watch provider IDs for streaming by subscription in the user's
-   * country. Undefined means unknown (no availability data). An empty array
+   * TMDB watch provider IDs for streaming in the user's country: by
+   * subscription, free, or with ads (not rent or buy). Undefined means unknown (no availability data). An empty array
    * means known and streaming nowhere.
    */
   providerIds?: number[];
