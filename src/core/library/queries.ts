@@ -6,14 +6,14 @@ import { getDb } from "@/db/client";
 import { titleStatus } from "@/db/schema";
 import { getUserSettings } from "../settings/user-settings";
 import type { Candidate, ListStatus, TitleId, UserTitleState } from "../types";
-import { fail, ok, type LibraryResult } from "./errors";
+import { fail, ok, validateUserId, type Result } from "../result";
 import { applyListFilters, filtersNeedDetails, pageRows, parseListQuery, withDetails } from "./list";
 import { recordFromDrizzle } from "./rows";
 import type { ListOptions, ListPage, TitleRecord } from "./types";
-import { validateTitleRef, validateUserId } from "./validate";
+import { validateTitleRef } from "./validate";
 
 /** Every row the user has, in the shape the deck engine reads (only the fields it needs). */
-export async function getUserTitleStates(userId: string): Promise<LibraryResult<UserTitleState[]>> {
+export async function getUserTitleStates(userId: string): Promise<Result<UserTitleState[]>> {
   const u = validateUserId(userId);
   if (!u.ok) return u;
   const rows = await getDb()
@@ -38,7 +38,7 @@ export async function getUserTitleStates(userId: string): Promise<LibraryResult<
 }
 
 /** The user's row for one title, or null when the title is on no list and not skipped. For a card opened from search. */
-export async function getTitleState(userId: string, ref: TitleId): Promise<LibraryResult<TitleRecord | null>> {
+export async function getTitleState(userId: string, ref: TitleId): Promise<Result<TitleRecord | null>> {
   const u = validateUserId(userId);
   if (!u.ok) return u;
   const r = validateTitleRef(ref);
@@ -58,7 +58,7 @@ export async function getTitleState(userId: string, ref: TitleId): Promise<Libra
 }
 
 /** How many titles the user has rated (Seen rows always carry a rating). Gates "for you". */
-export async function getRatedCount(userId: string): Promise<LibraryResult<number>> {
+export async function getRatedCount(userId: string): Promise<Result<number>> {
   const u = validateUserId(userId);
   if (!u.ok) return u;
   const [row] = await getDb()
@@ -74,14 +74,20 @@ export async function getRatedCount(userId: string): Promise<LibraryResult<numbe
  * and "on my services" need TMDB metadata, so they need `lookupDetails`, which
  * the app layer wires to the TMDB module. The lookup runs once per call, over
  * the whole list when a filter needs it, or over the page's titles otherwise.
+ * With a metadata filter, each page looks up the whole list again. That relies
+ * on the TMDB module's cache to keep repeat lookups cheap.
  */
-export async function getList(userId: string, status: ListStatus, options: ListOptions = {}): Promise<LibraryResult<ListPage>> {
+export async function getList(
+  userId: string,
+  status: ListStatus,
+  options: ListOptions | null = {},
+): Promise<Result<ListPage>> {
   const u = validateUserId(userId);
   if (!u.ok) return u;
   const query = parseListQuery(status, options);
   if (!query.ok) return query;
   const { filters, sort, cursor, limit } = query.value;
-  const lookup = options.lookupDetails;
+  const lookup = options?.lookupDetails;
   const needsDetails = filtersNeedDetails(filters);
   if (needsDetails && !lookup) return fail({ code: "details_lookup_required" });
 
@@ -95,9 +101,13 @@ export async function getList(userId: string, status: ListStatus, options: ListO
   let details: ReadonlyMap<string, Candidate> | null = null;
   let providerIds: number[] = [];
   if (needsDetails && lookup) {
-    details = await lookup(rows.map(({ mediaType, tmdbId }) => ({ mediaType, tmdbId })));
-    if (filters.onMyServices) {
-      const settings = await getUserSettings(u.value);
+    // The lookup and the settings read are independent, so they run together.
+    const [looked, settings] = await Promise.all([
+      lookup(rows.map(({ mediaType, tmdbId }) => ({ mediaType, tmdbId }))),
+      filters.onMyServices ? getUserSettings(u.value) : null,
+    ]);
+    details = looked;
+    if (settings) {
       if (!settings.ok) return settings;
       providerIds = settings.value.providerIds;
     }

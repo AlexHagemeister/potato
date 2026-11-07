@@ -62,6 +62,37 @@ describe("parseListQuery", () => {
     expect(parseListQuery("seen", { sort: "updated_desc", cursor }).ok).toBe(false);
     expect(parseListQuery("seen", { sort: "created_desc", cursor }).ok).toBe(true);
   });
+
+  test("null options mean the defaults", () => {
+    expect(parseListQuery("watchlist", null).ok).toBe(true);
+  });
+
+  test.each([
+    "x",
+    5,
+    { filters: "x" },
+    { filters: { mediaTypes: "movie" } },
+    { filters: { mediaTypes: ["film"] } },
+    { filters: { genreIds: ["18"] } },
+    { filters: { genreIds: [0] } },
+    { filters: { era: 2020 } },
+    { filters: { era: { fromYear: "2020" } } },
+    { filters: { era: { toYear: 1.5 } } },
+    { filters: { onMyServices: "yes" } },
+    { lookupDetails: "not a function" },
+  ])("malformed options %p are invalid_list_query, not a throw", (options) => {
+    expect(parseListQuery("watchlist", options as never)).toMatchObject({ ok: false, error: { code: "invalid_list_query" } });
+  });
+
+  test("well-formed filters pass through, with era bounds normalized", () => {
+    const result = parseListQuery("watchlist", {
+      filters: { mediaTypes: ["tv"], genreIds: [18], era: { fromYear: 2000 }, onMyServices: false },
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      value: { filters: { mediaTypes: ["tv"], genreIds: [18], era: { fromYear: 2000, toYear: null }, onMyServices: false } },
+    });
+  });
 });
 
 describe("cursors", () => {

@@ -5,13 +5,24 @@
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db/client";
 import { userSettings } from "@/db/schema";
-import { fail, ok, type LibraryResult } from "../library/errors";
-import { FOREIGN_KEY_VIOLATION, pgErrorCode } from "../library/pg-error";
-import type { UserSettings, UserSettingsPatch } from "../library/types";
-import { validateUserId } from "../library/validate";
+import { FOREIGN_KEY_VIOLATION, pgErrorCode } from "../pg-error";
+import { fail, ok, validateUserId, type Result } from "../result";
 
 /** Largest value a Postgres integer holds. */
 const PG_INT_MAX = 2_147_483_647;
+
+export interface UserSettings {
+  /** ISO 3166-1 alpha-2, uppercase. */
+  country: string;
+  /** TMDB watch provider IDs. */
+  providerIds: number[];
+  updatedAt: Date;
+}
+
+export interface UserSettingsPatch {
+  country?: string;
+  providerIds?: number[];
+}
 
 /**
  * Creates the user's settings row with the defaults (country 'US', no
@@ -27,15 +38,18 @@ export async function ensureUserSettings(userId: string): Promise<void> {
  * user_settings_country_check requires. Provider IDs must be positive whole
  * numbers. Duplicates are dropped, keeping the first.
  */
-export function validateSettingsPatch(patch: unknown): LibraryResult<UserSettingsPatch> {
+export function validateSettingsPatch(patch: unknown): Result<UserSettingsPatch> {
   const bad = (message: string) => fail<UserSettingsPatch>({ code: "invalid_settings", message });
   if (typeof patch !== "object" || patch === null) return bad("settings must be an object");
   const p = patch as Record<string, unknown>;
   const out: UserSettingsPatch = {};
   if (p.country !== undefined) {
     if (typeof p.country !== "string") return bad("country must be a string");
-    const country = p.country.trim().toUpperCase();
-    if (!/^[A-Z]{2}$/.test(country)) return bad(`country must be a two-letter ISO code, got ${JSON.stringify(p.country)}`);
+    // Check ASCII letters before uppercasing: toUpperCase maps some non-ASCII
+    // letters to ASCII ("ß" becomes "SS"), which would pass the check.
+    const trimmed = p.country.trim();
+    if (!/^[A-Za-z]{2}$/.test(trimmed)) return bad(`country must be a two-letter ISO code, got ${JSON.stringify(p.country)}`);
+    const country = trimmed.toUpperCase();
     out.country = country;
   }
   if (p.providerIds !== undefined) {
@@ -60,7 +74,7 @@ function toSettings(row: typeof userSettings.$inferSelect): UserSettings {
  * (get-or-create). Every read of settings goes through here, so no code path
  * depends on the sign-up hook having succeeded.
  */
-export async function getUserSettings(userId: string): Promise<LibraryResult<UserSettings>> {
+export async function getUserSettings(userId: string): Promise<Result<UserSettings>> {
   const u = validateUserId(userId);
   if (!u.ok) return u;
   const read = () => getDb().select().from(userSettings).where(eq(userSettings.userId, u.value)).limit(1);
@@ -83,7 +97,7 @@ export async function updateUserSettings(
   userId: string,
   patch: UserSettingsPatch,
   options: { now?: Date } = {},
-): Promise<LibraryResult<UserSettings>> {
+): Promise<Result<UserSettings>> {
   const u = validateUserId(userId);
   if (!u.ok) return u;
   const valid = validateSettingsPatch(patch);

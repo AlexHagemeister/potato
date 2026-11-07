@@ -4,7 +4,7 @@
 
 import { skipUntilFrom } from "../deck/constants";
 import type { TitleStatus } from "../types";
-import { fail, ok, type LibraryResult } from "./errors";
+import { fail, ok, type Result } from "../result";
 import { validateRating, validateReview } from "./validate";
 import type { MoveRequest } from "./types";
 
@@ -13,6 +13,12 @@ export interface StatusColumns {
   status: TitleStatus;
   rating: number | null;
   review: string | null;
+  /**
+   * Keep the row's current review instead of writing `review`. Only a Seen
+   * write can set it, so it keeps a review only when the title is already Seen
+   * (the schema allows a review on no other status).
+   */
+  keepReview: boolean;
   skipUntil: Date | null;
 }
 
@@ -24,19 +30,19 @@ export type CardIntent =
   | { status: "seen"; rating: unknown; review?: unknown };
 
 /** The full column set for a card action, or a typed error for a bad rating or review. */
-export function columnsFor(intent: CardIntent, now: Date): LibraryResult<StatusColumns> {
+export function columnsFor(intent: CardIntent, now: Date): Result<StatusColumns> {
   switch (intent.status) {
     case "watchlist":
     case "passed":
-      return ok({ status: intent.status, rating: null, review: null, skipUntil: null });
+      return ok({ status: intent.status, rating: null, review: null, keepReview: false, skipUntil: null });
     case "skipped":
-      return ok({ status: "skipped", rating: null, review: null, skipUntil: skipUntilFrom(now) });
+      return ok({ status: "skipped", rating: null, review: null, keepReview: false, skipUntil: skipUntilFrom(now) });
     case "seen": {
       const rating = validateRating(intent.rating);
       if (!rating.ok) return rating;
       const review = validateReview(intent.review);
       if (!review.ok) return review;
-      return ok({ status: "seen", rating: rating.value, review: review.value, skipUntil: null });
+      return ok({ status: "seen", rating: rating.value, review: review.value, keepReview: intent.review === undefined, skipUntil: null });
     }
   }
 }
@@ -56,7 +62,7 @@ export function isAllowedMove(from: unknown, to: unknown): boolean {
 }
 
 /** The guard status and new columns for a list move. */
-export function planMove(move: MoveRequest): LibraryResult<{ from: TitleStatus; columns: StatusColumns }> {
+export function planMove(move: MoveRequest): Result<{ from: TitleStatus; columns: StatusColumns }> {
   if (typeof move !== "object" || move === null || !isAllowedMove(move.from, move.to)) {
     const from = (move as { from?: unknown } | null)?.from;
     const to = (move as { to?: unknown } | null)?.to;
@@ -68,9 +74,9 @@ export function planMove(move: MoveRequest): LibraryResult<{ from: TitleStatus; 
     if (!rating.ok) return rating;
     const review = validateReview(move.review);
     if (!review.ok) return review;
-    return ok({ from: move.from, columns: { status: "seen", rating: rating.value, review: review.value, skipUntil: null } });
+    return ok({ from: move.from, columns: { status: "seen", rating: rating.value, review: review.value, keepReview: false, skipUntil: null } });
   }
-  return ok({ from: move.from, columns: { status: "watchlist", rating: null, review: null, skipUntil: null } });
+  return ok({ from: move.from, columns: { status: "watchlist", rating: null, review: null, keepReview: false, skipUntil: null } });
 }
 
 /** The fields a rating and review edit sets. Absent fields stay as they are. */
@@ -79,7 +85,7 @@ export interface PatchColumns {
   review?: string | null;
 }
 
-export function planRatingReviewPatch(patch: unknown): LibraryResult<PatchColumns> {
+export function planRatingReviewPatch(patch: unknown): Result<PatchColumns> {
   if (typeof patch !== "object" || patch === null) return fail({ code: "empty_patch" });
   const p = patch as Record<string, unknown>;
   const out: PatchColumns = {};

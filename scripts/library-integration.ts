@@ -103,8 +103,7 @@ async function actThenUndo(
   assert.deepEqual(outcome.previous, before, "previous is the row as it was");
   assert.deepEqual(await state(A, ref), outcome.current, "current is the row as it is now");
   // The undo value crosses JSON, as it would through the API.
-  const previous = JSON.parse(JSON.stringify(outcome.previous));
-  const undo = unwrap(await lib.restoreTitleState(A, ref, previous));
+  const undo = unwrap(await lib.restoreTitleState(A, ref, JSON.parse(JSON.stringify(outcome))));
   assert.deepEqual(undo.previous, outcome.current, "undo reports the state it replaced");
   assert.deepEqual(await state(A, ref), before, "undo restores the row exactly, timestamps included");
   return outcome;
@@ -164,12 +163,32 @@ try {
     }
   });
 
-  await check("markSeen leaving out the review writes no review, even over an old one", async () => {
+  await check("markSeen leaving out the review keeps the old one; null or blank clears it; a new one replaces it", async () => {
     const ref = fresh();
     unwrap(await lib.markSeen(A, ref, { rating: 2, review: "Old." }, { now: tick() }));
-    const { current } = unwrap(await lib.markSeen(A, ref, { rating: 2.5 }, { now: tick() }));
+    const kept = await actThenUndo(ref, () => lib.markSeen(A, ref, { rating: 2.5 }, { now: tick() }));
+    assert.equal(kept.current?.review, "Old.");
+    assert.equal(kept.current?.rating, 2.5);
+    const replaced = await actThenUndo(ref, () => lib.markSeen(A, ref, { rating: 3, review: "New." }, { now: tick() }));
+    assert.equal(replaced.current?.review, "New.");
+    for (const review of [null, "", "   "]) {
+      const cleared = await actThenUndo(ref, () => lib.markSeen(A, ref, { rating: 3, review }, { now: tick() }));
+      assert.equal(cleared.current?.review, null, `review ${JSON.stringify(review)} clears`);
+    }
+  });
+
+  await check("markSeen with no review on a title that was not seen writes no review", async () => {
+    const ref = fresh();
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+    const { current } = unwrap(await lib.markSeen(A, ref, { rating: 4 }, { now: tick() }));
     assert.equal(current?.review, null);
-    assert.equal(current?.rating, 2.5);
+  });
+
+  await check("a review with a NUL character is invalid_review, not a database error", async () => {
+    const ref = fresh();
+    const r = await lib.markSeen(A, ref, { rating: 4, review: "bad\u0000byte" });
+    assert.equal(!r.ok && r.error.code, "invalid_review");
+    assert.equal(await rowCount(A, ref), 0);
   });
 
   console.log("Rating bounds");
@@ -323,20 +342,82 @@ try {
     const ref = fresh();
     unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
     const act = unwrap(await lib.passTitle(A, ref, { now: tick() }));
-    const undo = unwrap(await lib.restoreTitleState(A, ref, act.previous));
-    unwrap(await lib.restoreTitleState(A, ref, undo.previous));
+    const undo = unwrap(await lib.restoreTitleState(A, ref, act));
+    unwrap(await lib.restoreTitleState(A, ref, undo));
     assert.deepEqual(await state(A, ref), act.current);
+    // Redo of a remove's undo, too.
+    const removed = unwrap(await lib.removeTitle(A, ref));
+    const putBack = unwrap(await lib.restoreTitleState(A, ref, removed));
+    unwrap(await lib.restoreTitleState(A, ref, putBack));
+    assert.equal(await state(A, ref), null);
   });
 
   await check("restore refuses a state for another title and a malformed state, changing nothing", async () => {
     const ref = fresh();
     unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+    const act = unwrap(await lib.passTitle(A, ref, { now: tick() }));
     const before = await state(A, ref);
-    const other = { ...before!, tmdbId: ref.tmdbId + 1 };
+    const other = { previous: { ...act.previous!, tmdbId: ref.tmdbId + 1 }, current: act.current };
     assert.equal((await lib.restoreTitleState(A, ref, other)).ok, false);
-    const malformed = { ...before!, status: "seen" as const, rating: 9 };
+    const malformed = { previous: { ...act.previous!, status: "seen" as const, rating: 9 }, current: act.current };
     assert.equal((await lib.restoreTitleState(A, ref, malformed)).ok, false);
+    const noCurrent = { previous: act.previous } as never;
+    assert.equal((await lib.restoreTitleState(A, ref, noCurrent)).ok, false);
     assert.deepEqual(await state(A, ref), before);
+  });
+
+  console.log("Stale undo (compare-and-set)");
+
+  await check("a stale undo of a change refuses to overwrite a later edit", async () => {
+    const ref = fresh();
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+    const seen = unwrap(await lib.markSeen(A, ref, { rating: 4 }, { now: tick() })); // undo entry held on the phone
+    unwrap(await lib.updateRatingReview(A, ref, { rating: 5, review: "Rewatched." }, { now: tick() })); // elsewhere
+    const after = await state(A, ref);
+    const r = await lib.restoreTitleState(A, ref, JSON.parse(JSON.stringify(seen)));
+    assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "seen", expected: ["seen"] } });
+    assert.deepEqual(await state(A, ref), after, "the later rating and review survive");
+  });
+
+  await check("a stale undo of a first action refuses to delete a row edited since", async () => {
+    const ref = fresh();
+    const first = unwrap(await lib.markSeen(A, ref, { rating: 3 }, { now: tick() })); // previous: null
+    unwrap(await lib.updateRatingReview(A, ref, { review: "Added later." }, { now: tick() }));
+    const after = await state(A, ref);
+    const r = await lib.restoreTitleState(A, ref, first);
+    assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "seen", expected: ["seen"] } });
+    assert.deepEqual(await state(A, ref), after);
+  });
+
+  await check("a stale undo of a status change refuses a row that moved to another list", async () => {
+    const ref = fresh();
+    unwrap(await lib.passTitle(A, ref, { now: tick() }));
+    const toWatchlist = unwrap(await lib.moveTitle(A, ref, { from: "passed", to: "watchlist" }, { now: tick() }));
+    unwrap(await lib.skipTitle(A, ref, { now: tick() }));
+    const after = await state(A, ref);
+    const r = await lib.restoreTitleState(A, ref, toWatchlist);
+    assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "skipped", expected: ["watchlist"] } });
+    assert.deepEqual(await state(A, ref), after);
+  });
+
+  await check("a stale undo of a remove refuses to overwrite a row added back since", async () => {
+    const ref = fresh();
+    unwrap(await lib.markSeen(A, ref, { rating: 2, review: "Meh." }, { now: tick() }));
+    const removed = unwrap(await lib.removeTitle(A, ref));
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+    const after = await state(A, ref);
+    const r = await lib.restoreTitleState(A, ref, removed);
+    assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "watchlist", expected: [] } });
+    assert.deepEqual(await state(A, ref), after);
+  });
+
+  await check("a stale undo whose row was removed since returns not_found and creates nothing", async () => {
+    const ref = fresh();
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+    const passed = unwrap(await lib.passTitle(A, ref, { now: tick() }));
+    unwrap(await lib.removeTitle(A, ref));
+    assert.deepEqual(await lib.restoreTitleState(A, ref, passed), { ok: false, error: { code: "not_found" } });
+    assert.equal(await rowCount(A, ref), 0);
   });
 
   console.log("Queries");
@@ -460,6 +541,35 @@ try {
     assert.equal(!r1.ok && r1.error.code, "invalid_title");
     const r2 = await lib.passTitle("", fresh());
     assert.equal(!r2.ok && r2.error.code, "invalid_user");
+    const r3 = await lib.passTitle(A, { mediaType: "movie", tmdbId: 3_000_000_000 });
+    assert.equal(!r3.ok && r3.error.code, "invalid_title");
+    const r4 = await lib.getTitleState(A, { mediaType: "tv", tmdbId: 2_147_483_648 });
+    assert.equal(!r4.ok && r4.error.code, "invalid_title");
+  });
+
+  await check("malformed list options and filters are invalid_list_query, not a throw", async () => {
+    const bad: unknown[] = [
+      "not an object",
+      { filters: "x" },
+      { filters: { mediaTypes: "movie" } },
+      { filters: { genreIds: ["18"] } },
+      { filters: { era: 2020 } },
+      { filters: { era: { fromYear: "2020" } } },
+      { filters: { onMyServices: "yes" } },
+      { lookupDetails: "not a function" },
+    ];
+    for (const options of bad) {
+      const r = await lib.getList(A, "watchlist", options as never);
+      assert.equal(!r.ok && r.error.code, "invalid_list_query", JSON.stringify(options));
+    }
+    assert.equal((await lib.getList(A, "watchlist", null)).ok, true);
+  });
+
+  await check("a country that only becomes two ASCII letters when uppercased is invalid_settings", async () => {
+    for (const country of ["ß", "ıt"]) {
+      const r = await lib.updateUserSettings(A, { country });
+      assert.equal(!r.ok && r.error.code, "invalid_settings", country);
+    }
   });
 } finally {
   await db.delete(users).where(inArray(users.id, [A, B]));

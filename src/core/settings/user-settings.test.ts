@@ -6,7 +6,8 @@ describe("validateSettingsPatch", () => {
     expect(validateSettingsPatch({ country: " gb " })).toEqual({ ok: true, value: { country: "GB" } });
   });
 
-  test.each(["USA", "U", "1A", "", 5])("rejects country %p", (country) => {
+  // "ß" and "ıt" become two ASCII letters only after uppercasing ("SS", "IT").
+  test.each(["USA", "U", "1A", "", 5, "ß", "ıt", "é1"])("rejects country %p", (country) => {
     expect(validateSettingsPatch({ country })).toMatchObject({ ok: false, error: { code: "invalid_settings" } });
   });
 

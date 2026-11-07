@@ -9,7 +9,7 @@
 import { matchesFilters } from "../deck/build-deck";
 import { formatTitleKey } from "../title-id";
 import { LIST_STATUSES, type Candidate, type DeckFilters, type ListStatus } from "../types";
-import { fail, ok, type LibraryResult } from "./errors";
+import { fail, ok, type Result } from "../result";
 import {
   DEFAULT_LIST_LIMIT,
   DEFAULT_LIST_SORT,
@@ -37,11 +37,59 @@ export interface CursorKey {
 
 const bad = (message: string) => fail<never>({ code: "invalid_list_query", message });
 
-export function parseListQuery(status: unknown, options: ListOptions = {}): LibraryResult<ParsedListQuery> {
+const isWholeNumber = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v);
+
+/**
+ * Checks filters field by field and returns a clean copy. Filters can arrive
+ * as JSON from the API or an MCP call, so a wrong shape (a string where an
+ * array belongs, say) must be a typed error, not a TypeError or a substring
+ * match inside matchesFilters.
+ */
+export function parseFilters(input: unknown): Result<DeckFilters> {
+  if (input === undefined || input === null) return ok({});
+  if (typeof input !== "object" || Array.isArray(input)) return bad("filters must be an object");
+  const f = input as Record<string, unknown>;
+  const out: DeckFilters = {};
+
+  if (f.mediaTypes !== undefined) {
+    if (!Array.isArray(f.mediaTypes) || !f.mediaTypes.every((m) => m === "movie" || m === "tv")) {
+      return bad('filters.mediaTypes must be an array of "movie" and "tv"');
+    }
+    out.mediaTypes = [...(f.mediaTypes as ("movie" | "tv")[])];
+  }
+  if (f.genreIds !== undefined) {
+    if (!Array.isArray(f.genreIds) || !f.genreIds.every((g) => isWholeNumber(g) && g > 0)) {
+      return bad("filters.genreIds must be an array of positive whole numbers");
+    }
+    out.genreIds = [...(f.genreIds as number[])];
+  }
+  if (f.era !== undefined && f.era !== null) {
+    if (typeof f.era !== "object" || Array.isArray(f.era)) return bad("filters.era must be an object");
+    const { fromYear, toYear } = f.era as Record<string, unknown>;
+    for (const [name, year] of [["fromYear", fromYear], ["toYear", toYear]] as const) {
+      if (year !== undefined && year !== null && !isWholeNumber(year)) return bad(`filters.era.${name} must be a whole number or null`);
+    }
+    out.era = { fromYear: (fromYear as number | null | undefined) ?? null, toYear: (toYear as number | null | undefined) ?? null };
+  }
+  if (f.onMyServices !== undefined) {
+    if (typeof f.onMyServices !== "boolean") return bad("filters.onMyServices must be true or false");
+    out.onMyServices = f.onMyServices;
+  }
+  return ok(out);
+}
+
+export function parseListQuery(status: unknown, rawOptions: ListOptions | null = {}): Result<ParsedListQuery> {
   if (!(LIST_STATUSES as readonly unknown[]).includes(status)) {
     return bad(`status must be one of ${LIST_STATUSES.join(", ")}`);
   }
   const listStatus = status as ListStatus;
+  if (rawOptions !== null && (typeof rawOptions !== "object" || Array.isArray(rawOptions))) {
+    return bad("options must be an object");
+  }
+  const options: ListOptions = rawOptions ?? {};
+  if (options.lookupDetails !== undefined && typeof options.lookupDetails !== "function") {
+    return bad("lookupDetails must be a function");
+  }
 
   const sort = options.sort ?? DEFAULT_LIST_SORT;
   if (!(LIST_SORTS as readonly unknown[]).includes(sort)) return bad(`unknown sort ${JSON.stringify(sort)}`);
@@ -59,10 +107,10 @@ export function parseListQuery(status: unknown, options: ListOptions = {}): Libr
     if (cursor.sort !== sort) return bad("cursor belongs to a different sort");
   }
 
-  const filters = options.filters ?? {};
-  if (typeof filters !== "object" || filters === null) return bad("filters must be an object");
+  const filters = parseFilters(options.filters);
+  if (!filters.ok) return filters;
 
-  return ok({ status: listStatus, filters, sort, cursor, limit });
+  return ok({ status: listStatus, filters: filters.value, sort, cursor, limit });
 }
 
 /** True when a filter needs TMDB metadata. Media type alone does not: the row has it. */

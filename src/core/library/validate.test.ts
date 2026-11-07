@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { REVIEW_MAX_LENGTH, type TitleRecord } from "./types";
-import { isValidRating, parseTitleRecord, validateRating, validateReview, validateTitleRef, validateUserId } from "./validate";
+import { validateUserId } from "../result";
+import { isValidRating, parseTitleRecord, validateRating, validateReview, validateTitleRef } from "./validate";
 
 describe("rating bounds: 0.5 to 5 in half steps", () => {
   test("accepts every half step from 0.5 to 5", () => {
@@ -38,6 +39,10 @@ describe("validateReview", () => {
   test("rejects a non-string", () => {
     expect(validateReview(5)).toMatchObject({ ok: false, error: { code: "invalid_review" } });
   });
+
+  test("rejects a NUL character, which Postgres text cannot store", () => {
+    expect(validateReview("bad\u0000byte")).toMatchObject({ ok: false, error: { code: "invalid_review" } });
+  });
 });
 
 describe("validateUserId and validateTitleRef", () => {
@@ -59,6 +64,8 @@ describe("validateUserId and validateTitleRef", () => {
     { mediaType: "movie", tmdbId: 1.5 },
     { mediaType: "movie", tmdbId: "603" },
     { mediaType: "movie", tmdbId: Number.MAX_SAFE_INTEGER + 1 },
+    { mediaType: "movie", tmdbId: 2_147_483_648 },
+    { mediaType: "tv", tmdbId: 3_000_000_000 },
   ])("rejects %p", (ref) => {
     expect(validateTitleRef(ref)).toMatchObject({ ok: false, error: { code: "invalid_title" } });
   });

@@ -41,13 +41,19 @@ export type TitleRecordInput = Omit<TitleRecord, "skipUntil" | "createdAt" | "up
 
 /**
  * What every action returns. `previous` is the row before the action, or null
- * when there was none. Passing it to restoreTitleState undoes the action
- * (VISION invariant 2). `current` is the row after, or null when the action
- * removed it.
+ * when there was none. `current` is the row after, or null when the action
+ * removed it. Passing the whole outcome to restoreTitleState undoes the action
+ * (VISION invariant 2), as long as the row is still `current`.
  */
 export interface ActionOutcome {
   previous: TitleRecord | null;
   current: TitleRecord | null;
+}
+
+/** An ActionOutcome after a trip through JSON, as restoreTitleState accepts it. */
+export interface UndoInput {
+  previous: TitleRecord | TitleRecordInput | null;
+  current: TitleRecord | TitleRecordInput | null;
 }
 
 /** Options every write takes. `now` exists so tests can fix the clock. */
@@ -110,17 +116,4 @@ export interface ListPage {
   entries: ListEntry[];
   /** Pass back as `cursor` for the next page. Null on the last page. */
   nextCursor: string | null;
-}
-
-export interface UserSettings {
-  /** ISO 3166-1 alpha-2, uppercase. */
-  country: string;
-  /** TMDB watch provider IDs. */
-  providerIds: number[];
-  updatedAt: Date;
-}
-
-export interface UserSettingsPatch {
-  country?: string;
-  providerIds?: number[];
 }

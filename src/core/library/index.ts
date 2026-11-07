@@ -12,8 +12,14 @@ export {
   watchlistTitle,
 } from "./actions";
 export { getList, getRatedCount, getTitleState, getUserTitleStates } from "./queries";
-export { getUserSettings, updateUserSettings, validateSettingsPatch } from "../settings/user-settings";
-export type { LibraryError, LibraryResult } from "./errors";
+export {
+  getUserSettings,
+  updateUserSettings,
+  validateSettingsPatch,
+  type UserSettings,
+  type UserSettingsPatch,
+} from "../settings/user-settings";
+export type { CoreError, Result } from "../result";
 export { isValidRating, validateRating, validateReview } from "./validate";
 export { ALLOWED_MOVES, isAllowedMove } from "./transitions";
 export * from "./types";

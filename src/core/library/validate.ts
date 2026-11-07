@@ -3,8 +3,9 @@
 // caller can show, instead of a constraint violation.
 
 import { TITLE_STATUSES } from "@/db/schema";
-import type { TitleId, TitleStatus } from "../types";
-import { fail, ok, type LibraryResult } from "./errors";
+import { fail, ok, type Result } from "../result";
+import { titleIdError, type TitleId } from "../title-id";
+import type { TitleStatus } from "../types";
 import { RATING_MAX, RATING_MIN, REVIEW_MAX_LENGTH, type TitleRecord } from "./types";
 
 /** True for 0.5 to 5 in half steps, the scale title_status_rating_scale_check enforces. */
@@ -18,8 +19,16 @@ export function isValidRating(rating: unknown): rating is number {
   );
 }
 
-export function validateRating(rating: unknown): LibraryResult<number> {
+export function validateRating(rating: unknown): Result<number> {
   return isValidRating(rating) ? ok(rating) : fail({ code: "invalid_rating", rating });
+}
+
+/** Why review text cannot be stored, or null when it can. */
+function reviewTextError(review: string): string | null {
+  if (review.length > REVIEW_MAX_LENGTH) return `review is longer than ${REVIEW_MAX_LENGTH} characters`;
+  // Postgres text cannot hold a NUL character, so the write would fail.
+  if (review.includes("\u0000")) return "review contains a NUL character";
+  return null;
 }
 
 /**
@@ -27,30 +36,19 @@ export function validateRating(rating: unknown): LibraryResult<number> {
  * empty or only whitespace also becomes null, so a cleared text box never
  * leaves a blank review behind. Any other text is kept exactly as written.
  */
-export function validateReview(review: unknown): LibraryResult<string | null> {
+export function validateReview(review: unknown): Result<string | null> {
   if (review === undefined || review === null) return ok(null);
   if (typeof review !== "string") return fail({ code: "invalid_review", message: "review must be a string or null" });
   if (review.trim() === "") return ok(null);
-  if (review.length > REVIEW_MAX_LENGTH) {
-    return fail({ code: "invalid_review", message: `review is longer than ${REVIEW_MAX_LENGTH} characters` });
-  }
-  return ok(review);
+  const error = reviewTextError(review);
+  return error ? fail({ code: "invalid_review", message: error }) : ok(review);
 }
 
-export function validateUserId(userId: unknown): LibraryResult<string> {
-  return typeof userId === "string" && userId.length > 0 ? ok(userId) : fail({ code: "invalid_user" });
-}
-
-/** The same rules as formatTitleKey, returned as a typed error instead of thrown. */
-export function validateTitleRef(ref: unknown): LibraryResult<TitleId> {
-  if (typeof ref !== "object" || ref === null) return fail({ code: "invalid_title", message: "title must be an object" });
-  const { mediaType, tmdbId } = ref as Record<string, unknown>;
-  if (mediaType !== "movie" && mediaType !== "tv") {
-    return fail({ code: "invalid_title", message: `invalid media type ${JSON.stringify(mediaType)}` });
-  }
-  if (typeof tmdbId !== "number" || !Number.isSafeInteger(tmdbId) || tmdbId <= 0) {
-    return fail({ code: "invalid_title", message: `invalid TMDB ID ${JSON.stringify(tmdbId)}` });
-  }
+/** titleIdError's rules (the one statement of them), returned as a typed error instead of thrown. */
+export function validateTitleRef(ref: unknown): Result<TitleId> {
+  const error = titleIdError(ref);
+  if (error) return fail({ code: "invalid_title", message: error });
+  const { mediaType, tmdbId } = ref as TitleId;
   // A fresh object, so nothing else the caller passed rides along into SQL.
   return ok({ mediaType, tmdbId });
 }
@@ -67,7 +65,7 @@ function toDate(value: unknown): Date | null {
  * the table's CHECK constraints hold. Fields other than the record's own
  * (a user id, say) are ignored: the caller's user id always wins.
  */
-export function parseTitleRecord(input: unknown, ref: TitleId): LibraryResult<TitleRecord> {
+export function parseTitleRecord(input: unknown, ref: TitleId): Result<TitleRecord> {
   const bad = (message: string) => fail<TitleRecord>({ code: "invalid_snapshot", message });
   if (typeof input !== "object" || input === null) return bad("state must be an object or null");
   const r = input as Record<string, unknown>;
@@ -87,7 +85,7 @@ export function parseTitleRecord(input: unknown, ref: TitleId): LibraryResult<Ti
   let review: string | null = null;
   if (r.review !== null && r.review !== undefined) {
     if (status !== "seen") return bad("only a seen state carries a review");
-    if (typeof r.review !== "string" || r.review.length > REVIEW_MAX_LENGTH) return bad("invalid review");
+    if (typeof r.review !== "string" || reviewTextError(r.review)) return bad("invalid review");
     review = r.review; // Exactly as stored: undo restores, it does not normalize.
   }
 
