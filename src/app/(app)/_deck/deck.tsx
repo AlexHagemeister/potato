@@ -7,8 +7,12 @@ import type { SortKind } from "./actions";
 import { CardView } from "./card-view";
 import { DeckButtons } from "./deck-buttons";
 import { RatingSheet } from "../_components/rating-sheet";
+import { FilterControl } from "../_components/filter-control";
+import { ModePicker } from "./mode-picker";
 import type { DeckPageCard } from "@/core/deck-service/types";
+import { DEFAULT_FILTER_CHOICE, describeFilterChoice, isDefaultFilterChoice } from "@/core/filters";
 import {
+  chooseDeck,
   dismissNotice,
   markCardSeen,
   retry,
@@ -54,7 +58,41 @@ function PillButton({ onClick, children }: { onClick: () => void; children: Reac
   );
 }
 
-function Body({ view }: { view: Exclude<DeckView, { kind: "card" }> }) {
+/** What the deck's filters mean for an empty deck: none on, some on, or "on my services" with no services picked. */
+type FilterNote = "none" | "filtered" | "no_services";
+
+function ClearFilters({ onClear }: { onClear: () => void }) {
+  return (
+    <button type="button" onClick={onClear} className="mt-3 block w-full text-sm font-semibold text-accent">
+      Clear filters
+    </button>
+  );
+}
+
+function Body({ view, filters, onClearFilters }: { view: Exclude<DeckView, { kind: "card" }>; filters: FilterNote; onClearFilters: () => void }) {
+  if (filters === "no_services" && (view.kind === "done" || view.kind === "stalled")) {
+    return (
+      <EmptyState
+        title="Pick your services first"
+        action={
+          <Link href="/profile" className="inline-block rounded-full bg-surface-raised px-6 py-3 font-medium">
+            Go to Profile
+          </Link>
+        }
+      >
+        &ldquo;On my services&rdquo; shows titles on the streaming services you use. You haven&apos;t picked any yet.
+        <ClearFilters onClear={onClearFilters} />
+      </EmptyState>
+    );
+  }
+  if (filters === "filtered" && view.kind === "done") {
+    return (
+      <EmptyState title="Nothing more matches your filters" action={<PillButton onClick={startOver}>Check again</PillButton>}>
+        That&apos;s every title that fits for now. Try fewer filters.
+        <ClearFilters onClear={onClearFilters} />
+      </EmptyState>
+    );
+  }
   switch (view.kind) {
     case "loading":
       return <CardSkeleton />;
@@ -133,12 +171,21 @@ function Toasts({ toast, notice }: { toast: Toast | null; notice: Notice | null 
 /**
  * Discover: the deck, one card at a time, with the four buttons above the tab
  * bar. `settingsKey` names the user's country and services: when it changes,
- * the queued cards are refetched with the new streaming data.
+ * the queued cards are refetched with the new streaming data. The header
+ * holds the mode picker and the filters, and a change to either refetches the
+ * queue the same way (the store's chooseDeck). `hasServices` says whether the
+ * user picked any streaming services, which "On my services" needs.
  */
-export function Deck({ userId, settingsKey }: { userId: string; settingsKey: string }) {
+export function Deck({ userId, settingsKey, hasServices }: { userId: string; settingsKey: string; hasServices: boolean }) {
   const state = useDeck();
   const view = viewOf(state);
   const card = view.kind === "card" ? view.card : null;
+  const { choice } = state;
+  const applied = describeFilterChoice(choice.filters);
+  const filterNote: FilterNote =
+    choice.filters.onMyServices && !hasServices ? "no_services" : isDefaultFilterChoice(choice.filters) ? "none" : "filtered";
+  // The store loads this user's saved choice when the deck starts. Until then the controls stay hidden, so they never flash the default.
+  const ready = state.userId === userId;
   // The card the Seen it sheet is open for. The sheet keeps it even if a
   // failed Pass puts another card on top meanwhile. The sheet covers the
   // screen, so nothing else can be sorted while it is open.
@@ -162,12 +209,33 @@ export function Deck({ userId, settingsKey }: { userId: string; settingsKey: str
   return (
     <Screen actions={<DeckButtons disabled={!card || seenCard !== null || state.undoing} onTap={onTap} />}>
       <div ref={top} />
-      {/* The filter and mode controls go in this row (the next slice). The deck is the blend until then. */}
-      <div data-slot="deck-controls" className="mb-3 flex h-8 items-center justify-between">
+      <div data-slot="deck-controls" className="mb-3 flex h-11 items-center justify-between gap-2">
         <h1 className="text-lg font-semibold">Discover</h1>
+        <div className={`flex items-center gap-2 ${ready ? "" : "invisible"}`}>
+          <ModePicker value={choice.mode} onChange={(mode) => chooseDeck({ ...choice, mode })} />
+          <FilterControl
+            compact
+            value={choice.filters}
+            onChange={(filters) => chooseDeck({ ...choice, filters })}
+            hasServices={hasServices}
+          />
+        </div>
       </div>
+      {ready && applied.length > 0 && (
+        <p data-slot="deck-filter-summary" className="-mt-1 mb-3 truncate text-sm text-muted">
+          {applied.join(" · ")}
+        </p>
+      )}
 
-      {card ? <CardView key={titleKey(card)} card={card} /> : <Body view={view as Exclude<DeckView, { kind: "card" }>} />}
+      {card ? (
+        <CardView key={titleKey(card)} card={card} />
+      ) : (
+        <Body
+          view={view as Exclude<DeckView, { kind: "card" }>}
+          filters={filterNote}
+          onClearFilters={() => chooseDeck({ ...choice, filters: { ...DEFAULT_FILTER_CHOICE, genres: [] } })}
+        />
+      )}
 
       {seenCard && (
         <RatingSheet

@@ -24,6 +24,8 @@ export interface FilterControlProps {
   hasServices: boolean;
   /** Dims the button while the new filters load. */
   busy?: boolean;
+  /** The button alone, for a header row (Discover). The screen shows what is applied itself. */
+  compact?: boolean;
 }
 
 /** Same filters, whatever order the genres were tapped in. */
@@ -37,7 +39,7 @@ export function sameFilters(a: FilterChoice, b: FilterChoice): boolean {
  * sheet to change it. The sheet edits a draft and applies it once, on Done,
  * so the deck or the lists reload once per change, not once per tap.
  */
-export function FilterControl({ value, onChange, hasServices, busy = false }: FilterControlProps) {
+export function FilterControl({ value, onChange, hasServices, busy = false, compact = false }: FilterControlProps) {
   const [draft, setDraft] = useState<FilterChoice | null>(null);
   const applied = describeFilterChoice(value);
 
@@ -47,7 +49,7 @@ export function FilterControl({ value, onChange, hasServices, busy = false }: Fi
   }
 
   return (
-    <div data-slot="filters" className="mb-3 flex min-h-11 items-center gap-2">
+    <div data-slot="filters" className={compact ? "flex shrink-0 items-center" : "mb-3 flex min-h-11 items-center gap-2"}>
       <button
         type="button"
         onClick={() => setDraft(normalizeFilterChoice(value))}
@@ -65,7 +67,7 @@ export function FilterControl({ value, onChange, hasServices, busy = false }: Fi
           </span>
         )}
       </button>
-      {applied.length > 0 && (
+      {applied.length > 0 && !compact && (
         <p className="min-w-0 truncate text-sm text-muted" aria-hidden="true">
           {applied.join(" · ")}
         </p>

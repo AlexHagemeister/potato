@@ -16,5 +16,5 @@ export default async function DiscoverPage() {
   const settings = await getUserSettings(user.id);
   // unknown_user: the session outlived the user row.
   if (!settings.ok) return <SignedOutScreen />;
-  return <Deck userId={user.id} settingsKey={deckSettingsKey(settings.value)} />;
+  return <Deck userId={user.id} settingsKey={deckSettingsKey(settings.value)} hasServices={settings.value.providerIds.length > 0} />;
 }
