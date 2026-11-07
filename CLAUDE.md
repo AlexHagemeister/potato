@@ -74,6 +74,7 @@ State lives in GitHub. Do not create status, progress, or tracking files in the 
 ## Environment notes
 
 - **This repo is public.** Nothing personal goes into code, commits, PRs, or issues.
+- **Agents post through Alex's GitHub account, so every agent-written comment, issue, and PR body opens with "Agent:".** Only comments without that marker are Alex's rulings.
 - **Alex's exocortex vault** (`~/exocortex`, also reachable through its MCP) holds his preferences and context. Read it when useful. Never write to it from this project, and never copy personal details from it into this repo.
 - **The permission classifier.** Claude Code's auto-mode classifier sometimes denies or stalls routine commands. Run file moves (`mv`, `git mv`) as standalone commands, never chained with `&&` or `;`. When a command is denied or hangs, split it and retry once before treating it as a bug.
 
