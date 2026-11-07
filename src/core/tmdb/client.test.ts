@@ -3,7 +3,7 @@ import { MemoryCacheStore, type CacheStore } from "../cache/cache-store";
 import type { Candidate } from "../types";
 import { createTmdbClient } from "./client";
 import { TMDB_MAX_BACKOFF_MS, TMDB_TTL_MS } from "./constants";
-import { retryDelayMs, TmdbError } from "./http";
+import { isPermanentTmdbFailure, retryDelayMs, TmdbError } from "./http";
 import { posterUrl, logoUrl } from "./images";
 import { breakingBadDetails, json, matrixDetails, notFound, scriptedFetch, status } from "./test-fixtures";
 
@@ -151,6 +151,13 @@ describe("getTitleDetails", () => {
 });
 
 describe("HTTP 429 and errors", () => {
+  test("only a 4xx about the request itself is a permanent failure", () => {
+    const at = (code: number) => isPermanentTmdbFailure(new TmdbError("x", code, "/p"));
+    expect([400, 422].map(at)).toEqual([true, true]);
+    expect([0, 401, 403, 408, 429, 500, 503].map(at)).toEqual([false, false, false, false, false, false, false]);
+    expect(isPermanentTmdbFailure(new Error("x"))).toBe(false);
+  });
+
   test("honors Retry-After, then succeeds", async () => {
     const { client, calls, sleeps } = setup({
       "/movie/603": [status(429, { "retry-after": "2" }), json(matrixDetails)],

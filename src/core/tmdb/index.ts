@@ -3,5 +3,5 @@
 export * from "./client";
 export * from "./images";
 export * from "./types";
-export { TmdbError } from "./http";
+export { isPermanentTmdbFailure, TmdbError } from "./http";
 export { pickTrailer, type DetailsCore } from "./normalize";

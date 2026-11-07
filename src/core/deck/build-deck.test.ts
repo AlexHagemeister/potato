@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { TITLE_STATUSES, type titleStatus } from "../../db/schema";
 import { LIST_STATUSES, type Candidate, type PoolName, type UserTitleState } from "../types";
-import { buildDeck, createFilterMatcher, interleave, matchesFilters, type DeckInput, type DeckResult } from "./build-deck";
+import { buildDeck, createFilterMatcher, createVisibilityCheck, interleave, matchesFilters, type DeckInput, type DeckResult } from "./build-deck";
 import {
   BLEND_WEIGHTS,
   DEEP_CUTS_MIN_SCORE,
@@ -729,5 +729,22 @@ describe("hardening: bad input fails closed or throws (issue 20)", () => {
     // The set is a snapshot taken when the matcher was built, not rebuilt per call.
     providerIds.push(9);
     expect(titles.map(matches)).toEqual([true, false, false]);
+  });
+});
+
+describe("createVisibilityCheck (shared with the deck service)", () => {
+  test("hides exactly what buildDeck hides", () => {
+    const states: UserTitleState[] = [
+      { mediaType: "movie", tmdbId: 1, status: "watchlist" },
+      { mediaType: "movie", tmdbId: 2, status: "skipped", skipUntil: new Date(NOW.getTime() + 1) },
+      { mediaType: "movie", tmdbId: 3, status: "skipped", skipUntil: NOW },
+      { mediaType: "movie", tmdbId: 4, status: "skipped", skipUntil: "not a date" },
+    ];
+    const visible = createVisibilityCheck(states, NOW);
+    const titles = [1, 2, 3, 4, 5].map((id) => cand(id)).concat([cand(1, { mediaType: "tv" })]);
+    expect(titles.filter(visible).map((c) => `${c.mediaType}:${c.tmdbId}`)).toEqual(
+      keys({ pools: { popular: titles }, states }),
+    );
+    expect(visible({ mediaType: "person", tmdbId: 9 })).toBe(false);
   });
 });

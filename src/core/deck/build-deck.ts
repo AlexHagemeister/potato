@@ -83,17 +83,7 @@ export function buildDeck(input: DeckInput): DeckResult {
     throw new RangeError(`buildDeck: ratedCount must be a whole number, 0 or more, got ${String(ratedCount)}`);
   }
 
-  const forYouUnlocked = ratedCount >= FOR_YOU_MIN_RATINGS;
-
-  if (input.mode === "for_you" && !forYouUnlocked) {
-    return {
-      kind: "locked",
-      mode: "for_you",
-      ratedCount,
-      required: FOR_YOU_MIN_RATINGS,
-      remaining: FOR_YOU_MIN_RATINGS - ratedCount,
-    };
-  }
+  if (input.mode === "for_you" && !isForYouUnlocked(ratedCount)) return forYouLock(ratedCount);
 
   const hidden = hiddenKeys(input.states, input.now);
   const passes = createFilterMatcher(input.filters, input.userProviderIds);
@@ -109,16 +99,59 @@ export function buildDeck(input: DeckInput): DeckResult {
     return orderPool(pool, entries);
   };
 
-  const pools: PoolName[] =
-    input.mode === "blend"
-      ? // `!== 0`, not `> 0`, so a negative or NaN weight reaches interleave's check and throws.
-        BLEND_ORDER.filter((pool) => BLEND_WEIGHTS[pool] !== 0 && (pool !== "for_you" || forYouUnlocked))
-      : [input.mode];
-  const weights = input.mode === "blend" ? pools.map((pool) => BLEND_WEIGHTS[pool]) : [1];
-
+  const active = activePools(input.mode, ratedCount);
   return {
     kind: "cards",
-    cards: interleave(pools.map(ordered), weights, (e) => e.key).map((e) => e.card),
+    cards: interleave(
+      active.map(({ pool }) => ordered(pool)),
+      active.map(({ weight }) => weight),
+      (e) => e.key,
+    ).map((e) => e.card),
+  };
+}
+
+/** A pool the deck deals from, with its turns per round. */
+export interface ActivePool {
+  pool: PoolName;
+  weight: number;
+}
+
+/**
+ * The pools a deck in this mode deals from, in turn order, each with its
+ * weight. A single mode is its own pool with weight 1 (a locked "for you"
+ * never gets this far in buildDeck). The blend takes BLEND_ORDER, leaves out
+ * zero-weight pools, and adds "for you" once the user has rated enough. The
+ * deck service fetches exactly these pools, so the rule lives here once.
+ */
+export function activePools(mode: DiscoveryMode, ratedCount: number): ActivePool[] {
+  if (mode !== "blend") return [{ pool: mode, weight: 1 }];
+  const forYouUnlocked = isForYouUnlocked(ratedCount);
+  return (
+    BLEND_ORDER
+      // `!== 0`, not `> 0`, so a negative or NaN weight reaches interleave's check and throws.
+      .filter((pool) => BLEND_WEIGHTS[pool] !== 0 && (pool !== "for_you" || forYouUnlocked))
+      .map((pool) => ({ pool, weight: BLEND_WEIGHTS[pool] }))
+  );
+}
+
+/** True when "for you" is unlocked for a user with this many ratings. */
+export function isForYouUnlocked(ratedCount: number): boolean {
+  return ratedCount >= FOR_YOU_MIN_RATINGS;
+}
+
+/** True when a deck in this mode deals from "for you" once it is unlocked: its own mode, or the blend unless its weight is 0. */
+export function dealsForYou(mode: DiscoveryMode): boolean {
+  return mode === "for_you" || (mode === "blend" && BLEND_WEIGHTS.for_you !== 0);
+}
+
+/** The "for you" lock for a user with this many ratings, as buildDeck returns it. */
+export function forYouLock(ratedCount: number): Extract<DeckResult, { kind: "locked" }> {
+  return {
+    kind: "locked",
+    mode: "for_you",
+    ratedCount,
+    required: FOR_YOU_MIN_RATINGS,
+    remaining: Math.max(0, FOR_YOU_MIN_RATINGS - ratedCount),
   };
 }
 
@@ -139,6 +172,23 @@ export function createFilterMatcher(filters: DeckFilters, userProviderIds: reado
 /** Whether one title passes the filters. To check many titles, build one matcher with createFilterMatcher. */
 export function matchesFilters(c: Candidate, filters: DeckFilters, userProviderIds: readonly number[]): boolean {
   return createFilterMatcher(filters, userProviderIds)(c);
+}
+
+/** Whether the deck may show a title now. */
+export type VisibilityCheck = (id: unknown) => boolean;
+
+/**
+ * The deck's hiding rule, built once for many titles: a title is visible
+ * unless it is on a list or skipped until later. buildDeck applies the same
+ * rule. The deck service uses it to drop hidden titles before it spends TMDB
+ * calls on their details. A malformed identity is never visible.
+ */
+export function createVisibilityCheck(states: readonly UserTitleState[], now: Date): VisibilityCheck {
+  const hidden = hiddenKeys(states, now);
+  return (id) => {
+    const key = tryFormatTitleKey(id);
+    return key !== null && !hidden.has(key);
+  };
 }
 
 /**
