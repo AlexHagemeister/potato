@@ -9,10 +9,16 @@
     "typecheck": "next typegen && tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint",
     "test": "bun test --no-env-file",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "bun --no-env-file scripts/migrate.ts dev",
+    "db:migrate:prod": "bun --no-env-file scripts/migrate.ts prod",
     "tmdb:smoke": "bun run scripts/tmdb-smoke.ts",
     "imdb:load:dev": "bun --no-env-file --env-file=.env.development.local scripts/load-imdb-ratings.ts"
   },
   "dependencies": {
+    "@neondatabase/serverless": "1.2.0",
+    "better-auth": "1.7.18",
+    "drizzle-orm": "0.45.4",
     "next": "16.4.5",
     "react": "19.3.0",
     "react-dom": "19.3.0"
@@ -23,6 +29,7 @@
     "@types/node": "^24",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "drizzle-kit": "0.31.11",
     "eslint": "^9",
     "eslint-config-next": "16.4.5",
     "tailwindcss": "^4",
