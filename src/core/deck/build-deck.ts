@@ -83,15 +83,7 @@ export function buildDeck(input: DeckInput): DeckResult {
     throw new RangeError(`buildDeck: ratedCount must be a whole number, 0 or more, got ${String(ratedCount)}`);
   }
 
-  if (input.mode === "for_you" && !isForYouUnlocked(ratedCount)) {
-    return {
-      kind: "locked",
-      mode: "for_you",
-      ratedCount,
-      required: FOR_YOU_MIN_RATINGS,
-      remaining: FOR_YOU_MIN_RATINGS - ratedCount,
-    };
-  }
+  if (input.mode === "for_you" && !isForYouUnlocked(ratedCount)) return forYouLock(ratedCount);
 
   const hidden = hiddenKeys(input.states, input.now);
   const passes = createFilterMatcher(input.filters, input.userProviderIds);
@@ -145,6 +137,22 @@ export function activePools(mode: DiscoveryMode, ratedCount: number): ActivePool
 /** True when "for you" is unlocked for a user with this many ratings. */
 export function isForYouUnlocked(ratedCount: number): boolean {
   return ratedCount >= FOR_YOU_MIN_RATINGS;
+}
+
+/** True when a deck in this mode deals from "for you" once it is unlocked: its own mode, or the blend unless its weight is 0. */
+export function dealsForYou(mode: DiscoveryMode): boolean {
+  return mode === "for_you" || (mode === "blend" && BLEND_WEIGHTS.for_you !== 0);
+}
+
+/** The "for you" lock for a user with this many ratings, as buildDeck returns it. */
+export function forYouLock(ratedCount: number): Extract<DeckResult, { kind: "locked" }> {
+  return {
+    kind: "locked",
+    mode: "for_you",
+    ratedCount,
+    required: FOR_YOU_MIN_RATINGS,
+    remaining: Math.max(0, FOR_YOU_MIN_RATINGS - ratedCount),
+  };
 }
 
 /** A filter check with the user's provider set built once, for checking many titles. */

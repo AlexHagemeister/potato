@@ -23,6 +23,16 @@ export const FOR_YOU_SEED_COUNT = 5;
 export const DETAILS_CONCURRENCY = 8;
 
 /**
+ * When a page's details lookups count as a TMDB outage: at least this many
+ * failed, and they are most of the page's lookups. getDeck then throws and the
+ * cursor stays put. Fewer failures skip just those titles, so one title TMDB
+ * always fails on cannot block the deck. The floor also means a page of one or
+ * two titles skips them even in an outage, which only happens at the end of a
+ * narrow deck.
+ */
+export const DETAILS_OUTAGE_MIN_FAILURES = 3;
+
+/**
  * How long a "the IMDb ratings table has rows" answer is trusted before the
  * service asks again. Only a yes is kept: an empty table is asked about on
  * every lookup that finds no ratings, so the first daily load shows at once.

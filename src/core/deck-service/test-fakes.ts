@@ -63,6 +63,7 @@ export interface FakeWorld {
   ratings: Map<string, ImdbRating>;
   ratingsThrow?: boolean;
   states: UserTitleState[];
+  /** The user's rated (Seen) count. The fake pads `states` with Seen rows of unused IDs up to it. */
   ratedCount: number;
   settings: { country: string; providerIds: number[] };
   rows: Record<string, CardUserState>;
@@ -131,8 +132,11 @@ export function fakeService(w: FakeWorld) {
   };
 
   const library: DeckLibrary = {
-    getUserTitleStates: async () => ok(w.states),
-    getRatedCount: async () => ok(w.ratedCount),
+    getUserTitleStates: async () => {
+      const padding = Math.max(0, w.ratedCount - w.states.filter((s) => s.status === "seen").length);
+      const seen = Array.from({ length: padding }, (_, i): UserTitleState => ({ mediaType: "movie", tmdbId: 9_000_000 + i, status: "seen" }));
+      return ok([...w.states, ...seen]);
+    },
     getUserSettings: async () => ok(w.settings),
     getTitleState: async (_u, ref): Promise<Result<CardUserState | null>> => ok(w.rows[formatTitleKey(ref)] ?? null),
     getTopRatedSeen: async (_u, mediaTypes, limit) => {

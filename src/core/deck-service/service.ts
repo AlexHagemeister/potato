@@ -20,14 +20,15 @@
 //   ratings table when that query finds nothing (see lookupRatings).
 
 import { mapWithConcurrency } from "../concurrency";
-import { activePools, buildDeck, createFilterMatcher, createVisibilityCheck, isForYouUnlocked } from "../deck/build-deck";
+import { MEDIA_TYPES } from "@/db/schema";
+import { activePools, buildDeck, createFilterMatcher, createVisibilityCheck, dealsForYou, forYouLock, isForYouUnlocked } from "../deck/build-deck";
 import { getRatings, type RatingsDatasetProbe, type RatingsStore } from "../imdb/ratings";
 import { parseFilters } from "../library/list";
 import { fail, ok, validateUserId, type Result } from "../result";
 import { DISCOVER_POOLS, streamingProviderIds, type DiscoverPool, type TmdbClient } from "../tmdb/client";
 import { TMDB_MAX_PAGE, TMDB_YEAR_RANGE } from "../tmdb/constants";
 import type { DiscoverFilters, ResultPage, TitleDetails, TitleSummary } from "../tmdb/types";
-import { formatTitleKey, titleIdError, tryFormatTitleKey } from "../title-id";
+import { titleIdError, tryFormatTitleKey } from "../title-id";
 import {
   DISCOVERY_MODES,
   type Candidate,
@@ -40,12 +41,20 @@ import {
   type UserTitleState,
 } from "../types";
 import { buildCard, imdbState } from "./card";
-import { DETAILS_CONCURRENCY, FOR_YOU_SEED_COUNT, MAX_PAGES_PER_STREAM, POOL_QUOTA, RATINGS_PROBE_TTL_MS } from "./constants";
+import {
+  DETAILS_CONCURRENCY,
+  DETAILS_OUTAGE_MIN_FAILURES,
+  FOR_YOU_SEED_COUNT,
+  MAX_PAGES_PER_STREAM,
+  POOL_QUOTA,
+  RATINGS_PROBE_TTL_MS,
+} from "./constants";
 import {
   canonicalFilters,
   decodeCursor,
   encodeCursor,
   fingerprint,
+  seedStreamHash,
   streamId,
   type CursorState,
   type StreamPosition,
@@ -58,8 +67,8 @@ export type DeckTmdb = Pick<TmdbClient, "discover" | "recommendations" | "getTit
 
 /** The library reads the service makes. index.ts wires them to the library core. */
 export interface DeckLibrary {
+  /** Every row the user has. The rated count that gates "for you" is its Seen rows (a Seen row always carries a rating). */
   getUserTitleStates(userId: string): Promise<Result<UserTitleState[]>>;
-  getRatedCount(userId: string): Promise<Result<number>>;
   getUserSettings(userId: string): Promise<Result<{ country: string; providerIds: number[] }>>;
   /** The user's row for one title, or null. */
   getTitleState(userId: string, ref: TitleId): Promise<Result<CardUserState | null>>;
@@ -77,8 +86,6 @@ export interface DeckServiceDeps {
 }
 
 export type DeckService = ReturnType<typeof createDeckService>;
-
-const MEDIA_TYPES: readonly MediaType[] = ["movie", "tv"];
 
 interface ParsedRequest {
   mode: DiscoveryMode;
@@ -127,10 +134,11 @@ export function createDeckService(deps: DeckServiceDeps) {
   /**
    * One page of the deck for the user. See DeckPage for how paging works.
    * Bad input (mode, filters, cursor) returns a typed error, and so does a
-   * cursor from another user or from before a settings change. A TMDB outage
-   * that leaves every list, or every details lookup, unreadable throws, so a
-   * caller never loops on a cursor that cannot move and never reads an outage
-   * as the end of the deck.
+   * cursor from another user or from before a change to the settings its
+   * lists depend on. A TMDB outage throws, so a caller never loops on a cursor
+   * that cannot move and never reads an outage as the end of the deck: every
+   * list lookup failing, or most of a page's details lookups failing (see
+   * DETAILS_OUTAGE_MIN_FAILURES). A single title whose details fail is skipped.
    */
   async function getDeck(userId: string, request: DeckRequest = {}): Promise<Result<DeckPage>> {
     const u = validateUserId(userId);
@@ -139,35 +147,32 @@ export function createDeckService(deps: DeckServiceDeps) {
     if (!parsed.ok) return parsed;
     const { mode, filters, cursor } = parsed.value;
     const now = clock();
-    const mediaTypes = filters.mediaTypes?.length ? MEDIA_TYPES.filter((m) => filters.mediaTypes!.includes(m)) : MEDIA_TYPES;
-    // Whether "for you" deals once unlocked: always in its own mode, and in the blend unless its weight is 0.
-    const wantsForYou = activePools(mode, Number.MAX_SAFE_INTEGER).some((p) => p.pool === "for_you");
+    const mediaTypes: MediaType[] = filters.mediaTypes?.length
+      ? MEDIA_TYPES.filter((m) => filters.mediaTypes!.includes(m))
+      : [...MEDIA_TYPES];
 
     // Independent reads, in parallel. The seeds are read on every call, so the cursor never carries titles.
-    // They are wasted if "for you" turns out locked, but they cost one query.
-    const [states, ratedCount, settings, seedRead] = await Promise.all([
+    // They are wasted if "for you" turns out locked, but they cost one small query.
+    const [states, settings, seedRead] = await Promise.all([
       library.getUserTitleStates(u.value),
-      library.getRatedCount(u.value),
       library.getUserSettings(u.value),
-      wantsForYou ? library.getTopRatedSeen(u.value, mediaTypes, FOR_YOU_SEED_COUNT) : ok<TitleId[]>([]),
+      dealsForYou(mode) ? library.getTopRatedSeen(u.value, mediaTypes, FOR_YOU_SEED_COUNT) : ok<TitleId[]>([]),
     ]);
     if (!states.ok) return states;
-    if (!ratedCount.ok) return ratedCount;
     if (!settings.ok) return settings;
     if (!seedRead.ok) return seedRead;
+    const ratedCount = states.value.filter((s) => s.status === "seen").length;
 
     const { country, providerIds } = settings.value;
-    const context = fingerprint([u.value, country, ...[...new Set(providerIds)].sort((a, b) => a - b)]);
+    // Country and services shape the lists only through "on my services", so only then do they bind the cursor.
+    const context = fingerprint(
+      filters.onMyServices ? [u.value, country, ...[...new Set(providerIds)].sort((a, b) => a - b)] : [u.value],
+    );
     if (cursor && cursor.context !== context) {
       return invalid("cursor belongs to another user or to changed country or services, start again without a cursor");
     }
 
-    if (mode === "for_you" && !isForYouUnlocked(ratedCount.value)) {
-      // The engine owns the lock rule and its shape. With no pools it does no work.
-      const locked = buildDeck({ states: [], userProviderIds: [], filters: {}, mode, now, ratedCount: ratedCount.value, pools: {} });
-      if (locked.kind !== "locked") throw new Error("getDeck: expected the engine to lock for you");
-      return ok(locked);
-    }
+    if (mode === "for_you" && !isForYouUnlocked(ratedCount)) return ok(forYouLock(ratedCount));
 
     const seeds = dedupeSeeds(seedRead.value, mediaTypes);
     if (mode === "for_you" && seeds.length === 0) return ok({ kind: "no_seeds", mode, mediaTypes: [...mediaTypes] });
@@ -175,17 +180,15 @@ export function createDeckService(deps: DeckServiceDeps) {
     // With no services, "on my services" matches nothing. An empty provider list would also drop TMDB's server-side filter.
     if (filters.onMyServices && providerIds.length === 0) return ok({ kind: "cards", cards: [], nextCursor: null });
 
-    const active = activePools(mode, ratedCount.value);
+    const active = activePools(mode, ratedCount);
     const pools = active.map((p) => p.pool);
-    const seedsKey = fingerprint([u.value, ...seeds.map(formatTitleKey)]);
     // The streams this request reads, each resumed from its place in the cursor if it has one. Anything else in the
-    // cursor is ignored, never fetched. When the seeds changed since the cursor was made (the user rated something),
-    // rank n may be another title, so "for you" starts over while the discover streams keep their places.
-    const specs = requestStreams(pools, mediaTypes, seeds).map((spec) => {
-      const resume = cursor !== null && (spec.pool !== "for_you" || cursor.seeds === seedsKey);
-      const saved = resume ? cursor.positions.get(streamId(spec)) : undefined;
-      return { spec, position: saved ?? { page: 1, offset: 0 } };
-    });
+    // cursor is ignored, never fetched. A seed's stream is named by its title, so it keeps its place when the seeds
+    // reorder, and a seed new to the top 5 starts at page 1.
+    const specs = requestStreams(pools, mediaTypes, seeds, u.value).map((spec) => ({
+      spec,
+      position: cursor?.positions.get(streamId(spec)) ?? { page: 1, offset: 0 },
+    }));
 
     const stats: DeckStats = { listLookups: 0, detailLookups: 0, pools: {} };
     const discoverFilters = toDiscoverFilters(filters, providerIds, country);
@@ -234,10 +237,11 @@ export function createDeckService(deps: DeckServiceDeps) {
         console.warn(`deck: details lookup failed for ${key}, leaving it out of this page:`, err);
       }
     });
-    // The same rule as the lists: titles were read but none could be looked up, so an empty page with a cursor past
-    // them would lose them and could end the deck during an outage. Throw before the cursor moves.
-    if (unique.size > 0 && detailFailures === unique.size) {
-      throw new Error("getDeck: every TMDB details lookup failed, so the deck cannot move forward");
+    // Most lookups failing is an outage: an empty or thin page with a cursor past these titles would lose them, and
+    // could end the deck. Throw before the cursor moves. A few failures are titles TMDB cannot serve right now: skip
+    // them, so one title that always fails never blocks the deck.
+    if (detailFailures >= DETAILS_OUTAGE_MIN_FAILURES && detailFailures * 2 > unique.size) {
+      throw new Error(`getDeck: ${detailFailures} of ${unique.size} TMDB details lookups failed, so the deck cannot move forward`);
     }
     const imdbIds = [...details.values()].map((d) => d.imdbId).filter((id): id is string => id !== null);
     const ratingMap = await lookupRatings(imdbIds);
@@ -258,7 +262,7 @@ export function createDeckService(deps: DeckServiceDeps) {
       filters,
       mode,
       now,
-      ratedCount: ratedCount.value,
+      ratedCount,
       pools: candidatePools,
     });
     if (result.kind !== "cards") throw new Error("getDeck: the engine locked a deck the service had unlocked");
@@ -285,7 +289,6 @@ export function createDeckService(deps: DeckServiceDeps) {
           mode,
           filters: canonicalFilters(filters),
           context,
-          seeds: seedsKey,
           positions: new Map(positions.map(({ spec, position }) => [streamId(spec), position])),
         });
 
@@ -345,6 +348,10 @@ function parseRequest(request: unknown): Result<ParsedRequest> {
       return invalid(`era years must be from ${TMDB_YEAR_RANGE.min} to ${TMDB_YEAR_RANGE.max}, got ${year}`);
     }
   }
+  const { fromYear, toYear } = f.value.era ?? {};
+  if (typeof fromYear === "number" && typeof toYear === "number" && fromYear > toYear) {
+    return invalid(`era fromYear ${fromYear} is after toYear ${toYear}`);
+  }
   let state: CursorState | null = null;
   if (cursor !== undefined && cursor !== null) {
     const decoded = decodeCursor(cursor);
@@ -371,11 +378,16 @@ function dedupeSeeds(seeds: readonly TitleId[], mediaTypes: readonly MediaType[]
   return out;
 }
 
-/** The streams a request reads: each discover pool per media type, then one per "for you" seed, by rank. */
-function requestStreams(pools: readonly PoolName[], mediaTypes: readonly MediaType[], seeds: readonly TitleId[]): StreamSpec[] {
+/** The streams a request reads: each discover pool per media type, then one per "for you" seed, in seed order. */
+function requestStreams(
+  pools: readonly PoolName[],
+  mediaTypes: readonly MediaType[],
+  seeds: readonly TitleId[],
+  userId: string,
+): StreamSpec[] {
   const specs: StreamSpec[] = [];
   for (const pool of pools) {
-    if (pool === "for_you") seeds.forEach((seed, rank) => specs.push({ pool, rank, seed }));
+    if (pool === "for_you") for (const seed of seeds) specs.push({ pool, seedHash: seedStreamHash(userId, seed), seed });
     else if ((DISCOVER_POOLS as readonly string[]).includes(pool)) {
       for (const mediaType of mediaTypes) specs.push({ pool: pool as DiscoverPool, mediaType });
     }
