@@ -157,6 +157,13 @@ describe("filters", () => {
     expect(keys({ pools, filters: { era: {} } })).toEqual(["movie:1", "movie:2"]);
   });
 
+  test("a null era bound is unbounded", () => {
+    const pools = { popular: [cand(1, { year: 1990 }), cand(2, { year: 2020 })] };
+    expect(keys({ pools, filters: { era: { fromYear: 2015, toYear: null } } })).toEqual(["movie:2"]);
+    expect(keys({ pools, filters: { era: { fromYear: null, toYear: 2000 } } })).toEqual(["movie:1"]);
+    expect(keys({ pools, filters: { era: { fromYear: null, toYear: null } } })).toEqual(["movie:1", "movie:2"]);
+  });
+
   test("empty filter fields mean no filter", () => {
     const pools = { popular: [cand(1), cand(2, { mediaType: "tv", year: null, genreIds: [] })] };
     expect(keys({ pools, filters: { mediaTypes: [], genreIds: [], era: {}, onMyServices: false } })).toEqual([
@@ -254,15 +261,40 @@ describe("single modes", () => {
       ],
     };
     expect(keys({ pools: bothImdb, mode: "top_rated" })).toEqual(["movie:2", "movie:1"]);
-    // IMDb against TMDB, equal on score and TMDB average: compare TMDB vote counts, which both titles have,
-    // not IMDb votes against TMDB votes (which the IMDb title would always win).
-    const mixed = {
+    // No IMDb votes sorts after any IMDb votes. Between two titles without IMDb data, more TMDB votes wins.
+    const noImdb = {
       top_rated: [
-        cand(1, { imdb: { rating: 8, votes: imdbMin * 4 }, tmdbVoteAverage: 8, tmdbVoteCount: 1_200 }),
-        cand(2, { tmdbVoteAverage: 8, tmdbVoteCount: 5_000 }),
+        cand(3, { tmdbVoteAverage: 8, tmdbVoteCount: 2_000 }),
+        cand(4, { tmdbVoteAverage: 8, tmdbVoteCount: 5_000 }),
+        cand(5, { imdb: { rating: 8, votes: imdbMin }, tmdbVoteAverage: 8, tmdbVoteCount: 1_000 }),
       ],
     };
-    expect(keys({ pools: mixed, mode: "top_rated" })).toEqual(["movie:2", "movie:1"]);
+    expect(keys({ pools: noImdb, mode: "top_rated" })).toEqual(["movie:5", "movie:4", "movie:3"]);
+  });
+
+  /** Every ordering of a list. */
+  function permutations<T>(items: T[]): T[][] {
+    if (items.length <= 1) return [items];
+    return items.flatMap((item, i) => permutations([...items.slice(0, i), ...items.slice(i + 1)]).map((rest) => [item, ...rest]));
+  }
+
+  test("tied titles sort the same from every input order (the round-2 cycle)", () => {
+    // Tied on score and TMDB average. The old tiebreak made A > B > C > A.
+    const imdbMin = VOTE_THRESHOLDS.imdb.topRatedMin;
+    const a = cand(1, { imdb: { rating: 8, votes: imdbMin * 4 }, tmdbVoteAverage: 8, tmdbVoteCount: 1_000 });
+    const b = cand(2, { imdb: { rating: 8, votes: imdbMin * 2 }, tmdbVoteAverage: 8, tmdbVoteCount: 3_000 });
+    const c = cand(3, { tmdbVoteAverage: 8, tmdbVoteCount: 2_000 });
+    for (const order of permutations([a, b, c])) {
+      expect(keys({ pools: { top_rated: order }, mode: "top_rated" })).toEqual(["movie:1", "movie:2", "movie:3"]);
+    }
+  });
+
+  test("titles tied on every signal sort by title key, from every input order", () => {
+    const tie = { imdb: { rating: 8, votes: VOTE_THRESHOLDS.imdb.deepCutsMin }, tmdbVoteAverage: 8, tmdbVoteCount: 500 };
+    const titles = [cand(30, tie), cand(4, tie), cand(4, { ...tie, mediaType: "tv" })];
+    for (const order of permutations(titles)) {
+      expect(keys({ pools: { deep_cuts: order }, mode: "deep_cuts" })).toEqual(["movie:30", "movie:4", "tv:4"]);
+    }
   });
 
   test("top rated gates on votes from the same source as the rating", () => {
@@ -477,10 +509,22 @@ describe("malformed rows", () => {
 
   test("a skipUntil that does not parse keeps the title hidden", () => {
     const pools = { popular: [cand(1), cand(2)] };
-    for (const skipUntil of ["not a date", new Date(Number.NaN)]) {
+    for (const skipUntil of ["not a date", "", new Date(Number.NaN)]) {
       const states: UserTitleState[] = [{ mediaType: "movie", tmdbId: 1, status: "skipped", skipUntil }];
       expect(keys({ pools, states })).toEqual(["movie:2"]);
     }
+  });
+
+  test("a skipped row with a null, missing, or numeric skipUntil keeps the title hidden", () => {
+    const pools = { popular: [cand(1), cand(2)] };
+    for (const skipUntil of [null, undefined, 0]) {
+      const states = [{ mediaType: "movie", tmdbId: 1, status: "skipped", skipUntil }] as unknown as UserTitleState[];
+      expect(keys({ pools, states })).toEqual(["movie:2"]);
+    }
+  });
+
+  test("an unknown mode throws a clear error", () => {
+    expect(() => run({ mode: "bogus" as unknown as DeckInput["mode"] })).toThrow(/unknown discovery mode "bogus"/);
   });
 });
 

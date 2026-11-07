@@ -26,7 +26,8 @@ export type UserTitleState =
   | (TitleId & { status: "skipped"; skipUntil: Date | string });
 
 /** The discovery modes a deck can be ordered by (VISION: Shaping the deck). */
-export type DiscoveryMode = "blend" | "popular" | "deep_cuts" | "top_rated" | "for_you";
+export const DISCOVERY_MODES = ["blend", "popular", "deep_cuts", "top_rated", "for_you"] as const;
+export type DiscoveryMode = (typeof DISCOVERY_MODES)[number];
 
 /** The single modes, each backed by its own candidate pool. `blend` mixes them. */
 export type PoolName = Exclude<DiscoveryMode, "blend">;
@@ -63,8 +64,8 @@ export interface DeckFilters {
   mediaTypes?: MediaType[];
   /** Matches a title in any of these genres. */
   genreIds?: number[];
-  /** Inclusive year bounds. */
-  era?: { fromYear?: number; toYear?: number };
+  /** Inclusive year bounds. A missing or null bound is unbounded (null is the usual JSON shape for a cleared bound). */
+  era?: { fromYear?: number | null; toYear?: number | null };
   /** Only titles streaming on at least one of the user's services. */
   onMyServices?: boolean;
 }

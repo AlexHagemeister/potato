@@ -3,7 +3,7 @@
 // database, and never mutates its input.
 
 import { formatTitleKey, type TitleId } from "../title-id";
-import type { Candidate, DeckFilters, DiscoveryMode, PoolName, UserTitleState } from "../types";
+import { DISCOVERY_MODES, type Candidate, type DeckFilters, type DiscoveryMode, type PoolName, type UserTitleState } from "../types";
 import {
   BLEND_ORDER,
   BLEND_WEIGHTS,
@@ -48,6 +48,11 @@ interface Entry {
 }
 
 export function buildDeck(input: DeckInput): DeckResult {
+  // The mode can arrive from a URL or an API body, so check it before trusting the type.
+  if (!(DISCOVERY_MODES as readonly string[]).includes(input.mode)) {
+    throw new RangeError(`buildDeck: unknown discovery mode ${JSON.stringify(input.mode)}`);
+  }
+
   const forYouUnlocked = input.ratedCount >= FOR_YOU_MIN_RATINGS;
 
   if (input.mode === "for_you" && !forYouUnlocked) {
@@ -76,7 +81,8 @@ export function buildDeck(input: DeckInput): DeckResult {
 
   const pools: PoolName[] =
     input.mode === "blend"
-      ? BLEND_ORDER.filter((pool) => BLEND_WEIGHTS[pool] > 0 && (pool !== "for_you" || forYouUnlocked))
+      ? // `!== 0`, not `> 0`, so a negative or NaN weight reaches interleave's check and throws.
+        BLEND_ORDER.filter((pool) => BLEND_WEIGHTS[pool] !== 0 && (pool !== "for_you" || forYouUnlocked))
       : [input.mode];
   const weights = input.mode === "blend" ? pools.map((pool) => BLEND_WEIGHTS[pool]) : [1];
 
@@ -118,7 +124,10 @@ function hiddenKeys(states: readonly UserTitleState[], now: Date): Set<string> {
       hidden.add(key);
       continue;
     }
-    const returnsAt = new Date(state.skipUntil).getTime();
+    // Only a Date or a string can name a return time. Anything else (null from a
+    // JSON boundary, say) is bad data, since the schema guarantees one exists.
+    const raw: unknown = state.skipUntil;
+    const returnsAt = raw instanceof Date || typeof raw === "string" ? new Date(raw).getTime() : Number.NaN;
     if (Number.isNaN(returnsAt) || now.getTime() < returnsAt) hidden.add(key);
   }
   return hidden;
@@ -130,10 +139,12 @@ function passesFilters(c: Candidate, filters: DeckFilters, userProviders: Readon
   if (filters.genreIds?.length && !filters.genreIds.some((g) => c.genreIds.includes(g))) return false;
 
   const { fromYear, toYear } = filters.era ?? {};
-  if (fromYear !== undefined || toYear !== undefined) {
+  const hasFrom = typeof fromYear === "number";
+  const hasTo = typeof toYear === "number";
+  if (hasFrom || hasTo) {
     if (c.year === null) return false;
-    if (fromYear !== undefined && c.year < fromYear) return false;
-    if (toYear !== undefined && c.year > toYear) return false;
+    if (hasFrom && c.year < fromYear) return false;
+    if (hasTo && c.year > toYear) return false;
   }
 
   if (filters.onMyServices) {
@@ -151,7 +162,11 @@ function quality(c: Candidate): Quality {
     : { source: "tmdb", score: c.tmdbVoteAverage, votes: c.tmdbVoteCount };
 }
 
-/** Orders one pool by its own signal. Returns a new array. Ties keep pool order (Array.prototype.sort is stable). */
+/**
+ * Orders one pool by its own signal. Sorts the freshly built entries array, never input.
+ * Popular ties keep pool order (Array.prototype.sort is stable). Top rated and
+ * deep cuts use a total order, so their pool order never matters.
+ */
 function orderPool(pool: PoolName, entries: Entry[]): Entry[] {
   switch (pool) {
     case "popular":
@@ -174,16 +189,24 @@ function orderPool(pool: PoolName, entries: Entry[]): Entry[] {
 }
 
 /**
- * Higher quality score first, then higher TMDB vote average, then more votes.
- * The vote tiebreak compares like with like: IMDb votes when both titles have
- * them, else TMDB vote counts, which every title has.
+ * One lexicographic total order, so the result never depends on pool order:
+ * 1. higher quality score
+ * 2. higher TMDB vote average
+ * 3. more IMDb votes, titles without IMDb data last
+ * 4. more TMDB votes
+ * 5. title key ascending, so even full ties come out the same every time
+ * Each key compares like with like (IMDb votes only with IMDb votes).
  */
 function byQuality(a: Entry, b: Entry): number {
-  const votes =
-    a.q.source === "imdb" && b.q.source === "imdb"
-      ? b.q.votes - a.q.votes
-      : b.card.tmdbVoteCount - a.card.tmdbVoteCount;
-  return b.q.score - a.q.score || b.card.tmdbVoteAverage - a.card.tmdbVoteAverage || votes;
+  const imdbVotesA = a.card.imdb?.votes ?? -1;
+  const imdbVotesB = b.card.imdb?.votes ?? -1;
+  return (
+    b.q.score - a.q.score ||
+    b.card.tmdbVoteAverage - a.card.tmdbVoteAverage ||
+    imdbVotesB - imdbVotesA ||
+    b.card.tmdbVoteCount - a.card.tmdbVoteCount ||
+    (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
+  );
 }
 
 /**
