@@ -63,6 +63,7 @@ import {
   type StreamSpec,
 } from "./cursor";
 import type { Card, CardUserState, DeckPage, DeckPageCard, DeckRequest, DeckStats } from "./types";
+import { cardUserState } from "./user-state";
 
 /** The TMDB calls the service makes. The app passes getTmdb(). */
 export type DeckTmdb = Pick<TmdbClient, "discover" | "recommendations" | "getTitleDetails">;
@@ -328,7 +329,8 @@ export function createDeckService(deps: DeckServiceDeps) {
         imdb: imdbState(details.imdbId, ratingMap),
         country: settings.value.country,
         userProviderIds: settings.value.providerIds,
-        userState: state.value,
+        // An expired skip shows as untouched, as in Search (one rule, in cardUserState).
+        userState: cardUserState(id, state.value, clock()),
       }),
     );
   }

@@ -59,22 +59,40 @@ const BUTTONS: { kind: SortKind; label: string; icon: ReactNode; tone: string }[
   },
 ];
 
-/** The four card buttons, in the actions row just above the tab bar. One tap sorts (VISION invariant 4). */
-export function DeckButtons({ disabled, onTap }: { disabled: boolean; onTap: (kind: SortKind) => void }) {
+/**
+ * The four card buttons, in the actions row just above the tab bar. One tap sorts (VISION invariant 4).
+ * `current` marks the button for where the title already is (a card opened from Search or Lists). That button
+ * is pressed and does nothing, except Seen it, which stays tappable to edit the rating.
+ */
+export function DeckButtons({
+  disabled,
+  onTap,
+  current = null,
+}: {
+  disabled: boolean;
+  onTap: (kind: SortKind) => void;
+  current?: SortKind | null;
+}) {
   return (
     <div role="group" aria-label="Sort this title" className="grid h-full grid-cols-4 items-center gap-2">
-      {BUTTONS.map((b) => (
-        <button
-          key={b.kind}
-          type="button"
-          disabled={disabled}
-          onClick={() => onTap(b.kind)}
-          className={`flex h-14 flex-col items-center justify-center gap-0.5 rounded-2xl bg-surface-raised text-xs font-medium transition-transform active:scale-95 disabled:opacity-40 ${b.tone}`}
-        >
-          {b.icon}
-          <span className="text-foreground">{b.label}</span>
-        </button>
-      ))}
+      {BUTTONS.map((b) => {
+        const pressed = current === b.kind;
+        return (
+          <button
+            key={b.kind}
+            type="button"
+            disabled={disabled || (pressed && b.kind !== "seen")}
+            aria-pressed={current === null ? undefined : pressed}
+            onClick={() => onTap(b.kind)}
+            className={`flex h-14 flex-col items-center justify-center gap-0.5 rounded-2xl text-xs font-medium transition-transform active:scale-95 disabled:opacity-40 ${
+              pressed ? "bg-accent/15 ring-1 ring-accent/60 disabled:opacity-100" : "bg-surface-raised"
+            } ${b.tone}`}
+          >
+            {b.icon}
+            <span className="text-foreground">{b.label}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }

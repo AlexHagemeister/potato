@@ -11,7 +11,7 @@ import { getList } from "../library/queries";
 import type { DetailsLookupContext, TitleDetailsLookup, TitleRecord } from "../library/types";
 import { ok, type Result } from "../result";
 import { formatTitleKey } from "../title-id";
-import { getTmdb, posterUrl, type DetailsCore, type TmdbClient } from "../tmdb";
+import { getTmdb, posterUrl, ROW_POSTER_SIZE, type DetailsCore, type TmdbClient } from "../tmdb";
 import { LIST_STATUSES, type DeckFilters, type ListStatus, type TitleId } from "../types";
 
 /** Rows per page. Enough to fill several screens, small enough that a cold metadata cache stays quick. */
@@ -68,9 +68,6 @@ export function createTitleInfoLookup(tmdb: Pick<TmdbClient, "lookupTitles" | "a
 }
 
 const tmdbLookup: TitleInfoLookup = (refs, context) => createTitleInfoLookup(getTmdb())(refs, context);
-
-/** Thumbnail size: rows show posters about 56pt wide, so w185 stays sharp at 3x. */
-const ROW_POSTER_SIZE = "w185";
 
 export function toListRow(record: TitleRecord, info: DetailsCore | undefined): ListRow {
   return {
