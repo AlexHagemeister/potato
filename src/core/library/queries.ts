@@ -1,11 +1,10 @@
 // Reads over a user's library. Each takes the user id explicitly, like the
 // actions, so the app, the API, and a future AI connection share them.
 
-import { and, asc, count, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, or } from "drizzle-orm";
 import { getDb } from "@/db/client";
-import { titleStatus } from "@/db/schema";
+import { MEDIA_TYPES, titleStatus } from "@/db/schema";
 import { getUserSettings } from "../settings/user-settings";
-import { formatTitleKey } from "../title-id";
 import type { Candidate, ListStatus, MediaType, TitleId, TitleStatus, UserTitleState } from "../types";
 import { fail, ok, validateUserId, type Result } from "../result";
 import { applyListFilters, filtersNeedDetails, pageRows, parseListQuery, withDetails } from "./list";
@@ -37,8 +36,13 @@ export async function getUserTitleStates(userId: string): Promise<Result<UserTit
 export async function getTitleStatesFor(userId: string, refs: readonly TitleId[]): Promise<Result<UserTitleState[]>> {
   const u = validateUserId(userId);
   if (!u.ok) return u;
-  if (refs.length === 0) return ok([]);
-  const wanted = new Set(refs.map((r) => formatTitleKey(r)));
+  // The ID alone is ambiguous (architecture rule 1), so the query matches the
+  // pair: one IN list per media type, each on the full primary key.
+  const byType = MEDIA_TYPES.flatMap((mediaType) => {
+    const ids = [...new Set(refs.filter((r) => r.mediaType === mediaType).map((r) => r.tmdbId))];
+    return ids.length > 0 ? [and(eq(titleStatus.mediaType, mediaType), inArray(titleStatus.tmdbId, ids))] : [];
+  });
+  if (byType.length === 0) return ok([]);
   const rows = await getDb()
     .select({
       mediaType: titleStatus.mediaType,
@@ -47,9 +51,8 @@ export async function getTitleStatesFor(userId: string, refs: readonly TitleId[]
       skipUntil: titleStatus.skipUntil,
     })
     .from(titleStatus)
-    .where(and(eq(titleStatus.userId, u.value), inArray(titleStatus.tmdbId, [...new Set(refs.map((r) => r.tmdbId))])));
-  // The ID alone is ambiguous (architecture rule 1): keep only the asked-for pairs.
-  return ok(rows.filter((r) => wanted.has(formatTitleKey(r))).map(toUserTitleState));
+    .where(and(eq(titleStatus.userId, u.value), or(...byType)));
+  return ok(rows.map(toUserTitleState));
 }
 
 function toUserTitleState(r: { mediaType: MediaType; tmdbId: number; status: TitleStatus; skipUntil: Date | null }): UserTitleState {

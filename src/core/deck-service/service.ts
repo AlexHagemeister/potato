@@ -29,7 +29,7 @@ import { DISCOVER_POOLS, streamingProviderIds, type DiscoverPool, type TmdbClien
 import { TMDB_MAX_PAGE, TMDB_YEAR_RANGE } from "../tmdb/constants";
 import { isPermanentTmdbFailure } from "../tmdb/http";
 import type { DiscoverFilters, ResultPage, TitleDetails, TitleSummary } from "../tmdb/types";
-import { formatTitleKey, titleIdError, tryFormatTitleKey } from "../title-id";
+import { formatTitleKey, titleIdError, toTitleId, tryFormatTitleKey } from "../title-id";
 import {
   DISCOVERY_MODES,
   type Candidate,
@@ -355,8 +355,8 @@ export function createDeckService(deps: DeckServiceDeps) {
     for (const ref of refs) {
       const error = titleIdError(ref);
       if (error) return fail({ code: "invalid_title", message: error });
-      const { mediaType, tmdbId } = ref as TitleId;
-      ids.set(formatTitleKey(ref as TitleId), { mediaType, tmdbId });
+      const id = toTitleId(ref as TitleId);
+      ids.set(formatTitleKey(id), id);
     }
     if (ids.size === 0) return ok([]);
     const states = await library.getTitleStatesFor(u.value, [...ids.values()]);

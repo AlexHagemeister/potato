@@ -44,6 +44,16 @@ export function tryFormatTitleKey(id: unknown): string | null {
   return `${mediaType}:${tmdbId}`;
 }
 
+/**
+ * Only the identity of a value that carries one (a card, a row, a request
+ * body): a fresh { mediaType, tmdbId }, so nothing else rides along to the
+ * server or into SQL. It does not validate: check untrusted input with
+ * titleIdError first.
+ */
+export function toTitleId({ mediaType, tmdbId }: TitleId): TitleId {
+  return { mediaType, tmdbId };
+}
+
 /** Inverse of formatTitleKey. Returns null for anything that is not a valid key. */
 export function parseTitleKey(key: string): TitleId | null {
   const match = /^(movie|tv):([1-9]\d*)$/.exec(key);

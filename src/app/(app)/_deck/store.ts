@@ -48,7 +48,7 @@ import {
   normalizeDeckChoice,
   type DeckChoice,
 } from "@/core/filters";
-import type { TitleId } from "@/core/types";
+import { toTitleId } from "@/core/title-id";
 import type { HiddenResponse } from "@/app/api/deck/hidden/route";
 import type { DeckResponse } from "@/app/api/deck/route";
 import {
@@ -213,14 +213,27 @@ export function startDeck(userId: string, settingsKey: string, savedChoice: Deck
 }
 
 /**
+ * The app came back to the foreground with Discover open (the home-screen app
+ * resumed, or the browser tab shown again). Discover did not remount, so
+ * startDeck did not run: check for titles sorted meanwhile on another device.
+ */
+export function resumeDeck() {
+  if (!state.userId || state.gate) return;
+  void dropSortedElsewhere();
+}
+
+/**
  * Asks the server which queued titles were sorted since they were dealt (in
  * Search, Lists, or on another device) and drops them, the card on screen
  * included (core's dropTitles, VISION invariant 3). One small request per
  * return to the tab, no deck refetch. One at a time: a return while a check
  * is on its way (or React's development double mount) relies on that check.
- * If it fails, the deck keeps its cards: the next return asks again. Titles
- * sorted or undone here while it is on its way, and a sort or Undo still
- * saving, stay put, since the answer may predate them.
+ * If it fails, the deck keeps its cards: the next return asks again.
+ *
+ * The answer may predate a change made here, so a local change wins: a title
+ * touched (see touch) after the check was sent stays put, and so does a title
+ * whose Undo is still on its way (the check may have read the row before the
+ * Undo restores it).
  */
 async function dropSortedElsewhere() {
   if (touchedDuringCheck) return;
@@ -246,7 +259,7 @@ async function dropSortedElsewhere() {
     touchedDuringCheck = null;
   }
   if (!body.ok || gen !== generation) return;
-  const keep = [...saving, ...touched, ...(undoingKey ? [undoingKey] : [])];
+  const keep = undoingKey ? [...touched, undoingKey] : touched;
   const queue = dropTitles(state.queue, body.hidden.map(titleKey), keep);
   if (queue === state.queue) return;
   set({ queue });
@@ -254,7 +267,11 @@ async function dropSortedElsewhere() {
   void fill();
 }
 
-/** A sort or Undo on this screen: any check on its way must leave the title alone. */
+/**
+ * A local change to a title: a sort, a Seen save, or an Undo, both when it
+ * starts and when its save settles. Any check on its way leaves the title
+ * alone, since its answer may predate the change. Every such change calls it.
+ */
 function touch(key: string) {
   touchedDuringCheck?.add(key);
 }
@@ -482,11 +499,12 @@ export function sortCard(kind: Exclude<SortKind, "seen">, card: DeckPageCard) {
   set({ queue: removeCard(state.queue, card) });
   preload();
 
-  const pending = sortCardAction(kind, refOf(card))
+  const pending = sortCardAction(kind, toTitleId(card))
     .catch((): DeckActionResult => ({ ok: false, error: "Couldn't save. Check your connection." }))
     .then((result) => {
       if (gen !== generation) return result;
       saving.delete(key);
+      touch(key);
       if (!result.ok) {
         // Only this sort's own Undo goes away. A newer sort keeps its toast.
         if (lastSort?.card === card) dropUndo();
@@ -512,13 +530,15 @@ export function sortCard(kind: Exclude<SortKind, "seen">, card: DeckPageCard) {
  */
 export async function markCardSeen(card: DeckPageCard, rating: number, review: string | null): Promise<string | null> {
   const gen = generation;
-  touch(titleKey(card));
+  const key = titleKey(card);
+  touch(key);
   let result: DeckActionResult;
   try {
-    result = await markSeenAction(refOf(card), rating, review);
+    result = await markSeenAction(toTitleId(card), rating, review);
   } catch {
     result = { ok: false, error: "Couldn't save. Check your connection." };
   }
+  touch(key);
   if (!result.ok) return result.error;
   if (gen !== generation) return null;
   set({ queue: removeCard(state.queue, card) });
@@ -544,10 +564,14 @@ export async function undoLastSort() {
     const done = await sort.pending;
     // A failed sort already put the card back and said so.
     if (!done.ok) return;
-    undone = await undoSortAction(refOf(sort.card), done.outcome);
+    undone = await undoSortAction(toTitleId(sort.card), done.outcome);
   } catch {
     undone = { ok: false, error: "Couldn't undo. Check your connection." };
   } finally {
+    // Settled: a check sent while the Undo was on its way may have read the
+    // old row, so it must still leave the title alone (touch) once
+    // undoingKey no longer covers it.
+    touch(key);
     if (undoingKey === key) undoingKey = null;
     if (gen === generation) set({ undoing: false });
   }
@@ -555,11 +579,6 @@ export async function undoLastSort() {
   // The sort stands, so the card leaves the deck again.
   set({ queue: removeCard(state.queue, sort.card) });
   showNotice(undone.error);
-}
-
-/** Only the title's identity goes to the server, not the whole card. */
-function refOf(card: DeckPageCard): TitleId {
-  return { mediaType: card.mediaType, tmdbId: card.tmdbId };
 }
 
 /** For keys and comparisons in components. */

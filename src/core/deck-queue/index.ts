@@ -10,7 +10,7 @@
 // and drop any card already dealt, by (media type, TMDB ID).
 
 import type { DeckPageCard } from "../deck-service/types";
-import { formatTitleKey } from "../title-id";
+import { formatTitleKey, toTitleId } from "../title-id";
 import type { TitleId } from "../types";
 
 /** Ask for another page when fewer cards than this are queued. */
@@ -171,7 +171,7 @@ export function deckInputChange(prev: DeckInputs, next: DeckInputs): DeckInputCh
  * identities: the check needs nothing else.
  */
 export function queuedTitles(queue: DeckQueue, max: number): TitleId[] {
-  return queue.cards.slice(0, max).map(({ mediaType, tmdbId }) => ({ mediaType, tmdbId }));
+  return queue.cards.slice(0, max).map(toTitleId);
 }
 
 /**

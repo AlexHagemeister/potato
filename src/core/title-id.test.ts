@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatTitleKey, MAX_TMDB_ID, parseTitleKey, titleIdError, tryFormatTitleKey, type TitleId } from "./title-id";
+import { formatTitleKey, MAX_TMDB_ID, parseTitleKey, titleIdError, toTitleId, tryFormatTitleKey, type TitleId } from "./title-id";
 
 describe("title keys", () => {
   test("format uses the (media type, TMDB ID) pair", () => {
@@ -62,5 +62,14 @@ describe("tryFormatTitleKey", () => {
       expect(tryFormatTitleKey(id)).toBeNull();
       expect(() => formatTitleKey(id as TitleId)).toThrow();
     }
+  });
+});
+
+describe("toTitleId", () => {
+  test("keeps only the identity, in a fresh object", () => {
+    const card = { mediaType: "tv" as const, tmdbId: 2734, title: "x", userState: null };
+    const id = toTitleId(card);
+    expect(id).toEqual({ mediaType: "tv", tmdbId: 2734 });
+    expect(id).not.toBe(card);
   });
 });

@@ -17,6 +17,7 @@ import {
   markCardSeen,
   retry,
   sortCard,
+  resumeDeck,
   startDeck,
   startOver,
   titleKey,
@@ -204,6 +205,14 @@ export function Deck({
   const top = useRef<HTMLDivElement>(null);
 
   useEffect(() => startDeck(userId, settingsKey, savedChoice), [userId, settingsKey, savedChoice]);
+  // Back in the foreground without a remount: catch sorts made meanwhile on another device.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") resumeDeck();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, []);
 
   // Each new card starts at its top, even if the last one was scrolled to the trailer.
   const key = card ? titleKey(card) : view.kind;
