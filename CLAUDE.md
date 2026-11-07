@@ -1,0 +1,66 @@
+# Potato: agent instructions
+
+Potato is a web app for deciding what to watch, one card at a time. Read [VISION.md](VISION.md) before any work. Its operating clause binds: when an implementation choice fights an invariant, stop and surface it. When a tool does not fit, drop the tool, not the invariant.
+
+This file holds stable rules. It changes rarely. Add to the Notes section at the bottom only for a lasting quirk a future agent would otherwise rediscover the hard way.
+
+## Roles
+
+- **Alex** owns VISION.md and every product call. He does not read code or review PRs. He judges the app by using it on his iPhone.
+- **Agents** build, review, and merge. The project history lives in git and GitHub (PRs, issues, one milestone), not in files.
+
+## Stack
+
+- Next.js (App Router), TypeScript in strict mode, deployed on Vercel (Hobby plan). Functions use the Node runtime.
+- Bun for installs, scripts, and tests.
+- Postgres on Neon.
+- Google sign-in through an auth library that stores users and sessions in our own Postgres. Pick the library from its current docs, not from memory. No hosted auth service.
+- Movie and series data from the TMDB API.
+- IMDb ratings from IMDb's non-commercial dataset (`title.ratings.tsv.gz`, refreshed daily by IMDb), loaded into Postgres on a daily schedule.
+- Installable to the iPhone home screen (web app manifest, standalone display).
+
+## Architecture rules
+
+1. **A title's identity is (media type, TMDB ID).** Movie and series IDs come from separate pools, so an ID alone is ambiguous. Every table, cache key, and URL uses the pair.
+2. **One row per user per title, with one status:** `watchlist`, `passed`, `seen`, or `skipped`. A skipped row carries the date it returns to the deck. A seen row carries the rating (0.5 to 5 in 0.5 steps) and the optional review. A database constraint enforces one row per user per title.
+3. **All app logic lives in one core layer.** The UI and the API call it. Neither holds logic of its own. The core layer does not import UI or framework code. This is what lets the future MCP do anything the app does (VISION invariant 7).
+4. **Each external service has exactly one module,** with caching: one for TMDB, one for IMDb. TMDB publishes no fixed rate limit, so the TMDB module handles HTTP 429 responses.
+5. **The deck engine is a pure function.** Input: the user's lists, the filters, and the discovery mode. Output: an ordered list of titles. It has unit tests.
+6. **Reviews carry a visibility field, default private.** Nothing is public yet. The field keeps the social direction open (VISION invariant 9).
+7. **Attribution is mandatory.** The Profile tab shows the TMDB logo and the notice "This product uses the TMDB API but is not endorsed or certified by TMDB." Every place that shows streaming availability credits JustWatch as the data source. TMDB revokes API access for non-compliance.
+8. **Secrets never enter git.** `.env.local` holds them. `.env.example` lists every variable with no values.
+
+## How work happens
+
+- **No upfront backlog.** Work from VISION.md. All work belongs to the GitHub milestone `v1`. Its close condition: Alex has used the app on his phone and ruled. Only Alex closes it.
+- **Phase 0 before any feature code:** the app skeleton, CI (typecheck, lint, tests, build), the Neon database, Google sign-in, and a green production deploy on Vercel.
+- **One slice, one branch, one PR.** The PR body says what changed and why, lists each judgment call with its reason and what would justify reversing it, and shows how the change was verified, with a screenshot at iPhone viewport for any UI change.
+- **Verify in the running app,** not only in tests: Playwright at an iPhone viewport (390 by 844), plus the Vercel preview deployment for the PR.
+- **Review every PR with a fresh agent.** The agent that built the PR never reviews it. A subagent with no build context reviews it:
+  1. It invokes the `code-review` skill at `high` effort on the PR number, with `--comment`, so findings land on the PR as comments.
+  2. It reads VISION.md and comments on any invariant the PR fights.
+  3. The builder fixes each finding or answers it in the PR thread with a reason.
+  4. A fresh reviewer re-checks the fixes.
+  5. After three rounds without a clean review, label the PR `needs-alex` and move on to other work.
+- **Merge** with a squash merge once the review is clean and CI is green. Delete the branch.
+- **Before handing the milestone to Alex,** a fresh subagent reviews the whole codebase against VISION.md, and its findings go through the same fix loop.
+- **Use CLIs and APIs, never dashboards:** `gh`, `vercel`, and the Neon CLI or Neon MCP. Ask Alex only for what needs his hands: sign-ins, consent screens, account creation, API keys.
+
+## Deciding without Alex
+
+Agents run unattended, often overnight. Triage each open question:
+
+- **Local and reversible** (naming, layout details, a library swap inside one module): decide, and record the call in the PR body.
+- **Architecturally significant** (hard to reverse, broad in reach, or in conflict with a VISION invariant): do not decide. Open an issue labeled `needs-alex` with the question, the options, and a recommendation. Then continue with other work that does not depend on the answer.
+
+State lives in GitHub. Do not create status, progress, or tracking files in the repo.
+
+## Environment notes
+
+- **This repo is public.** Nothing personal goes into code, commits, PRs, or issues.
+- **Alex's exocortex vault** (`~/exocortex`, also reachable through its MCP) holds his preferences and context. Read it when useful. Never write to it from this project, and never copy personal details from it into this repo.
+- **The permission classifier.** Claude Code's auto-mode classifier sometimes denies or stalls routine commands. Run file moves (`mv`, `git mv`) as standalone commands, never chained with `&&` or `;`. When a command is denied or hangs, split it and retry once before treating it as a bug.
+
+## Notes
+
+Lasting quirks discovered during the build go here, one line each, with the date.
