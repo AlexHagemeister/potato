@@ -41,7 +41,11 @@ export type CoreError =
   /** The country is well formed, but TMDB has no streaming data for it. */
   | { code: "unknown_country"; country: string }
   /** The change saves more streaming services than one user may keep. */
-  | { code: "too_many_services"; max: number };
+  | { code: "too_many_services"; max: number }
+  /** A deck request's mode, filters, or cursor is invalid, or the cursor belongs to another mode or filters. */
+  | { code: "invalid_deck_query"; message: string }
+  /** TMDB has no title with this (media type, TMDB ID). */
+  | { code: "unknown_title" };
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: CoreError };
 

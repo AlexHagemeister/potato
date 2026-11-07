@@ -3,6 +3,12 @@
 export const TMDB_API_BASE = "https://api.themoviedb.org/3";
 export const TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/";
 
+/** TMDB serves at most 500 pages of any list. */
+export const TMDB_MAX_PAGE = 500;
+
+/** Release years discover accepts in an era filter. Outside this range the client throws. */
+export const TMDB_YEAR_RANGE = { min: 1800, max: 9999 } as const;
+
 /** Language for titles, synopses, and genre names. */
 export const TMDB_LANGUAGE = "en-US";
 

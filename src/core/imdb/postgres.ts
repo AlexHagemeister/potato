@@ -5,15 +5,21 @@ import { getDb, withTransaction, type Db } from "@/db/client";
 import { imdbRatings } from "@/db/schema";
 import type { ImdbRating } from "../types";
 import { checkAgainstCurrent, type RatingsLoadTarget, type ReplaceGuard } from "./loader";
-import type { RatingsStore } from "./ratings";
+import type { RatingsDatasetProbe, RatingsStore } from "./ratings";
 import type { ImdbRatingRow } from "./tsv";
 
 /** IDs per lookup query, to keep the parameter list modest. */
 const LOOKUP_CHUNK = 1000;
 
 /** Reads ratings over the HTTP driver. */
-export class PostgresRatingsStore implements RatingsStore {
+export class PostgresRatingsStore implements RatingsStore, RatingsDatasetProbe {
   constructor(private readonly db: () => Db = getDb) {}
+
+  /** One indexed row read, not a count. */
+  async hasAnyRatings(): Promise<boolean> {
+    const rows = await this.db().select({ tconst: imdbRatings.tconst }).from(imdbRatings).limit(1);
+    return rows.length > 0;
+  }
 
   async getMany(tconsts: readonly string[]): Promise<Map<string, ImdbRating>> {
     const out = new Map<string, ImdbRating>();
