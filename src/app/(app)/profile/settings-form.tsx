@@ -2,6 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import type { StreamingService } from "@/core/settings/profile";
+import { servicesToShow } from "@/core/settings/service-order";
 import type { WatchRegion } from "@/core/tmdb/types";
 import { changeCountryAction, saveServicesAction } from "./actions";
 
@@ -25,6 +26,11 @@ export function SettingsForm({ initialCountry, initialProviderIds, countries, in
   const [unavailable, setUnavailable] = useState(servicesUnavailable);
   const [selected, setSelected] = useState<number[]>(initialProviderIds);
   const [query, setQuery] = useState("");
+  const [showAll, setShowAll] = useState(false);
+  // Services that stay in the short list for this visit: the saved ones, plus
+  // any tapped since, so deselecting a service outside the popular group
+  // doesn't make its row vanish under the tap.
+  const [keepIds, setKeepIds] = useState<number[]>(initialProviderIds);
   const [loadingServices, setLoadingServices] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const countryRequest = useRef(0);
@@ -33,10 +39,8 @@ export function SettingsForm({ initialCountry, initialProviderIds, countries, in
   const confirmedIds = useRef(initialProviderIds);
   const confirmedCountry = useRef({ country: initialCountry, services: initialServices, unavailable: servicesUnavailable });
 
-  const visible = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return q ? services.filter((s) => s.name.toLowerCase().includes(q)) : services;
-  }, [services, query]);
+  const visible = useMemo(() => servicesToShow(services, { query, showAll, keepIds }), [services, query, showAll, keepIds]);
+  const searching = query.trim() !== "";
 
   // Saved services that this country lists, in the list's order.
   const selectedHere = useMemo(() => services.filter((s) => selected.includes(s.id)), [services, selected]);
@@ -46,6 +50,10 @@ export function SettingsForm({ initialCountry, initialProviderIds, countries, in
     setCountry(next);
     setError(null);
     setLoadingServices(true);
+    // A new country starts on its own short list: drop the rows kept from the
+    // last one, except saved services. Taps while it loads still add to this.
+    setKeepIds(selected);
+    setShowAll(false);
     const result = await changeCountryAction(next);
     // Any success is what the database now holds, even if a newer pick is pending.
     if (result.ok) confirmedCountry.current = { country: next, services: result.value, unavailable: false };
@@ -68,6 +76,7 @@ export function SettingsForm({ initialCountry, initialProviderIds, countries, in
     const next = selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id];
     const request = ++servicesRequest.current;
     setSelected(next);
+    setKeepIds((ids) => (ids.includes(id) ? ids : [...ids, id]));
     setError(null);
     const result = await saveServicesAction(next);
     if (result.ok) {
@@ -173,6 +182,16 @@ export function SettingsForm({ initialCountry, initialProviderIds, countries, in
                 );
               })}
             </ul>
+          )}
+          {!searching && visible.length > 0 && (showAll || visible.length < services.length) && (
+            <button
+              type="button"
+              aria-expanded={showAll}
+              onClick={() => setShowAll(!showAll)}
+              className="mt-2 min-h-11 w-full rounded-xl px-4 font-medium text-accent"
+            >
+              {showAll ? "Show fewer" : `Show all ${services.length} services`}
+            </button>
           )}
         </div>
       </section>
