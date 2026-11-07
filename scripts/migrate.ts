@@ -10,7 +10,7 @@
 // It uses the WebSocket Pool driver, not the app's HTTP driver, because the
 // Pool migrator runs all pending migrations inside one transaction.
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { parseEnv } from "node:util";
 import { Pool } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-serverless";
@@ -32,6 +32,13 @@ const target = TARGETS[targetName];
 // Bun loads .env files automatically, and which one wins depends on NODE_ENV
 // (.env.local points at production), so an inherited DATABASE_URL can't be
 // trusted here.
+if (!existsSync(target.envFile)) {
+  console.error(
+    `Missing ${target.envFile}. It should hold the ${target.database} connection strings ` +
+      `(see the header of .env.example).`,
+  );
+  process.exit(1);
+}
 const env = parseEnv(readFileSync(target.envFile, "utf8"));
 // Migrations use the direct (unpooled) connection, as Neon recommends for DDL.
 const url = env.DATABASE_URL_UNPOOLED;
