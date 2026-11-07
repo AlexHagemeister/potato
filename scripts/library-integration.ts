@@ -368,6 +368,16 @@ try {
 
   console.log("Stale undo (compare-and-set)");
 
+  await check("undo works with the default clock (no now passed), as the app will call it", async () => {
+    const ref = fresh();
+    await actThenUndo(ref, () => lib.watchlistTitle(A, ref));
+    unwrap(await lib.watchlistTitle(A, ref));
+    await actThenUndo(ref, () => lib.moveTitle(A, ref, { from: "watchlist", to: "seen", rating: 3 }));
+    unwrap(await lib.markSeen(A, ref, { rating: 3 }));
+    await actThenUndo(ref, () => lib.updateRatingReview(A, ref, { review: "Fine." }));
+    await actThenUndo(ref, () => lib.removeTitle(A, ref));
+  });
+
   await check("a stale undo of a change refuses to overwrite a later edit", async () => {
     const ref = fresh();
     unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
