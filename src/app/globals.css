@@ -3,16 +3,72 @@
 :root {
   --background: #0b0b0c;
   --foreground: #ededed;
+  --surface: #161618;
+  --surface-raised: #1f1f22;
+  --muted: #8e8e93;
+  --hairline: #2a2a2e;
+  --accent: #f5c451;
+  /* Shell measurements. The tab bar sits on top of the bottom safe area. */
+  --tab-bar-height: 3.5rem;
+  /* The deck's four-button row (see src/app/(app)/_shell/screen.tsx). */
+  --deck-actions-height: 4.5rem;
   color-scheme: dark;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-muted: var(--muted);
+  --color-hairline: var(--hairline);
+  --color-accent: var(--accent);
+}
+
+/*
+ * Native feel. The page itself never scrolls or bounces: the shell is a fixed
+ * full-screen column and only its content area scrolls, with overscroll
+ * contained so iOS shows no rubber-band of the whole page and no
+ * pull-to-refresh.
+ */
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Controls behave like app controls: no text selection, no long-press callout, no double-tap zoom delay. */
+button,
+a,
+label,
+nav,
+select,
+[role="button"],
+[role="checkbox"],
+[role="tab"] {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
+}
+
+/* iOS zooms the page when an input under 16px gets focus. */
+input,
+select,
+textarea {
+  font-size: 16px;
+}
+
+img {
+  -webkit-user-drag: none;
+  -webkit-touch-callout: none;
 }
