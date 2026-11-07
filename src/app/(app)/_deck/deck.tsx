@@ -190,12 +190,16 @@ export function Deck({
   return (
     <Screen actions={<DeckButtons disabled={!card || seenCard !== null || state.undoing} onTap={onTap} />}>
       <div ref={top} />
-      {/* The Undo toast takes the title's place in this row, clear of the card and the four buttons (issue 50). */}
+      {/*
+        The Undo toast shows in this row, clear of the card and the four buttons (issue 50). While it shows it
+        takes the place of the title and the mode picker: beside every mode name and a filter count, the
+        title's space alone is too narrow for the longest message at 390 px. Filters stays.
+      */}
       <div data-slot="deck-controls" className="mb-3 flex h-11 items-center justify-between gap-2">
         <h1 className={toast ? "sr-only" : "text-lg font-semibold"}>Discover</h1>
         {toast && <UndoPill message={toast.message} onUndo={() => void undoLastSort()} />}
         <div className={`flex shrink-0 items-center gap-2 ${ready ? "" : "invisible"}`}>
-          <ModePicker value={choice.mode} onChange={(mode) => chooseDeck({ ...choice, mode })} />
+          {!toast && <ModePicker value={choice.mode} onChange={(mode) => chooseDeck({ ...choice, mode })} />}
           <FilterControl
             compact
             value={choice.filters}
