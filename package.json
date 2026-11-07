@@ -14,6 +14,7 @@
     "db:migrate": "bun --no-env-file scripts/migrate.ts dev",
     "db:migrate:prod": "bun --no-env-file scripts/migrate.ts prod",
     "tmdb:smoke": "bun run scripts/tmdb-smoke.ts",
+    "deck:smoke": "bun --no-env-file scripts/deck-smoke.ts",
     "imdb:load:dev": "bun --no-env-file --env-file=.env.development.local scripts/load-imdb-ratings.ts"
   },
   "dependencies": {

@@ -12,7 +12,9 @@ import {
   TMDB_CACHE_VERSION,
   TMDB_FANOUT_CONCURRENCY,
   TMDB_LANGUAGE,
+  TMDB_MAX_PAGE,
   TMDB_TTL_MS,
+  TMDB_YEAR_RANGE,
 } from "./constants";
 import { buildPath, tmdbGet, type FetchFn, type Params, type SleepFn } from "./http";
 import {
@@ -41,6 +43,7 @@ import type {
 
 /** The discover-backed pools. "for you" comes from recommendations instead. */
 export type DiscoverPool = "popular" | "top_rated" | "deep_cuts";
+export const DISCOVER_POOLS: readonly DiscoverPool[] = ["popular", "top_rated", "deep_cuts"];
 
 /** Filters TMDB recommendations cannot apply server-side. They are applied to each page after the fetch. */
 export type RecommendationFilters = Pick<DiscoverFilters, "genreIds" | "era">;
@@ -57,8 +60,6 @@ export interface TmdbClientOptions {
 
 export type TmdbClient = ReturnType<typeof createTmdbClient>;
 
-/** TMDB serves at most 500 pages of any list. */
-const MAX_PAGE = 500;
 
 /**
  * The ways of watching that count as "on my streaming services": by
@@ -67,7 +68,7 @@ const MAX_PAGE = 500;
 export const STREAMING_MONETIZATION = ["flatrate", "free", "ads"] as const;
 
 /** IDs of the services that stream a title in one country, in TMDB's display order, without duplicates. */
-function streamingProviderIds(country: CountryProviders | undefined): number[] {
+export function streamingProviderIds(country: CountryProviders | undefined): number[] {
   if (!country) return [];
   return [...new Set(STREAMING_MONETIZATION.flatMap((kind) => country[kind].map((p) => p.id)))];
 }
@@ -488,7 +489,7 @@ function toPage(raw: unknown, mediaTypeFor: (r: RawTitle) => MediaType | null): 
     const summary = normalizeSummary(r, mediaType);
     if (summary) results.push(summary);
   }
-  return { results, page: body.page ?? 1, totalPages: Math.min(body.total_pages ?? 0, MAX_PAGE) };
+  return { results, page: body.page ?? 1, totalPages: Math.min(body.total_pages ?? 0, TMDB_MAX_PAGE) };
 }
 
 function mediaTypeOf(value: unknown): MediaType | null {
@@ -501,7 +502,7 @@ function emptyPage(page: number): ResultPage<TitleSummary> {
 
 function clampPage(page: number): number {
   if (!Number.isSafeInteger(page)) return 1;
-  return Math.min(Math.max(page, 1), MAX_PAGE);
+  return Math.min(Math.max(page, 1), TMDB_MAX_PAGE);
 }
 
 function uniqueSorted(ids: readonly number[]): number[] {
@@ -515,6 +516,6 @@ function checkCountry(country: string): string {
 }
 
 function checkYear(year: number): number {
-  if (!Number.isSafeInteger(year) || year < 1800 || year > 9999) throw new Error(`Invalid year: ${year}`);
+  if (!Number.isSafeInteger(year) || year < TMDB_YEAR_RANGE.min || year > TMDB_YEAR_RANGE.max) throw new Error(`Invalid year: ${year}`);
   return year;
 }

@@ -11,6 +11,15 @@ export interface RatingsStore {
   getMany(tconsts: readonly string[]): Promise<Map<string, ImdbRating>>;
 }
 
+/**
+ * Whether the ratings table holds any rows. Empty means the daily load has
+ * not landed yet (a fresh database, or a load that never succeeded), so a
+ * missing rating says nothing about IMDb. Cards must not read that as "no rating".
+ */
+export interface RatingsDatasetProbe {
+  hasAnyRatings(): Promise<boolean>;
+}
+
 const TCONST = /^tt\d+$/;
 
 /** Batch lookup. Ignores duplicates and anything that is not an IMDb title ID. */
@@ -47,8 +56,12 @@ export async function attachImdbRatings<T extends Candidate>(
 }
 
 /** A process-local store, for tests and scripts. */
-export class MemoryRatingsStore implements RatingsStore {
+export class MemoryRatingsStore implements RatingsStore, RatingsDatasetProbe {
   constructor(readonly rows = new Map<string, ImdbRating>()) {}
+
+  async hasAnyRatings(): Promise<boolean> {
+    return this.rows.size > 0;
+  }
 
   async getMany(tconsts: readonly string[]): Promise<Map<string, ImdbRating>> {
     const out = new Map<string, ImdbRating>();
