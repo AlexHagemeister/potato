@@ -1,11 +1,11 @@
 // Reads over a user's library. Each takes the user id explicitly, like the
 // actions, so the app, the API, and a future AI connection share them.
 
-import { and, asc, count, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, or } from "drizzle-orm";
 import { getDb } from "@/db/client";
-import { titleStatus } from "@/db/schema";
+import { MEDIA_TYPES, titleStatus } from "@/db/schema";
 import { getUserSettings } from "../settings/user-settings";
-import type { Candidate, ListStatus, MediaType, TitleId, UserTitleState } from "../types";
+import type { Candidate, ListStatus, MediaType, TitleId, TitleStatus, UserTitleState } from "../types";
 import { fail, ok, validateUserId, type Result } from "../result";
 import { applyListFilters, filtersNeedDetails, pageRows, parseListQuery, withDetails } from "./list";
 import { recordFromDrizzle } from "./rows";
@@ -25,16 +25,43 @@ export async function getUserTitleStates(userId: string): Promise<Result<UserTit
     })
     .from(titleStatus)
     .where(eq(titleStatus.userId, u.value));
-  return ok(
-    rows.map((r): UserTitleState => {
-      if (r.status === "skipped") {
-        // The schema guarantees skip_until on a skipped row. If it were ever
-        // missing, an invalid date keeps the title hidden (the deck's choice).
-        return { mediaType: r.mediaType, tmdbId: r.tmdbId, status: "skipped", skipUntil: r.skipUntil ?? "" };
-      }
-      return { mediaType: r.mediaType, tmdbId: r.tmdbId, status: r.status };
-    }),
-  );
+  return ok(rows.map(toUserTitleState));
+}
+
+/**
+ * The user's rows for these titles only, in the deck engine's shape. Titles
+ * with no row are absent. One query: the deck checks the cards it has queued
+ * when Discover becomes active again. The caller validates and caps `refs`.
+ */
+export async function getTitleStatesFor(userId: string, refs: readonly TitleId[]): Promise<Result<UserTitleState[]>> {
+  const u = validateUserId(userId);
+  if (!u.ok) return u;
+  // The ID alone is ambiguous (architecture rule 1), so the query matches the
+  // pair: one IN list per media type, each on the full primary key.
+  const byType = MEDIA_TYPES.flatMap((mediaType) => {
+    const ids = [...new Set(refs.filter((r) => r.mediaType === mediaType).map((r) => r.tmdbId))];
+    return ids.length > 0 ? [and(eq(titleStatus.mediaType, mediaType), inArray(titleStatus.tmdbId, ids))] : [];
+  });
+  if (byType.length === 0) return ok([]);
+  const rows = await getDb()
+    .select({
+      mediaType: titleStatus.mediaType,
+      tmdbId: titleStatus.tmdbId,
+      status: titleStatus.status,
+      skipUntil: titleStatus.skipUntil,
+    })
+    .from(titleStatus)
+    .where(and(eq(titleStatus.userId, u.value), or(...byType)));
+  return ok(rows.map(toUserTitleState));
+}
+
+function toUserTitleState(r: { mediaType: MediaType; tmdbId: number; status: TitleStatus; skipUntil: Date | null }): UserTitleState {
+  if (r.status === "skipped") {
+    // The schema guarantees skip_until on a skipped row. If it were ever
+    // missing, an invalid date keeps the title hidden (the deck's choice).
+    return { mediaType: r.mediaType, tmdbId: r.tmdbId, status: "skipped", skipUntil: r.skipUntil ?? "" };
+  }
+  return { mediaType: r.mediaType, tmdbId: r.tmdbId, status: r.status };
 }
 
 /** The user's row for one title, or null when the title is on no list and not skipped. For a card opened from search. */

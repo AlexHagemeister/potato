@@ -11,7 +11,7 @@ export {
   updateRatingReview,
   watchlistTitle,
 } from "./actions";
-export { getList, getRatedCount, getTitleState, getTopRatedSeen, getUserTitleStates } from "./queries";
+export { getList, getRatedCount, getTitleState, getTitleStatesFor, getTopRatedSeen, getUserTitleStates } from "./queries";
 export {
   getDeckChoice,
   getUserSettings,

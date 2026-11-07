@@ -4,7 +4,7 @@
 // injected ones (tests).
 
 import { PostgresRatingsStore } from "../imdb/postgres";
-import { getTitleState, getTopRatedSeen, getUserSettings, getUserTitleStates } from "../library";
+import { getTitleState, getTitleStatesFor, getTopRatedSeen, getUserSettings, getUserTitleStates } from "../library";
 import { ok, type Result } from "../result";
 import { getTmdb } from "../tmdb/client";
 import type { TitleId } from "../types";
@@ -21,6 +21,7 @@ export const libraryForDeck: DeckLibrary = {
   getUserTitleStates,
   getUserSettings,
   getTopRatedSeen,
+  getTitleStatesFor,
   async getTitleState(userId, ref) {
     const row = await getTitleState(userId, ref);
     if (!row.ok) return row;
@@ -48,4 +49,12 @@ export function getDeck(userId: string, request: DeckRequest = {}): Promise<Resu
 /** The full card for one title, with the user's current status for it. */
 export function getCard(userId: string, ref: TitleId): Promise<Result<Card>> {
   return appService().getCard(userId, ref);
+}
+
+/**
+ * Which of these titles the deck must no longer show (sorted since they were
+ * dealt). The Discover screen checks its queued cards with it on return.
+ */
+export function hiddenTitles(userId: string, refs: unknown): Promise<Result<TitleId[]>> {
+  return appService().hiddenTitles(userId, refs);
 }

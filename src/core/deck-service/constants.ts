@@ -48,3 +48,9 @@ export const JUSTWATCH_ATTRIBUTION = {
   text: "Streaming availability from JustWatch",
   url: "https://www.justwatch.com",
 } as const;
+
+/**
+ * Titles one hiddenTitles call may check. The Discover screen sends its queued
+ * cards, which stay well under this (a few pages of at most POOL_QUOTA titles).
+ */
+export const MAX_HIDDEN_CHECK = 100;

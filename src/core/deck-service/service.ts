@@ -29,7 +29,7 @@ import { DISCOVER_POOLS, streamingProviderIds, type DiscoverPool, type TmdbClien
 import { TMDB_MAX_PAGE, TMDB_YEAR_RANGE } from "../tmdb/constants";
 import { isPermanentTmdbFailure } from "../tmdb/http";
 import type { DiscoverFilters, ResultPage, TitleDetails, TitleSummary } from "../tmdb/types";
-import { titleIdError, tryFormatTitleKey } from "../title-id";
+import { formatTitleKey, titleIdError, toTitleId, tryFormatTitleKey } from "../title-id";
 import {
   DISCOVERY_MODES,
   type Candidate,
@@ -46,6 +46,7 @@ import {
   DETAILS_CONCURRENCY,
   DETAILS_OUTAGE_MIN_FAILURES,
   FOR_YOU_SEED_COUNT,
+  MAX_HIDDEN_CHECK,
   MAX_PAGES_PER_STREAM,
   POOL_QUOTA,
   RATINGS_PROBE_TTL_MS,
@@ -76,6 +77,8 @@ export interface DeckLibrary {
   getTitleState(userId: string, ref: TitleId): Promise<Result<CardUserState | null>>;
   /** The user's Seen titles of these media types, highest rating first (ties: most recently changed first), at most `limit`. */
   getTopRatedSeen(userId: string, mediaTypes: readonly MediaType[], limit: number): Promise<Result<TitleId[]>>;
+  /** The user's rows for these titles only. Titles with no row are absent. */
+  getTitleStatesFor(userId: string, refs: readonly TitleId[]): Promise<Result<UserTitleState[]>>;
 }
 
 export interface DeckServiceDeps {
@@ -332,7 +335,37 @@ export function createDeckService(deps: DeckServiceDeps) {
     );
   }
 
-  return { getDeck, getCard };
+  /**
+   * Which of these titles the deck must no longer show, by the deck's own
+   * hiding rule (on a list, or skipped until later). The Discover screen keeps
+   * its queued cards across tab switches, and a title in that queue may have
+   * been sorted elsewhere since (Search, Lists, another device): it sends the
+   * queued titles here when it comes back, and drops the ones returned (VISION
+   * invariant 3). One database read, no TMDB call. `refs` comes from the
+   * client, so it is checked: a list of at most MAX_HIDDEN_CHECK titles.
+   */
+  async function hiddenTitles(userId: string, refs: unknown): Promise<Result<TitleId[]>> {
+    const u = validateUserId(userId);
+    if (!u.ok) return u;
+    if (!Array.isArray(refs)) return fail({ code: "invalid_title", message: "expected a list of titles" });
+    if (refs.length > MAX_HIDDEN_CHECK) {
+      return fail({ code: "invalid_title", message: `at most ${MAX_HIDDEN_CHECK} titles per check` });
+    }
+    const ids = new Map<string, TitleId>();
+    for (const ref of refs) {
+      const error = titleIdError(ref);
+      if (error) return fail({ code: "invalid_title", message: error });
+      const id = toTitleId(ref as TitleId);
+      ids.set(formatTitleKey(id), id);
+    }
+    if (ids.size === 0) return ok([]);
+    const states = await library.getTitleStatesFor(u.value, [...ids.values()]);
+    if (!states.ok) return states;
+    const visible = createVisibilityCheck(states.value, clock());
+    return ok([...ids.values()].filter((id) => !visible(id)));
+  }
+
+  return { getDeck, getCard, hiddenTitles };
 }
 
 function invalid<T>(message: string): Result<T> {
