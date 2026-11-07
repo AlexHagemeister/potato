@@ -15,7 +15,7 @@ import { getCurrentUserForRequest } from "@/lib/current-user";
 //
 // 200 { ok: true, page }      a DeckPage (cards, locked, or no_seeds)
 // 400 { ok: false, error }    invalid_deck_query: a bad mode or a stale cursor. Start again without a cursor.
-// 401 { ok: false, error }    signed_out
+// 401 { ok: false, error }    signed_out: no session, or the user row is gone
 // 503 { ok: false, error }    unavailable: TMDB (or the database) failed. Retry later.
 export const dynamic = "force-dynamic";
 
@@ -43,7 +43,11 @@ export async function GET(request: Request): Promise<Response> {
     });
     if (result.ok) return reply({ ok: true, page: result.value }, 200);
     if (result.error.code === "invalid_deck_query") return reply({ ok: false, error: "invalid_deck_query" }, 400);
-    // Any other refusal (a user row that vanished, an error code added later) reads as a failure to retry.
+    // The session outlived its user row: the client reloads to the sign-in screen.
+    if (result.error.code === "unknown_user" || result.error.code === "invalid_user") {
+      return reply({ ok: false, error: "signed_out" }, 401);
+    }
+    // Any other refusal (an error code added later) reads as a failure to retry.
     console.error("deck: getDeck refused:", result.error);
     return reply({ ok: false, error: "unavailable" }, 503);
   } catch (err) {

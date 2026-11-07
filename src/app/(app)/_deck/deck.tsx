@@ -7,8 +7,10 @@ import type { SortKind } from "./actions";
 import { CardView } from "./card-view";
 import { DeckButtons } from "./deck-buttons";
 import { SeenSheet } from "./seen-sheet";
+import type { DeckPageCard } from "@/core/deck-service/types";
 import {
-  dismissToast,
+  clearSeenDraft,
+  dismissNotice,
   retry,
   sortCard,
   startDeck,
@@ -18,6 +20,7 @@ import {
   useDeck,
   viewOf,
   type DeckView,
+  type Notice,
   type Toast,
 } from "./store";
 
@@ -95,44 +98,53 @@ function Body({ view }: { view: Exclude<DeckView, { kind: "card" }> }) {
   }
 }
 
-function ToastBar({ toast }: { toast: Toast }) {
+const PILL = "pointer-events-auto flex min-h-11 items-center gap-2 rounded-full bg-surface-raised py-1 pr-1 pl-4 shadow-xl ring-1 ring-hairline";
+
+/** The Undo toast, with an error notice stacked above it. A notice never replaces the Undo. */
+function Toasts({ toast, notice }: { toast: Toast | null; notice: Notice | null }) {
+  if (!toast && !notice) return null;
   return (
     <div
       role="status"
-      className="pointer-events-none fixed inset-x-4 z-40 flex justify-center"
+      className="pointer-events-none fixed inset-x-4 z-40 flex flex-col items-center gap-2"
       // Just above the four buttons, so fast taps on them never land on the toast.
       style={{ bottom: "calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + var(--deck-actions-height) + 0.5rem)" }}
     >
-      <div className="pointer-events-auto flex min-h-11 items-center gap-2 rounded-full bg-surface-raised py-1 pr-1 pl-4 shadow-xl ring-1 ring-hairline">
-        <span className="text-sm">{toast.message}</span>
-        {toast.undoable ? (
+      {notice && (
+        <div data-toast="notice" className={PILL}>
+          <span className="text-sm">{notice.message}</span>
+          <button type="button" aria-label="Dismiss" onClick={() => dismissNotice(notice.id)} className="h-9 rounded-full px-3 text-sm text-muted">
+            OK
+          </button>
+        </div>
+      )}
+      {toast && (
+        <div data-toast="undo" className={PILL}>
+          <span className="text-sm">{toast.message}</span>
           <button type="button" onClick={() => void undoLastSort()} className="h-9 rounded-full px-4 text-sm font-semibold text-accent">
             Undo
           </button>
-        ) : (
-          <button
-            type="button"
-            aria-label="Dismiss"
-            onClick={() => dismissToast(toast.id)}
-            className="h-9 rounded-full px-3 text-sm text-muted"
-          >
-            OK
-          </button>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
 
-/** Discover: the deck, one card at a time, with the four buttons above the tab bar. */
-export function Deck({ userId }: { userId: string }) {
+/**
+ * Discover: the deck, one card at a time, with the four buttons above the tab
+ * bar. `settingsKey` names the user's country and services: when it changes,
+ * the queued cards are refetched with the new streaming data.
+ */
+export function Deck({ userId, settingsKey }: { userId: string; settingsKey: string }) {
   const state = useDeck();
   const view = viewOf(state);
   const card = view.kind === "card" ? view.card : null;
-  const [seenFor, setSeenFor] = useState<string | null>(null);
+  // The card the Seen it sheet is open for. The sheet keeps it even if a
+  // failed save puts another card on top meanwhile.
+  const [seenCard, setSeenCard] = useState<DeckPageCard | null>(null);
   const top = useRef<HTMLDivElement>(null);
 
-  useEffect(() => startDeck(userId), [userId]);
+  useEffect(() => startDeck(userId, settingsKey), [userId, settingsKey]);
 
   // Each new card starts at its top, even if the last one was scrolled to the trailer.
   const key = card ? titleKey(card) : view.kind;
@@ -142,15 +154,20 @@ export function Deck({ userId }: { userId: string }) {
 
   function onTap(kind: SortKind) {
     if (!card) return;
-    if (kind === "seen") setSeenFor(titleKey(card));
+    if (kind === "seen") setSeenCard(card);
     else sortCard(kind, card);
   }
 
-  const closeSheet = () => setSeenFor(null);
-  const sheetOpen = card !== null && seenFor === titleKey(card);
+  // A sheet the user opened wins. A failed save's draft waits for it to close.
+  const draft = seenCard ? null : state.seenDraft;
+  const sheetCard = seenCard ?? draft?.card ?? null;
+  const closeSheet = () => {
+    setSeenCard(null);
+    clearSeenDraft();
+  };
 
   return (
-    <Screen actions={<DeckButtons disabled={!card || sheetOpen || state.undoing} onTap={onTap} />}>
+    <Screen actions={<DeckButtons disabled={!card || sheetCard !== null || state.undoing} onTap={onTap} />}>
       <div ref={top} />
       {/* The filter and mode controls go in this row (the next slice). The deck is the blend until then. */}
       <div data-slot="deck-controls" className="mb-3 flex h-8 items-center justify-between">
@@ -159,17 +176,20 @@ export function Deck({ userId }: { userId: string }) {
 
       {card ? <CardView key={titleKey(card)} card={card} /> : <Body view={view as Exclude<DeckView, { kind: "card" }>} />}
 
-      {sheetOpen && card && (
+      {sheetCard && (
         <SeenSheet
-          title={card.title}
+          // Prefixed: the card beside it is keyed by the bare title key.
+          key={`${draft ? "seen-draft" : "seen"}-${titleKey(sheetCard)}`}
+          title={sheetCard.title}
+          draft={draft ?? undefined}
           onCancel={closeSheet}
           onSave={(rating, review) => {
-            setSeenFor(null);
-            sortCard("seen", card, { rating, review });
+            closeSheet();
+            sortCard("seen", sheetCard, { rating, review });
           }}
         />
       )}
-      {state.toast && !sheetOpen && <ToastBar toast={state.toast} />}
+      {!sheetCard && <Toasts toast={state.toast} notice={state.notice} />}
     </Screen>
   );
 }

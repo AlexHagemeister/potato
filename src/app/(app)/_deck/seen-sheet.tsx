@@ -32,19 +32,22 @@ function formatStars(rating: number): string {
 /**
  * Seen it: rate (required) and review (optional). Save marks the title seen
  * and the deck advances. Cancel, the backdrop, or Escape closes the sheet and
- * leaves the card as it was.
+ * leaves the card as it was. After a failed save the sheet reopens with what
+ * the user entered (`draft`) and the error.
  */
 export function SeenSheet({
   title,
+  draft,
   onSave,
   onCancel,
 }: {
   title: string;
+  draft?: { rating: number; review: string | null; error: string };
   onSave: (rating: number, review: string | null) => void;
   onCancel: () => void;
 }) {
-  const [rating, setRating] = useState<number | null>(null);
-  const [review, setReview] = useState("");
+  const [rating, setRating] = useState<number | null>(draft?.rating ?? null);
+  const [review, setReview] = useState(draft?.review ?? "");
   const keyboard = useKeyboardInset();
 
   useEffect(() => {
@@ -70,6 +73,11 @@ export function SeenSheet({
         <h2 id="seen-sheet-title" className="mb-4 text-xl leading-tight font-semibold">
           {title}
         </h2>
+        {draft && (
+          <p role="alert" className="mb-4 rounded-xl bg-surface px-4 py-2 text-sm">
+            {draft.error}
+          </p>
+        )}
 
         <div className="mb-1 flex justify-center">
           <StarRating value={rating} onChange={setRating} />

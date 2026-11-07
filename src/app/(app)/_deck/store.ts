@@ -4,16 +4,20 @@
 // optimistic sorts, and the last sort's Undo. It lives at module scope, not in
 // a component, so switching tabs and coming back shows the same card at once,
 // with no refetch. It is scoped to one user: a different user id resets it.
+// A change to the user's country or services (the settings key) refreshes the
+// queued cards, since their streaming data is stale.
 //
-// The paging rules (dedupe, when to ask for more, stale cursors) are core's
-// (src/core/deck-queue). This file only sequences fetches and server actions
-// and holds what the screen shows.
+// The paging rules (dedupe, when to ask for more, stale cursors, refresh) are
+// core's (src/core/deck-queue). This file only sequences fetches and server
+// actions and holds what the screen shows.
 
 import { useSyncExternalStore } from "react";
 import {
   addPage,
+  afterRefusal,
   emptyQueue,
   needsMore,
+  refreshQueue,
   removeCard,
   restartCursor,
   resumeQueue,
@@ -27,7 +31,7 @@ import type { TitleId } from "@/core/types";
 import type { DeckResponse } from "@/app/api/deck/route";
 import { markSeenAction, sortCardAction, undoSortAction, type DeckActionResult, type SortKind } from "./actions";
 
-/** How long the Undo toast stays up. */
+/** How long the Undo toast and an error notice stay up. */
 const TOAST_MS = 4500;
 /** Posters to load ahead of the card on screen. */
 const PRELOAD_AHEAD = 2;
@@ -39,11 +43,24 @@ const DONE_LABEL: Record<SortKind, string> = {
   seen: "Marked as seen",
 };
 
+/** The last sort's confirmation, with its Undo. */
 export interface Toast {
   id: number;
   message: string;
-  /** Set when the toast offers Undo for this sort. */
-  undoable: boolean;
+}
+
+/** An error message. It shows beside the Undo toast, never in place of it. */
+export interface Notice {
+  id: number;
+  message: string;
+}
+
+/** A Seen it save that failed: the sheet reopens with what the user entered. */
+export interface SeenDraft {
+  card: DeckPageCard;
+  rating: number;
+  review: string | null;
+  error: string;
 }
 
 interface LastSort {
@@ -63,6 +80,8 @@ export type DeckView =
 
 export interface DeckState {
   userId: string | null;
+  /** The user's country and services the queued cards were fetched for. */
+  settingsKey: string | null;
   queue: DeckQueue;
   fetching: boolean;
   /** The last page fetch failed. */
@@ -70,19 +89,37 @@ export interface DeckState {
   /** A non-card page ("for you" needs ratings first). */
   gate: Extract<DeckPage, { kind: "locked" | "no_seeds" }> | null;
   toast: Toast | null;
+  notice: Notice | null;
+  seenDraft: SeenDraft | null;
   /** An undo is on its way to the server. The buttons wait, so a new sort can't race it. */
   undoing: boolean;
 }
 
-function initialState(userId: string | null): DeckState {
-  return { userId, queue: emptyQueue(), fetching: false, failed: false, gate: null, toast: null, undoing: false };
+function initialState(userId: string | null, settingsKey: string | null): DeckState {
+  return {
+    userId,
+    settingsKey,
+    queue: emptyQueue(),
+    fetching: false,
+    failed: false,
+    gate: null,
+    toast: null,
+    notice: null,
+    seenDraft: null,
+    undoing: false,
+  };
 }
 
-let state: DeckState = initialState(null);
-/** Bumped on every reset, so a fetch started before it is ignored. */
+let state: DeckState = initialState(null, null);
+/** Bumped when the user changes, so a save that finishes later can't touch the next user's deck. */
 let generation = 0;
+/** Bumped whenever the queue restarts, so a page fetched for the old queue is thrown away. */
+let fetchEpoch = 0;
+/** A fetch loop is running. */
+let filling = false;
 let lastSort: LastSort | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
+let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 let nextId = 0;
 const preloaded = new Set<string>();
 const listeners = new Set<() => void>();
@@ -114,24 +151,49 @@ export function useDeck(): DeckState {
   return useSyncExternalStore(subscribe, () => state, () => state);
 }
 
-/** Called on mount: binds the store to the signed-in user and starts filling it. */
-export function startDeck(userId: string) {
-  if (state.userId !== userId) reset(userId);
+/**
+ * Called each time Discover mounts (the app opens, or the user taps back to
+ * the tab). Binds the store to the signed-in user, refreshes the queued cards
+ * if the country or services changed, re-checks a locked or no_seeds deck
+ * (ratings made elsewhere may unlock it), and fills the queue.
+ */
+export function startDeck(userId: string, settingsKey: string) {
+  if (state.userId !== userId) {
+    reset(userId, settingsKey);
+  } else if (state.settingsKey !== settingsKey) {
+    // The toast's Undo would bring back a card with the old streaming data.
+    dropUndo();
+    fetchEpoch++;
+    set({ settingsKey, queue: refreshQueue(state.queue), gate: null, failed: false });
+  } else if (state.gate) {
+    fetchEpoch++;
+    set({ gate: null, queue: restartCursor(state.queue) });
+  } else if (state.failed) {
+    // Coming back to the tab is a retry.
+    set({ failed: false });
+  }
   void fill();
 }
 
-function reset(userId: string | null) {
+function reset(userId: string, settingsKey: string) {
   generation++;
+  fetchEpoch++;
   lastSort = null;
   clearTimeout(toastTimer);
+  clearTimeout(noticeTimer);
   preloaded.clear();
-  state = initialState(userId);
+  state = { ...initialState(userId, settingsKey), fetching: filling };
   for (const l of listeners) l();
 }
 
-/** The deck ran out: start over from the first page. */
+/**
+ * The deck ran out: ask again from the first page. Saves still in flight keep
+ * their handlers, and every title already dealt stays out, so a sort that
+ * hasn't landed can't be dealt again.
+ */
 export function startOver() {
-  reset(state.userId);
+  fetchEpoch++;
+  set({ failed: false, queue: restartCursor(state.queue) });
   void fill();
 }
 
@@ -152,26 +214,35 @@ async function fetchPage(cursor: string | null): Promise<DeckResponse> {
   }
 }
 
-/** Fetches pages until the queue has enough cards, the deck ends, or a fetch fails. */
+/**
+ * Fetches pages until the queue has enough cards, the deck ends, or a fetch
+ * fails. One loop at a time: if the queue restarts while a page is on its way
+ * (a refresh, a new user), that page is thrown away and the loop asks again.
+ */
 async function fill() {
-  if (state.fetching || !state.userId) return;
-  const gen = generation;
+  if (filling || !state.userId) return;
+  filling = true;
   let restarted = false;
   set({ fetching: true });
   try {
-    while (gen === generation && !state.gate && needsMore(state.queue)) {
+    while (state.userId && !state.gate && !state.failed && needsMore(state.queue)) {
+      const epoch = fetchEpoch;
       const body = await fetchPage(state.queue.cursor);
-      if (gen !== generation) return;
+      if (epoch !== fetchEpoch) {
+        restarted = false;
+        continue;
+      }
       if (!body.ok) {
         // The session ended while the app stayed open: reload, so the shell shows the sign-in screen.
         if (body.error === "signed_out") {
           window.location.reload();
           return;
         }
-        // A stale cursor (the user changed settings): start again once, without it.
-        if (body.error === "invalid_deck_query" && state.queue.cursor !== null && !restarted) {
+        // A stale cursor (an old cursor version, or settings changed): start again once, without it.
+        const next = afterRefusal(state.queue, body.error, restarted);
+        if (next) {
           restarted = true;
-          set({ queue: restartCursor(state.queue) });
+          set({ queue: next });
           continue;
         }
         set({ failed: true });
@@ -185,7 +256,8 @@ async function fill() {
       preload();
     }
   } finally {
-    if (gen === generation) set({ fetching: false });
+    filling = false;
+    set({ fetching: false });
   }
 }
 
@@ -200,10 +272,10 @@ function preload() {
   }
 }
 
-function showToast(message: string, undoable: boolean): number {
+function showToast(message: string): number {
   clearTimeout(toastTimer);
   const id = ++nextId;
-  set({ toast: { id, message, undoable } });
+  set({ toast: { id, message } });
   toastTimer = setTimeout(() => dismissToast(id), TOAST_MS);
   return id;
 }
@@ -214,9 +286,33 @@ export function dismissToast(id: number) {
   set({ toast: null });
 }
 
+/** Ends the last sort's Undo window. */
+function dropUndo() {
+  lastSort = null;
+  clearTimeout(toastTimer);
+  if (state.toast) set({ toast: null });
+}
+
+function showNotice(message: string) {
+  clearTimeout(noticeTimer);
+  const id = ++nextId;
+  set({ notice: { id, message } });
+  noticeTimer = setTimeout(() => dismissNotice(id), TOAST_MS);
+}
+
+export function dismissNotice(id: number) {
+  if (state.notice?.id === id) set({ notice: null });
+}
+
+/** The reopened Seen it sheet was saved again or cancelled. */
+export function clearSeenDraft() {
+  if (state.seenDraft) set({ seenDraft: null });
+}
+
 /**
- * Sorts the card on screen. The next card shows at once and the write runs
- * behind it. If the write fails, the card comes back on top with a message.
+ * Sorts a card. The next card shows at once and the write runs behind it. If
+ * the write fails, the card comes back on top: a failed Seen it reopens its
+ * sheet with the rating and review, any other sort shows an error notice.
  */
 export function sortCard(kind: SortKind, card: DeckPageCard, seen?: { rating: number; review: string | null }) {
   const gen = generation;
@@ -229,14 +325,16 @@ export function sortCard(kind: SortKind, card: DeckPageCard, seen?: { rating: nu
     .catch((): DeckActionResult => ({ ok: false, error: "Couldn't save. Check your connection." }))
     .then((result) => {
       if (!result.ok && gen === generation) {
-        if (lastSort?.card === card) lastSort = null;
+        // Only this sort's own Undo goes away. A newer sort keeps its toast.
+        if (lastSort?.card === card) dropUndo();
         set({ queue: returnToFront(state.queue, card) });
-        showToast(result.error, false);
+        if (seen) set({ seenDraft: { card, rating: seen.rating, review: seen.review, error: result.error } });
+        else showNotice(result.error);
       }
       return result;
     });
 
-  const id = showToast(DONE_LABEL[kind], true);
+  const id = showToast(DONE_LABEL[kind]);
   lastSort = { id, card, pending };
   void fill();
 }
@@ -264,7 +362,7 @@ export async function undoLastSort() {
   if (gen !== generation || undone.ok) return;
   // The sort stands, so the card leaves the deck again.
   set({ queue: removeCard(state.queue, sort.card) });
-  showToast(undone.error, false);
+  showNotice(undone.error);
 }
 
 /** Only the title's identity goes to the server, not the whole card. */

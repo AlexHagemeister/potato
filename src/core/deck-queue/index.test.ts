@@ -4,10 +4,12 @@ import type { DeckPageCard } from "../deck-service/types";
 import type { MediaType } from "../types";
 import {
   addPage,
+  afterRefusal,
   emptyQueue,
   MAX_EMPTY_PAGES,
   needsMore,
   QUEUE_LOW_WATER,
+  refreshQueue,
   removeCard,
   restartCursor,
   resumeQueue,
@@ -141,5 +143,43 @@ describe("restartCursor", () => {
     expect(ids(q)).toEqual(["movie:1"]);
     q = addPage(q, { cards: [card(1), card(2)], nextCursor: "fresh" });
     expect(ids(q)).toEqual(["movie:1", "movie:2"]);
+  });
+});
+
+describe("afterRefusal", () => {
+  test("a stale cursor restarts once without it", () => {
+    const q = addPage(emptyQueue(), { cards: [card(1)], nextCursor: "v2-cursor" });
+    const next = afterRefusal(q, "invalid_deck_query", false);
+    expect(next?.cursor).toBeNull();
+    expect(ids(next!)).toEqual(["movie:1"]);
+    expect(afterRefusal(q, "invalid_deck_query", true)).toBeNull();
+  });
+
+  test("a refusal without a cursor, or any other error, shows the error", () => {
+    expect(afterRefusal(emptyQueue(), "invalid_deck_query", false)).toBeNull();
+    const q = addPage(emptyQueue(), { cards: [], nextCursor: "c" });
+    expect(afterRefusal(q, "unavailable", false)).toBeNull();
+  });
+});
+
+describe("refreshQueue", () => {
+  test("drops queued cards so the next pages deal them again, keeping sorted titles out", () => {
+    let q = addPage(emptyQueue(), { cards: [card(1), card(2), card(3)], nextCursor: "c" });
+    q = removeCard(q, card(1)); // sorted
+    q = refreshQueue(q);
+    expect(q.cards).toEqual([]);
+    expect(q.cursor).toBeNull();
+    expect(needsMore(q)).toBe(true);
+    q = addPage(q, { cards: [card(1), card(4), card(3), card(2)], nextCursor: null });
+    // 2 was on screen, so it goes back on top. 1 was sorted, so it stays out.
+    expect(ids(q)).toEqual(["movie:2", "movie:4", "movie:3"]);
+  });
+
+  test("keeps the old top only for the first page after the refresh", () => {
+    let q = addPage(emptyQueue(), { cards: [card(7)], nextCursor: "c" });
+    q = refreshQueue(q);
+    q = addPage(q, { cards: [card(8)], nextCursor: "d" });
+    q = addPage(q, { cards: [card(9), card(7)], nextCursor: null });
+    expect(ids(q)).toEqual(["movie:8", "movie:9", "movie:7"]);
   });
 });
