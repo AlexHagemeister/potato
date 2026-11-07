@@ -5,7 +5,9 @@ import type { MediaType } from "../types";
 import {
   addPage,
   afterRefusal,
+  deckSettingsKey,
   emptyQueue,
+  forgetTitle,
   MAX_EMPTY_PAGES,
   needsMore,
   QUEUE_LOW_WATER,
@@ -15,6 +17,7 @@ import {
   resumeQueue,
   returnToFront,
   stalled,
+  startAgain,
 } from "./index";
 
 function card(tmdbId: number, mediaType: MediaType = "movie"): DeckPageCard {
@@ -181,5 +184,38 @@ describe("refreshQueue", () => {
     q = addPage(q, { cards: [card(8)], nextCursor: "d" });
     q = addPage(q, { cards: [card(9), card(7)], nextCursor: null });
     expect(ids(q)).toEqual(["movie:8", "movie:9", "movie:7"]);
+  });
+});
+
+describe("deckSettingsKey", () => {
+  test("ignores service order and duplicates, and changes with country or services", () => {
+    const a = deckSettingsKey({ country: "US", providerIds: [15, 8, 9, 8] });
+    expect(a).toBe(deckSettingsKey({ country: "us", providerIds: [8, 9, 15] }));
+    expect(a).not.toBe(deckSettingsKey({ country: "GB", providerIds: [8, 9, 15] }));
+    expect(a).not.toBe(deckSettingsKey({ country: "US", providerIds: [8, 9] }));
+  });
+});
+
+describe("startAgain", () => {
+  test("restarts from the first page and forgets dealt titles except queued and saving ones", () => {
+    let q = addPage(emptyQueue(), { cards: [card(1), card(2), card(3)], nextCursor: null });
+    q = removeCard(q, card(1)); // sorted and saved
+    q = removeCard(q, card(2)); // sorted, still saving
+    q = startAgain(q, ["movie:2"]);
+    expect(q.cursor).toBeNull();
+    expect(q.exhausted).toBe(false);
+    q = addPage(q, { cards: [card(1), card(2), card(3), card(4)], nextCursor: null });
+    expect(ids(q)).toEqual(["movie:3", "movie:1", "movie:4"]);
+  });
+});
+
+describe("forgetTitle", () => {
+  test("lets a sorted title be dealt again, and leaves a queued one alone", () => {
+    let q = addPage(emptyQueue(), { cards: [card(1), card(2)], nextCursor: "c" });
+    q = removeCard(q, card(1));
+    expect(forgetTitle(q, card(2))).toBe(q);
+    q = forgetTitle(q, card(1));
+    q = addPage(q, { cards: [card(1)], nextCursor: null });
+    expect(ids(q)).toEqual(["movie:2", "movie:1"]);
   });
 });

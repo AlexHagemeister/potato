@@ -1,6 +1,7 @@
 "use client";
 
 import type { Card, CardImdb, CardProvider, StreamingOffer } from "@/core/deck-service/types";
+import { formatTitleKey } from "@/core/title-id";
 import { Trailer } from "./trailer";
 
 // One card, top to bottom in VISION's order: poster; title, year, and type;
@@ -132,7 +133,7 @@ export function CardView({ card }: { card: Card }) {
   const type = card.mediaType === "movie" ? "Movie" : "Series";
 
   return (
-    <article aria-label={card.title} data-title-key={`${card.mediaType}:${card.tmdbId}`} className="pb-4">
+    <article aria-label={card.title} data-title-key={formatTitleKey(card)} className="pb-4">
       {card.posterUrl ? (
         // eslint-disable-next-line @next/next/no-img-element -- TMDB serves posters at fixed sizes
         <img

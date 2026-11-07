@@ -125,6 +125,38 @@ export function refreshQueue(queue: DeckQueue): DeckQueue {
   return { cards: [], dealt, cursor: null, exhausted: false, emptyPages: 0, keepOnTop: top ? titleKey(top) : null };
 }
 
+/**
+ * The settings a deck's cards depend on (country and streaming services), as
+ * one comparable string. When it changes, the queued cards are stale.
+ */
+export function deckSettingsKey(settings: { country: string; providerIds: readonly number[] }): string {
+  const ids = [...new Set(settings.providerIds)].sort((a, b) => a - b);
+  return `${settings.country.toUpperCase()}:${ids.join(",")}`;
+}
+
+/**
+ * Starts the deck again from the first page (Check again) and forgets the
+ * titles it dealt, except the queued cards and `keep` (sorts still saving),
+ * so a skip that expired or a title moved in Lists can be dealt again.
+ */
+export function startAgain(queue: DeckQueue, keep: Iterable<string>): DeckQueue {
+  const dealt = new Set(keep);
+  for (const card of queue.cards) dealt.add(titleKey(card));
+  return { ...restartCursor(queue), dealt };
+}
+
+/**
+ * Forgets one dealt title that is not queued, so a later page may deal it
+ * again with fresh data (its sort failed after the queue was refreshed).
+ */
+export function forgetTitle(queue: DeckQueue, ref: TitleId): DeckQueue {
+  const key = titleKey(ref);
+  if (!queue.dealt.has(key) || queue.cards.some((c) => titleKey(c) === key)) return queue;
+  const dealt = new Set(queue.dealt);
+  dealt.delete(key);
+  return { ...queue, dealt };
+}
+
 /** Takes a title out of the queue (it was sorted). Unknown titles leave it unchanged. */
 export function removeCard(queue: DeckQueue, ref: TitleId): DeckQueue {
   const key = titleKey(ref);

@@ -1,3 +1,4 @@
+import { deckSettingsKey } from "@/core/deck-queue";
 import { getUserSettings } from "@/core/settings/user-settings";
 import { getCurrentUserForRequest } from "@/lib/current-user";
 import { Deck } from "./_deck/deck";
@@ -15,7 +16,5 @@ export default async function DiscoverPage() {
   const settings = await getUserSettings(user.id);
   // unknown_user: the session outlived the user row.
   if (!settings.ok) return <SignedOutScreen />;
-  const { country, providerIds } = settings.value;
-  const settingsKey = `${country}:${[...providerIds].sort((a, b) => a - b).join(",")}`;
-  return <Deck userId={user.id} settingsKey={settingsKey} />;
+  return <Deck userId={user.id} settingsKey={deckSettingsKey(settings.value)} />;
 }

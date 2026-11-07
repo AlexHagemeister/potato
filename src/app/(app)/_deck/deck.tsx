@@ -6,11 +6,11 @@ import { Screen } from "../_shell/screen";
 import type { SortKind } from "./actions";
 import { CardView } from "./card-view";
 import { DeckButtons } from "./deck-buttons";
-import { SeenSheet } from "./seen-sheet";
+import { RatingSheet } from "../_components/rating-sheet";
 import type { DeckPageCard } from "@/core/deck-service/types";
 import {
-  clearSeenDraft,
   dismissNotice,
+  markCardSeen,
   retry,
   sortCard,
   startDeck,
@@ -140,7 +140,8 @@ export function Deck({ userId, settingsKey }: { userId: string; settingsKey: str
   const view = viewOf(state);
   const card = view.kind === "card" ? view.card : null;
   // The card the Seen it sheet is open for. The sheet keeps it even if a
-  // failed save puts another card on top meanwhile.
+  // failed Pass puts another card on top meanwhile. The sheet covers the
+  // screen, so nothing else can be sorted while it is open.
   const [seenCard, setSeenCard] = useState<DeckPageCard | null>(null);
   const top = useRef<HTMLDivElement>(null);
 
@@ -158,16 +159,8 @@ export function Deck({ userId, settingsKey }: { userId: string; settingsKey: str
     else sortCard(kind, card);
   }
 
-  // A sheet the user opened wins. A failed save's draft waits for it to close.
-  const draft = seenCard ? null : state.seenDraft;
-  const sheetCard = seenCard ?? draft?.card ?? null;
-  const closeSheet = () => {
-    setSeenCard(null);
-    clearSeenDraft();
-  };
-
   return (
-    <Screen actions={<DeckButtons disabled={!card || sheetCard !== null || state.undoing} onTap={onTap} />}>
+    <Screen actions={<DeckButtons disabled={!card || seenCard !== null || state.undoing} onTap={onTap} />}>
       <div ref={top} />
       {/* The filter and mode controls go in this row (the next slice). The deck is the blend until then. */}
       <div data-slot="deck-controls" className="mb-3 flex h-8 items-center justify-between">
@@ -176,20 +169,26 @@ export function Deck({ userId, settingsKey }: { userId: string; settingsKey: str
 
       {card ? <CardView key={titleKey(card)} card={card} /> : <Body view={view as Exclude<DeckView, { kind: "card" }>} />}
 
-      {sheetCard && (
-        <SeenSheet
+      {seenCard && (
+        <RatingSheet
           // Prefixed: the card beside it is keyed by the bare title key.
-          key={`${draft ? "seen-draft" : "seen"}-${titleKey(sheetCard)}`}
-          title={sheetCard.title}
-          draft={draft ?? undefined}
-          onCancel={closeSheet}
-          onSave={(rating, review) => {
-            closeSheet();
-            sortCard("seen", sheetCard, { rating, review });
+          key={`seen-${titleKey(seenCard)}`}
+          heading="Mark as seen"
+          title={seenCard.title}
+          subtitle={[seenCard.year, seenCard.mediaType === "movie" ? "Movie" : "Series"].filter(Boolean).join(" · ")}
+          posterUrl={seenCard.posterUrl}
+          initialRating={null}
+          initialReview={null}
+          onCancel={() => setSeenCard(null)}
+          // Waits for the save: on failure the sheet keeps the rating and review and shows the error.
+          onSave={async (rating, review) => {
+            const error = await markCardSeen(seenCard, rating, review === "" ? null : review);
+            if (!error) setSeenCard(null);
+            return error;
           }}
         />
       )}
-      {!sheetCard && <Toasts toast={state.toast} notice={state.notice} />}
+      {!seenCard && <Toasts toast={state.toast} notice={state.notice} />}
     </Screen>
   );
 }
