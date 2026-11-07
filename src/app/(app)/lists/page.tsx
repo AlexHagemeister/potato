@@ -22,6 +22,8 @@ export default async function ListsPage({ searchParams }: PageProps<"/lists">) {
     getAllLists(user.id, { filters: toDeckFilters(filters, new Date()) }),
     getUserSettings(user.id),
   ]);
+  // unknown_user: the session outlived the user row, as on Discover.
+  if (!settings.ok && settings.error.code === "unknown_user") return <SignedOutScreen />;
   // A signed-in user whose lists can't load is a broken state. Fail to the tab's error boundary.
   if (!result.ok) throw new Error(`Could not load lists: ${result.error.code}`);
   if (!settings.ok) throw new Error(`Could not load settings: ${settings.error.code}`);

@@ -207,14 +207,20 @@ export function chooseDeck(next: DeckChoice) {
   void saveChoice(choice);
 }
 
+/** Each save's number, in the order sent. The latest one sent decides what the deck shows. */
+let lastSaveSent = 0;
+let lastSaveConfirmed = 0;
+
 /**
  * Saves a choice to the profile. Saves run in order (server actions from one
- * page run one at a time). If one fails while its choice is still the one
- * shown, the deck goes back to the profile's choice and says so. If a newer
- * choice replaced it meanwhile, that choice's own save decides.
+ * page run one at a time). Only the latest save sent can roll the deck back:
+ * if it fails, the deck goes back to the last choice the profile confirmed and
+ * says so. An older save's failure is ignored, since a newer save follows it
+ * and decides what the profile holds.
  */
 async function saveChoice(choice: DeckChoice) {
   const gen = generation;
+  const seq = ++lastSaveSent;
   let result: { ok: true } | { ok: false; error: string };
   try {
     result = await saveDeckChoiceAction(choice);
@@ -223,10 +229,13 @@ async function saveChoice(choice: DeckChoice) {
   }
   if (gen !== generation) return;
   if (result.ok) {
-    profileChoice = choice;
+    if (seq > lastSaveConfirmed) {
+      lastSaveConfirmed = seq;
+      profileChoice = choice;
+    }
     return;
   }
-  if (deckChoiceKey(state.choice) !== deckChoiceKey(choice)) return;
+  if (seq !== lastSaveSent) return;
   showNotice(result.error);
   if (state.settingsKey !== null && rebase(state.settingsKey, profileChoice)) void fill();
 }
