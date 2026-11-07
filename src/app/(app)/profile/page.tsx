@@ -26,6 +26,7 @@ export default async function ProfilePage() {
         initialProviderIds={profile.settings.providerIds}
         countries={profile.countries}
         initialServices={profile.services}
+        servicesUnavailable={profile.servicesUnavailable}
       />
 
       <Attribution />

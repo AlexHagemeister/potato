@@ -19,6 +19,8 @@ export interface ProfileSettings {
   settings: { country: string; providerIds: number[] };
   countries: WatchRegion[];
   services: StreamingService[];
+  /** True when TMDB could not supply the services list. The rest of the tab still works. */
+  servicesUnavailable: boolean;
 }
 
 export function toStreamingServices(list: readonly ProviderListEntry[]): StreamingService[] {
@@ -40,16 +42,33 @@ export async function listStreamingServices(country: unknown): Promise<Streaming
   return toStreamingServices(await getTmdbClient().getProviderList(code));
 }
 
-/** Everything the Profile tab needs on first render. */
+/**
+ * Everything the Profile tab needs on first render. A TMDB failure degrades
+ * the tab instead of failing it, so the account section and Sign out always
+ * work: without regions the picker offers only the saved country, and without
+ * services the list shows an error.
+ */
 export async function getProfileSettings(userId: string): Promise<ProfileSettings> {
   const { country, providerIds } = await getUserSettings(userId);
-  const [regions, services] = await Promise.all([getWatchRegionsFromEnv(), listStreamingServices(country)]);
-  return { settings: { country, providerIds }, countries: countriesFor(country, regions), services };
+  const [regions, services] = await Promise.allSettled([getWatchRegionsFromEnv(), listStreamingServices(country)]);
+  if (regions.status === "rejected") console.error("watch regions unavailable:", regions.reason);
+  if (services.status === "rejected") console.error(`streaming services unavailable for ${country}:`, services.reason);
+  return {
+    settings: { country, providerIds },
+    countries: countriesFor(country, regions.status === "fulfilled" ? regions.value : []),
+    services: services.status === "fulfilled" ? services.value : [],
+    servicesUnavailable: services.status === "rejected",
+  };
 }
 
-/** Saves a new country and returns that country's streaming services. */
+/**
+ * Saves a new country and returns that country's streaming services. The list
+ * is fetched first, so a TMDB failure leaves the saved country unchanged and
+ * the screen and the database agree.
+ */
 export async function changeCountry(userId: string, country: unknown): Promise<StreamingService[]> {
   const code = parseCountry(country);
+  const services = await listStreamingServices(code);
   await setCountry(userId, code);
-  return listStreamingServices(code);
+  return services;
 }

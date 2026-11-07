@@ -10,6 +10,7 @@ interface Props {
   initialProviderIds: number[];
   countries: WatchRegion[];
   initialServices: StreamingService[];
+  servicesUnavailable: boolean;
 }
 
 /**
@@ -18,14 +19,18 @@ interface Props {
  * the save fails. Server actions from one page run one at a time, in order, so
  * the last tap's set is what ends up saved.
  */
-export function SettingsForm({ initialCountry, initialProviderIds, countries, initialServices }: Props) {
+export function SettingsForm({ initialCountry, initialProviderIds, countries, initialServices, servicesUnavailable }: Props) {
   const [country, setCountry] = useState(initialCountry);
   const [services, setServices] = useState(initialServices);
+  const [unavailable, setUnavailable] = useState(servicesUnavailable);
   const [selected, setSelected] = useState<number[]>(initialProviderIds);
   const [query, setQuery] = useState("");
   const [loadingServices, setLoadingServices] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const countryRequest = useRef(0);
+  const servicesRequest = useRef(0);
+  // The last set of services the server confirmed saving. A failed save rolls back to it.
+  const confirmedIds = useRef(initialProviderIds);
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -46,6 +51,7 @@ export function SettingsForm({ initialCountry, initialProviderIds, countries, in
     setLoadingServices(false);
     if (result.ok) {
       setServices(result.value);
+      setUnavailable(false);
       setQuery("");
     } else {
       setCountry(previous);
@@ -54,13 +60,17 @@ export function SettingsForm({ initialCountry, initialProviderIds, countries, in
   }
 
   async function toggle(id: number) {
-    const previous = selected;
-    const next = previous.includes(id) ? previous.filter((x) => x !== id) : [...previous, id];
+    const next = selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id];
+    const request = ++servicesRequest.current;
     setSelected(next);
     setError(null);
     const result = await saveServicesAction(next);
-    if (!result.ok) {
-      setSelected(previous);
+    if (result.ok) {
+      confirmedIds.current = next;
+    } else if (request === servicesRequest.current) {
+      // Only the latest save decides what the screen shows. Roll back to what
+      // the server last confirmed, which is what the database holds.
+      setSelected(confirmedIds.current);
       setError(result.error);
     }
   }
@@ -131,7 +141,11 @@ export function SettingsForm({ initialCountry, initialProviderIds, countries, in
         <div className={loadingServices ? "opacity-40 transition-opacity" : "transition-opacity"} aria-busy={loadingServices}>
           {visible.length === 0 ? (
             <p className="px-1 py-6 text-center text-sm text-muted">
-              {services.length === 0 ? "No streaming data for this country." : "No services match."}
+              {unavailable
+                ? "Couldn't load services. Try again later."
+                : services.length === 0
+                  ? "No streaming data for this country."
+                  : "No services match."}
             </p>
           ) : (
             <ul className="overflow-hidden rounded-2xl bg-surface">
