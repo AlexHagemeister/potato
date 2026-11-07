@@ -70,7 +70,7 @@ function ClearFilters({ onClear }: { onClear: () => void }) {
 }
 
 function Body({ view, filters, onClearFilters }: { view: Exclude<DeckView, { kind: "card" }>; filters: FilterNote; onClearFilters: () => void }) {
-  if (filters === "no_services" && (view.kind === "done" || view.kind === "stalled")) {
+  if (filters === "no_services" && (view.kind === "done" || view.kind === "stalled" || view.kind === "reach_spent")) {
     return (
       <EmptyState
         title="Pick your services first"
@@ -100,6 +100,13 @@ function Body({ view, filters, onClearFilters }: { view: Exclude<DeckView, { kin
       return (
         <EmptyState title="Couldn't load titles" action={<PillButton onClick={retry}>Try again</PillButton>}>
           The movie database didn&apos;t answer. Your sorting is saved.
+        </EmptyState>
+      );
+    case "reach_spent":
+      return (
+        <EmptyState title="Nothing more matches your filters" action={<PillButton onClick={retry}>Keep looking</PillButton>}>
+          A long search found no more titles rated IMDb {view.minimum} that fit. Try a lower minimum or fewer filters.
+          <ClearFilters onClear={onClearFilters} />
         </EmptyState>
       );
     case "stalled":

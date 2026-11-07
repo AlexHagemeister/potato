@@ -160,6 +160,8 @@ export async function getList(
       if (providerIds.length === 0) return ok({ status: query.value.status, entries: [], nextCursor: null });
       context = { country: settings.value.country };
     }
+    // A minimum IMDb rating needs each title's rating from IMDb's dataset.
+    if (typeof filters.minImdbRating === "number") context = { ...context, imdbRatings: true };
     details = await lookup(
       rows.map(({ mediaType, tmdbId }) => ({ mediaType, tmdbId })),
       context,

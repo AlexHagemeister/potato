@@ -3,7 +3,15 @@ import { FOR_YOU_MIN_RATINGS } from "../deck/constants";
 import { formatTitleKey } from "../title-id";
 import type { UserTitleState } from "../types";
 import type { DeckPage, DeckPageCard } from "./types";
-import { FOR_YOU_SEED_COUNT, JUSTWATCH_ATTRIBUTION, MAX_HIDDEN_CHECK, MAX_PAGES_PER_STREAM, POOL_QUOTA } from "./constants";
+import {
+  FOR_YOU_SEED_COUNT,
+  JUSTWATCH_ATTRIBUTION,
+  MAX_HIDDEN_CHECK,
+  MAX_PAGES_PER_STREAM,
+  MIN_RATING_PAGE_TARGET,
+  MIN_RATING_TAKE_ROUNDS,
+  POOL_QUOTA,
+} from "./constants";
 import { canonicalFilters, decodeCursor, encodeCursor } from "./cursor";
 import { NOW, detailsFor, emptyCountry, fakeService, provider, range, summary, world, type FakeWorld } from "./test-fakes";
 
@@ -494,6 +502,133 @@ describe("getDeck: failures", () => {
       expect(result).toMatchObject({ ok: false, error: { code: "invalid_deck_query" } });
     }
     expect(await service.getDeck("", {})).toMatchObject({ ok: false, error: { code: "invalid_user" } });
+    expect(calls.lists).toEqual([]);
+  });
+});
+
+describe("getDeck: minimum IMDb rating (issue 52)", () => {
+  muteWarnings();
+  const tt = (id: number) => `tt${String(id).padStart(7, "0")}`;
+  const moviesAt = (min: number) => ({ mode: "popular" as const, filters: { mediaTypes: ["movie" as const], minImdbRating: min } });
+
+  test("deals only titles IMDb rates at or above the minimum, and still looks up every title it reads", async () => {
+    const w = world({
+      lists: { "popular:movie": [range("movie", 1, 6)] },
+      // movie:5 has no dataset row, movie:6 no IMDb ID at all. Both have a high TMDB vote average (the fake's 7.5).
+      details: { "movie:6": detailsFor(summary("movie", 6), { imdbId: null }) },
+      ratings: new Map([
+        [tt(1), { rating: 8.2, votes: 90_000 }],
+        [tt(2), { rating: 7.5, votes: 3_000 }],
+        [tt(3), { rating: 7.4, votes: 50_000 }],
+        [tt(4), { rating: 5.1, votes: 200 }],
+      ]),
+    });
+    const { page, calls } = await deck(w, moviesAt(7.5));
+    const cards = cardsOf(page);
+    expect(keysOf(cards)).toEqual(["movie:1", "movie:2"]);
+    expect(cards.map((c) => c.imdb.kind === "rated" && c.imdb.rating)).toEqual([8.2, 7.5]);
+    // A list summary carries no IMDb data, so the rating can't be checked before the details: all six were read.
+    expect(calls.details.sort()).toEqual(range("movie", 1, 6).map(formatTitleKey).sort());
+    expect(calls.lists[0].filters).toEqual({ mediaType: "movie" });
+  });
+
+  test("a thin deck pages forward to its end: each call moves the cursor, and the last one is null", async () => {
+    const pages = Array.from({ length: 4 }, (_, p) => range("movie", p * 20 + 1, 20));
+    // One title in twenty clears the bar.
+    const ratings = new Map(pages.flat().map((s) => [tt(s.tmdbId), { rating: s.tmdbId % 20 === 7 ? 8.5 : 6.5, votes: 9_000 }]));
+    const { service } = fakeService(world({ lists: { "popular:movie": pages }, ratings }));
+    const dealt: string[] = [];
+    let cursor: string | null = null;
+    const seen = new Set<string>();
+    let calls = 0;
+    do {
+      const result = await service.getDeck(USER, { ...moviesAt(8), cursor });
+      if (!result.ok) throw new Error(JSON.stringify(result.error));
+      const page = result.value as { cards: DeckPageCard[]; nextCursor: string | null };
+      dealt.push(...keysOf(page.cards));
+      expect(page.nextCursor === null || !seen.has(page.nextCursor)).toBe(true);
+      if (page.nextCursor) seen.add(page.nextCursor);
+      cursor = page.nextCursor;
+      calls++;
+    } while (cursor !== null && calls < 20);
+    expect(cursor).toBeNull();
+    expect(dealt).toEqual(["movie:7", "movie:27", "movie:47", "movie:67"]);
+  });
+
+  test("ratings that can't be read are an outage: it throws, never deals an empty page that moves the cursor", async () => {
+    const w = world({ lists: { "popular:movie": [range("movie", 1, 3)] }, ratingsThrow: true });
+    await expect(fakeService(w).service.getDeck(USER, moviesAt(7))).rejects.toThrow(/IMDb ratings are unavailable/);
+    // An empty table (the first daily load has not landed) too.
+    const empty = world({ lists: { "popular:movie": [range("movie", 1, 3)] }, ratings: new Map() });
+    await expect(fakeService(empty).service.getDeck(USER, moviesAt(7))).rejects.toThrow(/IMDb ratings are unavailable/);
+    // Without a minimum the same outage still serves the deck (the rating shows as unavailable).
+    expect(cardsOf((await deck(w, { mode: "popular", filters: { mediaTypes: ["movie"] } })).page).length).toBe(3);
+  });
+
+  test("a cursor is bound to its minimum, and cursors from before the filter existed still continue", async () => {
+    const pages = Array.from({ length: 5 }, (_, p) => range("movie", p * 20 + 1, 20));
+    const w = world({ lists: { "popular:movie": pages }, ratings: new Map([[tt(1), { rating: 9, votes: 1 }]]) });
+    const { page, service } = await deck(w, moviesAt(7.5));
+    const cursor = (page as { nextCursor: string }).nextCursor;
+    expect(cursor).toBeTruthy();
+    for (const filters of [{ mediaTypes: ["movie" as const] }, { mediaTypes: ["movie" as const], minImdbRating: 8 }]) {
+      expect(await service.getDeck(USER, { mode: "popular", filters, cursor })).toMatchObject({
+        ok: false,
+        error: { code: "invalid_deck_query" },
+      });
+    }
+    expect((await service.getDeck(USER, { ...moviesAt(7.5), cursor })).ok).toBe(true);
+    // No minimum: the same canonical string as before this filter, so a cursor issued before the deploy stays valid.
+    expect(canonicalFilters({ mediaTypes: ["movie"], onMyServices: true })).toBe('{"t":["movie"],"g":[],"y":[null,null],"s":true}');
+  });
+
+  test("a thin page reaches deeper, within a fixed bound: up to MIN_RATING_TAKE_ROUNDS rounds of the quota", async () => {
+    // Ten pages of twenty; only every twentieth title clears 8, so one round of 20 finds one card at most.
+    const pages = Array.from({ length: 10 }, (_, p) => range("movie", p * 20 + 1, 20));
+    const ratings = new Map(pages.flat().map((s) => [tt(s.tmdbId), { rating: s.tmdbId % 20 === 3 ? 8.4 : 6.1, votes: 9_000 }]));
+    const w = world({ lists: { "popular:movie": pages }, ratings });
+    const { page, calls } = await deck(w, moviesAt(8));
+    // Three rounds of 20 read 60 titles and found the three that clear the bar, then stopped at the bound.
+    expect(keysOf(cardsOf(page))).toEqual(["movie:3", "movie:23", "movie:43"]);
+    expect(calls.stats[0].detailLookups).toBe(POOL_QUOTA.single * MIN_RATING_TAKE_ROUNDS);
+    expect(calls.stats[0].listLookups).toBeLessThanOrEqual(MAX_PAGES_PER_STREAM);
+    expect((page as { nextCursor: string | null }).nextCursor).toBeTruthy();
+    // Without a minimum the same deck takes one round, as before.
+    const plain = await deck(w, { mode: "popular", filters: { mediaTypes: ["movie"] } });
+    expect(plain.calls.stats[0].detailLookups).toBe(POOL_QUOTA.single);
+  });
+
+  test("deeper rounds stop once the page has enough cards", async () => {
+    const pages = Array.from({ length: 10 }, (_, p) => range("movie", p * 20 + 1, 20));
+    // A quarter clear the bar: the first round of 20 deals 5, which meets the target.
+    const ratings = new Map(pages.flat().map((s) => [tt(s.tmdbId), { rating: s.tmdbId % 4 === 0 ? 8 : 6, votes: 9_000 }]));
+    const { page, calls } = await deck(world({ lists: { "popular:movie": pages }, ratings }), moviesAt(7.5));
+    expect(cardsOf(page).length).toBeGreaterThanOrEqual(MIN_RATING_PAGE_TARGET);
+    expect(calls.stats[0].detailLookups).toBe(POOL_QUOTA.single);
+  });
+
+  test("the blend's deeper reach stays within its stated bound, and never deals a title twice", async () => {
+    const lists: FakeWorld["lists"] = {};
+    for (const pool of ["popular", "deep_cuts", "top_rated"]) {
+      for (const mt of ["movie", "tv"] as const) lists[`${pool}:${mt}`] = Array.from({ length: 10 }, (_, p) => range(mt, p * 20 + 1, 20, TOP));
+    }
+    // Nothing clears 9.5, so every round runs.
+    const ratings = new Map(Array.from({ length: 200 }, (_, i) => [tt(i + 1), { rating: 7, votes: 9_000 }]));
+    const { calls, page } = await deck(world({ lists, ratings }), { mode: "blend", filters: { minImdbRating: 9.5 } });
+    expect(cardsOf(page)).toEqual([]);
+    const stats = calls.stats[0];
+    expect(stats.detailLookups).toBeLessThanOrEqual(POOL_QUOTA.blend * 4 * MIN_RATING_TAKE_ROUNDS);
+    expect(stats.listLookups).toBeLessThanOrEqual(MAX_PAGES_PER_STREAM * 3 * 2);
+    expect(new Set(calls.details).size).toBe(calls.details.length);
+    expect((page as { nextCursor: string | null }).nextCursor).toBeTruthy();
+  });
+
+  test("a minimum that is not a number from 0 to 10 is a typed error, with no calls", async () => {
+    const { service, calls } = fakeService(world());
+    for (const minImdbRating of [11, -1, "7", Number.NaN, Number.POSITIVE_INFINITY]) {
+      const result = await service.getDeck(USER, { filters: { minImdbRating } } as never);
+      expect(result).toMatchObject({ ok: false, error: { code: "invalid_deck_query" } });
+    }
     expect(calls.lists).toEqual([]);
   });
 });

@@ -14,6 +14,7 @@ import {
   needsMore,
   QUEUE_LOW_WATER,
   queuedTitles,
+  queueStop,
   refreshQueue,
   removeCard,
   restartCursor,
@@ -100,6 +101,10 @@ describe("needsMore", () => {
     for (let i = 0; i < MAX_EMPTY_PAGES; i++) q = addPage(q, { cards: [], nextCursor: `c${i}` });
     expect(needsMore(q)).toBe(false);
     expect(stalled(q)).toBe(true);
+    // Under a minimum IMDb rating the same stop is the end of the bounded search, not a stall.
+    expect(queueStop(q, false)).toBe("stalled");
+    expect(queueStop(q, true)).toBe("reach_spent");
+    expect(queueStop(emptyQueue(), true)).toBeNull();
     q = resumeQueue(q);
     expect(needsMore(q)).toBe(true);
     expect(stalled(q)).toBe(false);

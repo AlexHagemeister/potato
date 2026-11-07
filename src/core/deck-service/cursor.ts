@@ -80,6 +80,8 @@ export function canonicalFilters(f: DeckFilters): string {
     g: [...new Set(f.genreIds ?? [])].sort((a, b) => a - b),
     y: [f.era?.fromYear ?? null, f.era?.toYear ?? null],
     s: f.onMyServices === true,
+    // Only when set, so cursors from before this filter existed still continue their deck.
+    ...(typeof f.minImdbRating === "number" ? { r: f.minImdbRating } : {}),
   });
 }
 

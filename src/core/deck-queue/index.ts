@@ -86,6 +86,19 @@ export function stalled(queue: DeckQueue): boolean {
   return !queue.exhausted && queue.emptyPages >= MAX_EMPTY_PAGES;
 }
 
+/**
+ * Why a queue stopped asking, or null when it has not. "reach_spent" is a
+ * stall under a minimum IMDb rating. Each such page already reached several
+ * take rounds deep (MIN_RATING_TAKE_ROUNDS in the deck service), so
+ * MAX_EMPTY_PAGES empty pages in a row mean a long, bounded search found
+ * nothing more rated that high. The screen says so plainly, as the end of
+ * the deck for these filters, instead of "Still looking".
+ */
+export function queueStop(queue: DeckQueue, minimumRating: boolean): "stalled" | "reach_spent" | null {
+  if (!stalled(queue)) return null;
+  return minimumRating ? "reach_spent" : "stalled";
+}
+
 /** Lets a stalled queue ask again (the screen's retry). */
 export function resumeQueue(queue: DeckQueue): DeckQueue {
   return { ...queue, emptyPages: 0 };

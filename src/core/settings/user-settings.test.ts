@@ -10,7 +10,7 @@ import {
 import type { FilterChoice } from "../filters";
 
 describe("deck choice (saved to the profile)", () => {
-  const filters: FilterChoice = { type: "tv", genres: ["scifi"], era: "recent", onMyServices: true };
+  const filters: FilterChoice = { type: "tv", genres: ["scifi"], era: "recent", minRating: "7.5", onMyServices: true };
 
   test("validateDeckChoice accepts a full choice and normalizes its filters", () => {
     expect(validateDeckChoice({ mode: "top_rated", filters })).toEqual({ ok: true, value: { mode: "top_rated", filters } });

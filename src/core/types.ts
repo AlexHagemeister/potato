@@ -76,4 +76,9 @@ export interface DeckFilters {
   era?: { fromYear?: number | null; toYear?: number | null };
   /** Only titles streaming on at least one of the user's services. */
   onMyServices?: boolean;
+  /**
+   * Only titles whose IMDb rating (from IMDb's dataset, never TMDB's vote
+   * average) is at least this, 0 to 10. A title with no IMDb rating fails it.
+   */
+  minImdbRating?: number;
 }

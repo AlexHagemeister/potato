@@ -75,6 +75,14 @@ export function parseFilters(input: unknown): Result<DeckFilters> {
     if (typeof f.onMyServices !== "boolean") return bad("filters.onMyServices must be true or false");
     out.onMyServices = f.onMyServices;
   }
+  if (f.minImdbRating !== undefined && f.minImdbRating !== null) {
+    const r = f.minImdbRating;
+    if (typeof r !== "number" || !Number.isFinite(r) || r < 0 || r > 10) {
+      return bad("filters.minImdbRating must be a number from 0 to 10");
+    }
+    // 0 asks for no minimum. Kept as a number, it would hide every unrated title and bind cursors to a no-op.
+    if (r > 0) out.minImdbRating = r;
+  }
   return ok(out);
 }
 
@@ -113,13 +121,18 @@ export function parseListQuery(status: unknown, rawOptions: ListOptions | null =
   return ok({ status: listStatus, filters: filters.value, sort, cursor, limit });
 }
 
-/** True when a filter needs TMDB metadata. Media type alone does not: the row has it. */
+/**
+ * True when a filter needs looked-up metadata (TMDB details, or the IMDb
+ * rating, which needs the IMDb ID from the details). Media type alone does
+ * not: the row has it.
+ */
 export function filtersNeedDetails(filters: DeckFilters): boolean {
   return Boolean(
     filters.genreIds?.length ||
       typeof filters.era?.fromYear === "number" ||
       typeof filters.era?.toYear === "number" ||
-      filters.onMyServices,
+      filters.onMyServices ||
+      typeof filters.minImdbRating === "number",
   );
 }
 
