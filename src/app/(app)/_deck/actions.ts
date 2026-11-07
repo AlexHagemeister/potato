@@ -26,7 +26,13 @@ import { getCurrentUserForRequest } from "@/lib/current-user";
 
 export type SortKind = "pass" | "skip" | "watchlist" | "seen";
 
-export type DeckActionResult = { ok: true; outcome: ActionOutcome } | { ok: false; error: string };
+export type DeckActionResult =
+  | { ok: true; outcome: ActionOutcome }
+  /** `stale` means the title changed elsewhere (another device, the AI connection) and nothing was saved. */
+  | { ok: false; error: string; stale?: boolean };
+
+/** Seen it on a title that is already Seen: core keeps the rating and review there (issue 65). */
+const ALREADY_SEEN = "You already marked this Seen somewhere else. Your rating and review there are kept.";
 
 const SIGNED_OUT = "You're signed out. Sign in again to save.";
 
@@ -54,7 +60,10 @@ async function run(undo: boolean, fn: (userId: string) => Promise<Result<ActionO
   if (!user) return { ok: false, error: SIGNED_OUT };
   try {
     const result = await fn(user.id);
-    return result.ok ? { ok: true, outcome: result.value } : { ok: false, error: messageFor(result.error, undo) };
+    if (result.ok) return { ok: true, outcome: result.value };
+    // Of the sorts, only Seen it refuses a title's current state: the title is Seen already.
+    if (!undo && result.error.code === "wrong_state") return { ok: false, error: ALREADY_SEEN, stale: true };
+    return { ok: false, error: messageFor(result.error, undo) };
   } catch (err) {
     console.error("deck action failed:", err);
     return { ok: false, error: undo ? "Couldn't undo. Try again." : "Couldn't save. Try again." };

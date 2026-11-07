@@ -532,6 +532,11 @@ export function sortCard(kind: Exclude<SortKind, "seen">, card: DeckPageCard) {
  * Seen it, from its sheet. Unlike the other buttons this waits for the save,
  * so the sheet can keep what the user entered and show the error if it
  * fails. Resolves to that error, or null once saved (the card has left).
+ *
+ * If the title was marked Seen somewhere else meanwhile, core saves nothing
+ * and keeps the rating and review there (issue 65). The card leaves the deck,
+ * since the title is on a list, and a notice says why. Resolves to null so the
+ * sheet closes.
  */
 export async function markCardSeen(card: DeckPageCard, rating: number, review: string | null): Promise<string | null> {
   const gen = generation;
@@ -544,9 +549,15 @@ export async function markCardSeen(card: DeckPageCard, rating: number, review: s
     result = { ok: false, error: "Couldn't save. Check your connection." };
   }
   touch(key);
-  if (!result.ok) return result.error;
+  if (!result.ok && !result.stale) return result.error;
   if (gen !== generation) return null;
   set({ queue: removeCard(state.queue, card) });
+  if (!result.ok) {
+    preload();
+    showNotice(result.error);
+    void fill();
+    return null;
+  }
   preload();
   sorted("seen", card, Promise.resolve(result));
   return null;
