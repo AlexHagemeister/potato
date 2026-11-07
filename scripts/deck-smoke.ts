@@ -71,6 +71,10 @@ async function run(label: string, request: DeckRequest): Promise<DeckPage> {
     console.log(`${label}: locked (${page.ratedCount}/${page.required}), ${ms} ms`);
     return page;
   }
+  if (page.kind === "no_seeds") {
+    console.log(`${label}: no seeds of ${page.mediaTypes.join(", ")}, ${ms} ms`);
+    return page;
+  }
   const pools = Object.entries(lastStats?.pools ?? {})
     .map(([pool, s]) => `${pool} ${s.taken}/${s.enriched}/${s.dealt}`)
     .join(", ");
@@ -113,6 +117,14 @@ try {
   const forYou = await run("for you after 10 ratings", { mode: "for_you" });
   if (forYou.kind === "cards" && forYou.nextCursor) await run("for you, page 2", { mode: "for_you", cursor: forYou.nextCursor });
   await run("blend with for you unlocked", {});
+
+  // A cursor is bound to the user's country and services: after a change it is rejected, not silently replayed.
+  const before = await run("blend before a services change", {});
+  must(await lib.updateUserSettings(userId, { country: "US", providerIds: [8, 9] }));
+  if (before.kind === "cards" && before.nextCursor) {
+    const stale = await service.getDeck(userId, { cursor: before.nextCursor });
+    console.log(`stale cursor after a services change: ${stale.ok ? "accepted (WRONG)" : JSON.stringify(stale.error)}`);
+  }
 
   for (const ref of [
     { mediaType: "movie" as const, tmdbId: 603 },

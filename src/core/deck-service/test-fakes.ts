@@ -52,7 +52,7 @@ export function detailsFor(s: TitleSummary, overrides: Partial<TitleDetails> = {
 }
 
 export interface FakeWorld {
-  /** List pages by stream: "popular:movie", "top_rated:tv", "for_you:movie:603". Page n is index n - 1. */
+  /** List pages by TMDB list: "popular:movie", "top_rated:tv", and "for_you:movie:603" for a seed's recommendations. Page n is index n - 1. */
   lists: Record<string, TitleSummary[][]>;
   /** Details by title key. A title missing here has details built from the first summary seen. */
   details: Record<string, TitleDetails | null>;
@@ -73,7 +73,8 @@ export function world(overrides: Partial<FakeWorld> = {}): FakeWorld {
   return {
     lists: {},
     details: {},
-    ratings: new Map(),
+    // One unrelated row, so the table reads as loaded and a missing rating as "none". Pass an empty map for "not loaded".
+    ratings: new Map([["tt9999999", { rating: 5, votes: 10 }]]),
     states: [],
     ratedCount: 0,
     settings: { country: "US", providerIds: [] },
@@ -88,10 +89,12 @@ export interface Calls {
   details: string[];
   seeds: { mediaTypes: readonly MediaType[]; limit: number }[];
   stats: DeckStats[];
+  ratingLookups: number;
+  ratingProbes: number;
 }
 
 export function fakeService(w: FakeWorld) {
-  const calls: Calls = { lists: [], details: [], seeds: [], stats: [] };
+  const calls: Calls = { lists: [], details: [], seeds: [], stats: [], ratingLookups: 0, ratingProbes: 0 };
   const known = new Map<string, TitleSummary>();
   for (const pages of Object.values(w.lists)) for (const page of pages) for (const s of page) known.set(formatTitleKey(s), s);
 
@@ -117,7 +120,14 @@ export function fakeService(w: FakeWorld) {
 
   const store = new MemoryRatingsStore(w.ratings);
   const ratings = {
-    getMany: (ids: readonly string[]) => (w.ratingsThrow ? Promise.reject(new Error("db down")) : store.getMany(ids)),
+    getMany: (ids: readonly string[]) => {
+      calls.ratingLookups++;
+      return w.ratingsThrow ? Promise.reject(new Error("db down")) : store.getMany(ids);
+    },
+    hasAnyRatings: () => {
+      calls.ratingProbes++;
+      return w.ratingsThrow ? Promise.reject(new Error("db down")) : store.hasAnyRatings();
+    },
   };
 
   const library: DeckLibrary = {

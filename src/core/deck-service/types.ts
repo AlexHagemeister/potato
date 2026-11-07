@@ -2,7 +2,7 @@
 // is always the pair (media type, TMDB ID) (CLAUDE.md architecture rule 1).
 
 import type { Genre } from "../tmdb/types";
-import type { DeckFilters, DiscoveryMode, PoolName, TitleId, TitleStatus } from "../types";
+import type { DeckFilters, DiscoveryMode, MediaType, PoolName, TitleId, TitleStatus } from "../types";
 import type { JUSTWATCH_ATTRIBUTION } from "./constants";
 
 /**
@@ -11,7 +11,8 @@ import type { JUSTWATCH_ATTRIBUTION } from "./constants";
  * - rated: IMDb's dataset has a rating for the title.
  * - none: TMDB maps the title to no IMDb ID (imdbId null), or IMDb's dataset
  *   has no rating for that ID. This is the only state that means "no rating".
- * - unavailable: the ratings lookup failed. Show nothing, not "no rating".
+ * - unavailable: the ratings lookup failed, or the ratings dataset has not
+ *   been loaded yet (an empty table). Show nothing, not "no rating".
  */
 export type CardImdb =
   | { kind: "rated"; imdbId: string; rating: number; votes: number }
@@ -88,7 +89,12 @@ export interface DeckRequest {
   /** Defaults to "blend". */
   mode?: DiscoveryMode;
   filters?: DeckFilters;
-  /** The `nextCursor` of the previous page, with the same mode and filters. Omit for the first page. */
+  /**
+   * The `nextCursor` of the previous page, with the same mode and filters.
+   * Omit for the first page. A cursor is bound to the user, their country,
+   * and their services: after a settings change it is rejected, so start again
+   * without one.
+   */
   cursor?: string | null;
 }
 
@@ -101,10 +107,17 @@ export interface DeckRequest {
  * calling with `nextCursor` until enough cards are queued or it is null.
  * Every call moves the cursor forward. A title can come back on a later page
  * from another pool, so drop cards whose (mediaType, tmdbId) is already queued.
+ *
+ * "locked": "for you" needs more ratings first.
+ * "no_seeds": "for you" is unlocked, but the user has rated no title of the
+ * filtered media types, so there is nothing to recommend from. This is not an
+ * empty, finished deck: rating a title of that type, or widening the filter,
+ * fills it.
  */
 export type DeckPage =
   | { kind: "cards"; cards: DeckPageCard[]; nextCursor: string | null }
-  | { kind: "locked"; mode: "for_you"; ratedCount: number; required: number; remaining: number };
+  | { kind: "locked"; mode: "for_you"; ratedCount: number; required: number; remaining: number }
+  | { kind: "no_seeds"; mode: "for_you"; mediaTypes: MediaType[] };
 
 /** Counts from one getDeck call, for the smoke test and tuning. */
 export interface DeckStats {

@@ -156,20 +156,24 @@ describe("getDeck: paging", () => {
     const { page } = await deck(w, { mode: "popular", filters: { mediaTypes: ["movie"] } });
     const state = decodeCursor((page as { nextCursor: string }).nextCursor);
     if (typeof state === "string") throw new Error(state);
-    expect(state.streams.map((s) => s.position)).toEqual([{ page: 1, offset: 20 }]);
+    expect([...state.positions]).toEqual([["popular:movie", { page: 1, offset: 20 }]]);
   });
 
-  test("garbage, a tampered page, too many streams, or a repeated stream is a typed error", async () => {
+  test("garbage, a tampered page, too many streams, a repeated stream, or an old cursor is a typed error", async () => {
     const { service } = fakeService(world());
-    const forge = (s: unknown[]) => Buffer.from(JSON.stringify({ v: 1, m: "blend", f: canonicalFilters({}), s })).toString("base64url");
+    const forge = (s: unknown[], v = 2) =>
+      Buffer.from(JSON.stringify({ v, m: "blend", f: canonicalFilters({}), c: "ctx", k: "seeds", s })).toString("base64url");
     for (const cursor of [
       "not a cursor",
       "",
       forge([["popular:movie", 501, 0]]),
       forge([["popular:movie", 1, -1]]),
       forge([["popular:person", 1, 0]]),
+      forge([["for_you:5", 1, 0]]),
+      forge([["for_you:movie:603", 1, 0]]),
       forge([["popular:movie", 1, 0], ["popular:movie", 2, 0]]),
-      forge(Array.from({ length: FOR_YOU_SEED_COUNT + 1 }, (_, i) => [`for_you:movie:${i + 1}`, 1, 0])),
+      forge(Array.from({ length: 3 * 2 + FOR_YOU_SEED_COUNT + 1 }, (_, i) => [`for_you:${i % FOR_YOU_SEED_COUNT}`, 1, 0])),
+      forge([["popular:movie", 1, 0]], 1),
     ]) {
       const result = await service.getDeck(USER, { cursor });
       expect(result).toMatchObject({ ok: false, error: { code: "invalid_deck_query" } });
@@ -191,16 +195,38 @@ describe("getDeck: paging", () => {
   });
 
   test("a cursor stream the request would not make is ignored, never fetched", async () => {
-    const cursor = encodeCursor({
-      mode: "popular",
-      filters: canonicalFilters({}),
-      streams: [
-        { spec: { pool: "popular", mediaType: "movie" }, position: { page: 1, offset: 0 } },
-        { spec: { pool: "top_rated", mediaType: "movie" }, position: { page: 1, offset: 0 } },
-      ],
-    });
-    const { calls } = await deck(world(), { mode: "popular", cursor });
+    const w = world({ lists: { "popular:movie": [range("movie", 1, 30)] } });
+    const request = { mode: "popular" as const, filters: { mediaTypes: ["movie" as const] } };
+    const { page } = await deck(w, request);
+    const state = decodeCursor((page as { nextCursor: string }).nextCursor);
+    if (typeof state === "string") throw new Error(state);
+    state.positions.set("top_rated:movie", { page: 1, offset: 0 });
+    const { service, calls } = fakeService(w);
+    expect((await service.getDeck(USER, { ...request, cursor: encodeCursor(state) })).ok).toBe(true);
     expect(calls.lists.map((c) => c.stream)).toEqual(["popular:movie"]);
+  });
+
+  test("a cursor is bound to its user, country, and services, and names no titles", async () => {
+    const w = world({
+      ratedCount: FOR_YOU_MIN_RATINGS,
+      seeds: [{ mediaType: "movie", tmdbId: 603 }],
+      settings: { country: "US", providerIds: [8, 15] },
+      lists: { "for_you:movie:603": [range("movie", 100, 30)] },
+    });
+    const { page, service } = await deck(w, { mode: "for_you" });
+    const cursor = (page as { nextCursor: string }).nextCursor;
+    const body = Buffer.from(cursor, "base64url").toString("utf8");
+    expect(body).not.toContain("603");
+    expect(body).not.toContain("US");
+    const stale = { ok: false, error: { code: "invalid_deck_query", message: expect.stringContaining("start again without a cursor") } };
+
+    expect(await service.getDeck("user-2", { mode: "for_you", cursor })).toMatchObject(stale);
+    w.settings = { country: "US", providerIds: [15, 8] }; // the same services in another order: the same deck
+    expect((await service.getDeck(USER, { mode: "for_you", cursor })).ok).toBe(true);
+    w.settings = { country: "US", providerIds: [8] };
+    expect(await service.getDeck(USER, { mode: "for_you", cursor })).toMatchObject(stale);
+    w.settings = { country: "GB", providerIds: [8, 15] };
+    expect(await service.getDeck(USER, { mode: "for_you", cursor })).toMatchObject(stale);
   });
 });
 
@@ -241,7 +267,7 @@ describe("getDeck: for you", () => {
     expect(cardsOf(page).every((c) => c.source === "for_you")).toBe(true);
   });
 
-  test("seeds follow the media type filter, and the cursor keeps them for the next page", async () => {
+  test("seeds follow the media type filter, and the next page continues their streams", async () => {
     const w = world({
       ratedCount: FOR_YOU_MIN_RATINGS,
       seeds: [
@@ -256,8 +282,39 @@ describe("getDeck: for you", () => {
     expect(calls.lists.map((c) => c.stream)).toEqual(["for_you:tv:1396"]);
     const next = await service.getDeck(USER, { ...request, cursor: (page as { nextCursor: string }).nextCursor });
     if (!next.ok) throw new Error("expected ok");
-    expect(calls.seeds.length).toBe(1); // the second page reads its seeds from the cursor
+    expect(calls.seeds.length).toBe(2); // seeds are read on every call, never carried in the cursor
     expect(keysOf(cardsOf(next.value))).toEqual(range("tv", 300, 5).map(formatTitleKey));
+  });
+
+  test("when the seeds change between pages, for you starts over and the discover streams keep their places", async () => {
+    const w = world({
+      ratedCount: FOR_YOU_MIN_RATINGS,
+      seeds: [{ mediaType: "movie", tmdbId: 603 }],
+      lists: {
+        "popular:movie": [range("movie", 1, 30)],
+        "for_you:movie:603": [range("movie", 100, 30)],
+        "for_you:movie:550": [range("movie", 200, 30)],
+      },
+    });
+    const request = { filters: { mediaTypes: ["movie" as const] } };
+    const { page, service } = await deck(w, request);
+    w.seeds = [
+      { mediaType: "movie", tmdbId: 550 },
+      { mediaType: "movie", tmdbId: 603 },
+    ];
+    const next = await service.getDeck(USER, { ...request, cursor: (page as { nextCursor: string }).nextCursor });
+    if (!next.ok) throw new Error("expected ok");
+    const from = (source: string) => keysOf(cardsOf(next.value).filter((c) => c.source === source));
+    expect(from("popular")[0]).toBe(`movie:${POOL_QUOTA.blend + 1}`); // page 1 took the first 8
+    expect(from("for_you")[0]).toBe("movie:200"); // the new top seed, from its start
+    expect(from("for_you")).toContain("movie:100"); // the old seed, now rank 1, from its start too
+  });
+
+  test("unlocked with no seeds of the filtered type: a distinct state, not an empty finished deck", async () => {
+    const w = world({ ratedCount: FOR_YOU_MIN_RATINGS, seeds: [{ mediaType: "movie", tmdbId: 603 }] });
+    const { page, calls } = await deck(w, { mode: "for_you", filters: { mediaTypes: ["tv"] } });
+    expect(page).toEqual({ kind: "no_seeds", mode: "for_you", mediaTypes: ["tv"] });
+    expect(calls.lists).toEqual([]);
   });
 });
 
@@ -319,7 +376,22 @@ describe("getDeck: failures", () => {
     expect(cardsOf(page).every((c) => c.mediaType === "movie")).toBe(true);
     const state = decodeCursor((page as { nextCursor: string }).nextCursor);
     if (typeof state === "string") throw new Error(state);
-    expect(state.streams.find((s) => s.spec.pool === "popular" && s.spec.mediaType === "tv")!.position).toEqual({ page: 1, offset: 0 });
+    expect(state.positions.get("popular:tv")).toEqual({ page: 1, offset: 0 });
+  });
+
+  test("every details lookup failing throws, so an outage never ends the deck or skips its titles", async () => {
+    const titles = range("movie", 1, 5);
+    const w = world({ lists: { "popular:movie": [titles] }, failingDetails: new Set(titles.map(formatTitleKey)) });
+    const { service } = fakeService(w);
+    await expect(service.getDeck(USER, { mode: "popular", filters: { mediaTypes: ["movie"] } })).rejects.toThrow(
+      /every TMDB details lookup failed/,
+    );
+  });
+
+  test("an empty IMDb ratings table (no daily load yet) reads as unavailable, never as no rating", async () => {
+    const w = world({ lists: { "popular:movie": [range("movie", 1, 3)] }, ratings: new Map() });
+    const { page } = await deck(w, { mode: "popular", filters: { mediaTypes: ["movie"] } });
+    expect(cardsOf(page).map((c) => c.imdb.kind)).toEqual(["unavailable", "unavailable", "unavailable"]);
   });
 
   test("every list failing throws instead of returning a cursor that cannot move", async () => {
@@ -436,18 +508,33 @@ describe("getCard", () => {
     expect(result.value.streaming).toMatchObject({ country: "DE", providers: [], onMyServices: false, link: null });
   });
 
-  test("IMDb: none without a mapping, none without a dataset row, unavailable when the lookup fails", async () => {
+  test("IMDb: none without a mapping or a dataset row, unavailable when the lookup fails or the table is empty", async () => {
     const w = base();
     w.details["movie:603"] = detailsFor(s, { imdbId: null });
     expect((await fakeService(w).service.getCard(USER, { mediaType: "movie", tmdbId: 603 })) as unknown).toMatchObject({
       ok: true,
       value: { imdb: { kind: "none", imdbId: null } },
     });
+    // The table is loaded (it holds another title's row), so a missing row means IMDb has no rating. That answer is cached.
     const w2 = base();
-    w2.ratings = new Map();
-    expect(await fakeService(w2).service.getCard(USER, { mediaType: "movie", tmdbId: 603 })).toMatchObject({
-      value: { imdb: { kind: "none", imdbId: "tt0000603" } },
+    w2.ratings = new Map([["tt0000001", { rating: 7, votes: 100 }]]);
+    const { service: s2, calls: c2 } = fakeService(w2);
+    for (let i = 0; i < 2; i++) {
+      expect(await s2.getCard(USER, { mediaType: "movie", tmdbId: 603 })).toMatchObject({
+        value: { imdb: { kind: "none", imdbId: "tt0000603" } },
+      });
+    }
+    expect(c2.ratingProbes).toBe(1);
+    // An empty table says nothing about IMDb. It is asked about again next time, so the first load shows at once.
+    const w4 = base();
+    w4.ratings = new Map();
+    const { service: s4, calls: c4 } = fakeService(w4);
+    expect(await s4.getCard(USER, { mediaType: "movie", tmdbId: 603 })).toMatchObject({
+      value: { imdb: { kind: "unavailable", imdbId: "tt0000603" } },
     });
+    w4.ratings.set("tt0000603", { rating: 8.7, votes: 2_000_000 });
+    expect(await s4.getCard(USER, { mediaType: "movie", tmdbId: 603 })).toMatchObject({ value: { imdb: { kind: "rated" } } });
+    expect(c4.ratingProbes).toBe(1);
     const w3 = base();
     w3.ratingsThrow = true;
     expect(await fakeService(w3).service.getCard(USER, { mediaType: "movie", tmdbId: 603 })).toMatchObject({

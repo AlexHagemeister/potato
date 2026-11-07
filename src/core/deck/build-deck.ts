@@ -83,9 +83,7 @@ export function buildDeck(input: DeckInput): DeckResult {
     throw new RangeError(`buildDeck: ratedCount must be a whole number, 0 or more, got ${String(ratedCount)}`);
   }
 
-  const forYouUnlocked = ratedCount >= FOR_YOU_MIN_RATINGS;
-
-  if (input.mode === "for_you" && !forYouUnlocked) {
+  if (input.mode === "for_you" && !isForYouUnlocked(ratedCount)) {
     return {
       kind: "locked",
       mode: "for_you",
@@ -109,17 +107,44 @@ export function buildDeck(input: DeckInput): DeckResult {
     return orderPool(pool, entries);
   };
 
-  const pools: PoolName[] =
-    input.mode === "blend"
-      ? // `!== 0`, not `> 0`, so a negative or NaN weight reaches interleave's check and throws.
-        BLEND_ORDER.filter((pool) => BLEND_WEIGHTS[pool] !== 0 && (pool !== "for_you" || forYouUnlocked))
-      : [input.mode];
-  const weights = input.mode === "blend" ? pools.map((pool) => BLEND_WEIGHTS[pool]) : [1];
-
+  const active = activePools(input.mode, ratedCount);
   return {
     kind: "cards",
-    cards: interleave(pools.map(ordered), weights, (e) => e.key).map((e) => e.card),
+    cards: interleave(
+      active.map(({ pool }) => ordered(pool)),
+      active.map(({ weight }) => weight),
+      (e) => e.key,
+    ).map((e) => e.card),
   };
+}
+
+/** A pool the deck deals from, with its turns per round. */
+export interface ActivePool {
+  pool: PoolName;
+  weight: number;
+}
+
+/**
+ * The pools a deck in this mode deals from, in turn order, each with its
+ * weight. A single mode is its own pool with weight 1 (a locked "for you"
+ * never gets this far in buildDeck). The blend takes BLEND_ORDER, leaves out
+ * zero-weight pools, and adds "for you" once the user has rated enough. The
+ * deck service fetches exactly these pools, so the rule lives here once.
+ */
+export function activePools(mode: DiscoveryMode, ratedCount: number): ActivePool[] {
+  if (mode !== "blend") return [{ pool: mode, weight: 1 }];
+  const forYouUnlocked = isForYouUnlocked(ratedCount);
+  return (
+    BLEND_ORDER
+      // `!== 0`, not `> 0`, so a negative or NaN weight reaches interleave's check and throws.
+      .filter((pool) => BLEND_WEIGHTS[pool] !== 0 && (pool !== "for_you" || forYouUnlocked))
+      .map((pool) => ({ pool, weight: BLEND_WEIGHTS[pool] }))
+  );
+}
+
+/** True when "for you" is unlocked for a user with this many ratings. */
+export function isForYouUnlocked(ratedCount: number): boolean {
+  return ratedCount >= FOR_YOU_MIN_RATINGS;
 }
 
 /** A filter check with the user's provider set built once, for checking many titles. */

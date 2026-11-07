@@ -12,7 +12,9 @@ import {
   TMDB_CACHE_VERSION,
   TMDB_FANOUT_CONCURRENCY,
   TMDB_LANGUAGE,
+  TMDB_MAX_PAGE,
   TMDB_TTL_MS,
+  TMDB_YEAR_RANGE,
 } from "./constants";
 import { buildPath, tmdbGet, type FetchFn, type Params, type SleepFn } from "./http";
 import {
@@ -39,6 +41,7 @@ import type {
 
 /** The discover-backed pools. "for you" comes from recommendations instead. */
 export type DiscoverPool = "popular" | "top_rated" | "deep_cuts";
+export const DISCOVER_POOLS: readonly DiscoverPool[] = ["popular", "top_rated", "deep_cuts"];
 
 /** Filters TMDB recommendations cannot apply server-side. They are applied to each page after the fetch. */
 export type RecommendationFilters = Pick<DiscoverFilters, "genreIds" | "era">;
@@ -55,8 +58,7 @@ export interface TmdbClientOptions {
 
 export type TmdbClient = ReturnType<typeof createTmdbClient>;
 
-/** TMDB serves at most 500 pages of any list. */
-const MAX_PAGE = 500;
+const MAX_PAGE = TMDB_MAX_PAGE;
 
 /**
  * The ways of watching that count as "on my streaming services": by
@@ -486,6 +488,6 @@ function checkCountry(country: string): string {
 }
 
 function checkYear(year: number): number {
-  if (!Number.isSafeInteger(year) || year < 1800 || year > 9999) throw new Error(`Invalid year: ${year}`);
+  if (!Number.isSafeInteger(year) || year < TMDB_YEAR_RANGE.min || year > TMDB_YEAR_RANGE.max) throw new Error(`Invalid year: ${year}`);
   return year;
 }

@@ -12,20 +12,22 @@
 //   discover pool and media type (at most 3 * 2) plus one per "for you" seed
 //   (at most FOR_YOU_SEED_COUNT), so at most 3 * 11 = 33. Usually one per
 //   stream, and discover pages are shared across users in the cache.
-// - Details lookups: one per title taken, at most POOL_QUOTA per pool, so 20
-//   for a single mode and 32 for the blend. They run DETAILS_CONCURRENCY at a
-//   time. The details cache is shared, and getCard reads the same entries.
-// - One IMDb ratings query for the whole page.
+// - Details lookups: one per title taken, at most POOL_QUOTA per pool (times
+//   the pool's blend weight in the blend), so 20 for a single mode and 32 for
+//   the blend at even weights. They run DETAILS_CONCURRENCY at a time. The
+//   details cache is shared, and getCard reads the same entries.
+// - One IMDb ratings query for the whole page, plus a one-row probe of the
+//   ratings table when that query finds nothing (see lookupRatings).
 
 import { mapWithConcurrency } from "../concurrency";
-import { buildDeck, createFilterMatcher, createVisibilityCheck } from "../deck/build-deck";
-import { BLEND_ORDER, BLEND_WEIGHTS, FOR_YOU_MIN_RATINGS } from "../deck/constants";
-import { getRatings, type RatingsStore } from "../imdb/ratings";
+import { activePools, buildDeck, createFilterMatcher, createVisibilityCheck, isForYouUnlocked } from "../deck/build-deck";
+import { getRatings, type RatingsDatasetProbe, type RatingsStore } from "../imdb/ratings";
 import { parseFilters } from "../library/list";
 import { fail, ok, validateUserId, type Result } from "../result";
-import { streamingProviderIds, type TmdbClient } from "../tmdb/client";
+import { DISCOVER_POOLS, streamingProviderIds, type DiscoverPool, type TmdbClient } from "../tmdb/client";
+import { TMDB_MAX_PAGE, TMDB_YEAR_RANGE } from "../tmdb/constants";
 import type { DiscoverFilters, ResultPage, TitleDetails, TitleSummary } from "../tmdb/types";
-import { titleIdError, tryFormatTitleKey } from "../title-id";
+import { formatTitleKey, titleIdError, tryFormatTitleKey } from "../title-id";
 import {
   DISCOVERY_MODES,
   type Candidate,
@@ -38,21 +40,14 @@ import {
   type UserTitleState,
 } from "../types";
 import { buildCard, imdbState } from "./card";
-import {
-  DETAILS_CONCURRENCY,
-  ERA_YEAR_RANGE,
-  FOR_YOU_SEED_COUNT,
-  MAX_LIST_PAGE,
-  MAX_PAGES_PER_STREAM,
-  POOL_QUOTA,
-} from "./constants";
+import { DETAILS_CONCURRENCY, FOR_YOU_SEED_COUNT, MAX_PAGES_PER_STREAM, POOL_QUOTA, RATINGS_PROBE_TTL_MS } from "./constants";
 import {
   canonicalFilters,
   decodeCursor,
   encodeCursor,
+  fingerprint,
   streamId,
   type CursorState,
-  type DiscoverPoolName,
   type StreamPosition,
   type StreamSpec,
 } from "./cursor";
@@ -74,7 +69,7 @@ export interface DeckLibrary {
 
 export interface DeckServiceDeps {
   tmdb: DeckTmdb;
-  ratings: RatingsStore;
+  ratings: RatingsStore & RatingsDatasetProbe;
   library: DeckLibrary;
   now?: () => Date;
   /** Called with each getDeck call's counts. For the smoke test and tuning. */
@@ -84,7 +79,6 @@ export interface DeckServiceDeps {
 export type DeckService = ReturnType<typeof createDeckService>;
 
 const MEDIA_TYPES: readonly MediaType[] = ["movie", "tv"];
-const DISCOVER_POOLS: readonly DiscoverPoolName[] = ["popular", "deep_cuts", "top_rated"];
 
 interface ParsedRequest {
   mode: DiscoveryMode;
@@ -95,22 +89,48 @@ interface ParsedRequest {
 export function createDeckService(deps: DeckServiceDeps) {
   const { tmdb, ratings, library } = deps;
   const clock = deps.now ?? (() => new Date());
+  /** Until when "the ratings table has rows" is trusted without asking again. */
+  let datasetLoadedUntil = 0;
 
-  /** IMDb ratings for these IDs, or "unavailable" when the lookup fails, so one bad query never sinks the deck. */
+  /**
+   * IMDb ratings for these IDs, or "unavailable" when they cannot be trusted
+   * to mean what they say, so one bad query never sinks the deck and a card
+   * never claims "no rating" on IMDb's behalf (VISION invariant 5):
+   * - the lookup failed, or
+   * - it found nothing and the ratings table turns out to be empty (the first
+   *   daily load has not landed), so a missing row says nothing about IMDb.
+   * A lookup that finds any rating proves the table is loaded, so the probe
+   * runs only when it finds none.
+   */
   async function lookupRatings(imdbIds: readonly string[]): Promise<ReadonlyMap<string, ImdbRating> | "unavailable"> {
     try {
-      return await getRatings(ratings, imdbIds);
+      const found = await getRatings(ratings, imdbIds);
+      if (found.size === 0 && imdbIds.length > 0 && !(await datasetLoaded())) {
+        console.warn("deck: the IMDb ratings table is empty, cards show the rating as unavailable");
+        return "unavailable";
+      }
+      return found;
     } catch (err) {
       console.warn("deck: IMDb ratings lookup failed, cards show the rating as unavailable:", err);
       return "unavailable";
     }
   }
 
+  async function datasetLoaded(): Promise<boolean> {
+    const now = clock().getTime();
+    if (now < datasetLoadedUntil) return true;
+    const loaded = await ratings.hasAnyRatings();
+    if (loaded) datasetLoadedUntil = now + RATINGS_PROBE_TTL_MS;
+    return loaded;
+  }
+
   /**
    * One page of the deck for the user. See DeckPage for how paging works.
-   * Bad input (mode, filters, cursor) returns a typed error. A TMDB outage
-   * that leaves every list unreadable throws, so a caller never loops on a
-   * cursor that cannot move.
+   * Bad input (mode, filters, cursor) returns a typed error, and so does a
+   * cursor from another user or from before a settings change. A TMDB outage
+   * that leaves every list, or every details lookup, unreadable throws, so a
+   * caller never loops on a cursor that cannot move and never reads an outage
+   * as the end of the deck.
    */
   async function getDeck(userId: string, request: DeckRequest = {}): Promise<Result<DeckPage>> {
     const u = validateUserId(userId);
@@ -120,39 +140,52 @@ export function createDeckService(deps: DeckServiceDeps) {
     const { mode, filters, cursor } = parsed.value;
     const now = clock();
     const mediaTypes = filters.mediaTypes?.length ? MEDIA_TYPES.filter((m) => filters.mediaTypes!.includes(m)) : MEDIA_TYPES;
-    const wantsForYou = mode === "for_you" || (mode === "blend" && BLEND_WEIGHTS.for_you !== 0);
+    // Whether "for you" deals once unlocked: always in its own mode, and in the blend unless its weight is 0.
+    const wantsForYou = activePools(mode, Number.MAX_SAFE_INTEGER).some((p) => p.pool === "for_you");
 
-    // Independent reads, in parallel. The seeds are wasted if "for you" turns out locked, but they cost one query.
-    const [states, ratedCount, settings, seeds] = await Promise.all([
+    // Independent reads, in parallel. The seeds are read on every call, so the cursor never carries titles.
+    // They are wasted if "for you" turns out locked, but they cost one query.
+    const [states, ratedCount, settings, seedRead] = await Promise.all([
       library.getUserTitleStates(u.value),
       library.getRatedCount(u.value),
       library.getUserSettings(u.value),
-      wantsForYou && !cursor ? library.getTopRatedSeen(u.value, mediaTypes, FOR_YOU_SEED_COUNT) : ok<TitleId[]>([]),
+      wantsForYou ? library.getTopRatedSeen(u.value, mediaTypes, FOR_YOU_SEED_COUNT) : ok<TitleId[]>([]),
     ]);
     if (!states.ok) return states;
     if (!ratedCount.ok) return ratedCount;
     if (!settings.ok) return settings;
-    if (!seeds.ok) return seeds;
+    if (!seedRead.ok) return seedRead;
 
-    const forYouUnlocked = ratedCount.value >= FOR_YOU_MIN_RATINGS;
-    if (mode === "for_you" && !forYouUnlocked) {
+    const { country, providerIds } = settings.value;
+    const context = fingerprint([u.value, country, ...[...new Set(providerIds)].sort((a, b) => a - b)]);
+    if (cursor && cursor.context !== context) {
+      return invalid("cursor belongs to another user or to changed country or services, start again without a cursor");
+    }
+
+    if (mode === "for_you" && !isForYouUnlocked(ratedCount.value)) {
       // The engine owns the lock rule and its shape. With no pools it does no work.
       const locked = buildDeck({ states: [], userProviderIds: [], filters: {}, mode, now, ratedCount: ratedCount.value, pools: {} });
       if (locked.kind !== "locked") throw new Error("getDeck: expected the engine to lock for you");
       return ok(locked);
     }
 
-    const { country, providerIds } = settings.value;
+    const seeds = dedupeSeeds(seedRead.value, mediaTypes);
+    if (mode === "for_you" && seeds.length === 0) return ok({ kind: "no_seeds", mode, mediaTypes: [...mediaTypes] });
+
     // With no services, "on my services" matches nothing. An empty provider list would also drop TMDB's server-side filter.
     if (filters.onMyServices && providerIds.length === 0) return ok({ kind: "cards", cards: [], nextCursor: null });
 
-    const pools: PoolName[] = (mode === "blend" ? BLEND_ORDER : [mode]).filter(
-      (p) => (mode !== "blend" || BLEND_WEIGHTS[p] !== 0) && (p !== "for_you" || forYouUnlocked),
-    );
-    const specs = cursor
-      ? // Only streams this request would have made. Anything else in the cursor is ignored, never fetched.
-        cursor.streams.filter(({ spec }) => pools.includes(spec.pool) && mediaTypes.includes(specMediaType(spec)))
-      : freshStreams(pools, mediaTypes, seeds.value);
+    const active = activePools(mode, ratedCount.value);
+    const pools = active.map((p) => p.pool);
+    const seedsKey = fingerprint([u.value, ...seeds.map(formatTitleKey)]);
+    // The streams this request reads, each resumed from its place in the cursor if it has one. Anything else in the
+    // cursor is ignored, never fetched. When the seeds changed since the cursor was made (the user rated something),
+    // rank n may be another title, so "for you" starts over while the discover streams keep their places.
+    const specs = requestStreams(pools, mediaTypes, seeds).map((spec) => {
+      const resume = cursor !== null && (spec.pool !== "for_you" || cursor.seeds === seedsKey);
+      const saved = resume ? cursor.positions.get(streamId(spec)) : undefined;
+      return { spec, position: saved ?? { page: 1, offset: 0 } };
+    });
 
     const stats: DeckStats = { listLookups: 0, detailLookups: 0, pools: {} };
     const discoverFilters = toDiscoverFilters(filters, providerIds, country);
@@ -171,12 +204,11 @@ export function createDeckService(deps: DeckServiceDeps) {
     const visible = createVisibilityCheck(states.value, now);
     // "On my services" needs availability, which the details bring. It is checked by the engine after enrichment.
     const matches = createFilterMatcher({ ...filters, onMyServices: false }, []);
-    const quota = mode === "blend" ? POOL_QUOTA.blend : POOL_QUOTA.single;
     const taken = await Promise.all(
-      pools.map((pool) =>
+      active.map(({ pool, weight }) =>
         takeFromPool(
           streams.filter((s) => s.spec.pool === pool),
-          quota,
+          mode === "blend" ? Math.ceil(POOL_QUOTA.blend * weight) : POOL_QUOTA.single,
           (c) => visible(c) && matches(c),
         ),
       ),
@@ -191,15 +223,22 @@ export function createDeckService(deps: DeckServiceDeps) {
     const unique = new Map<string, TitleSummary>();
     for (const list of taken) for (const s of list) unique.set(tryFormatTitleKey(s)!, s);
     const details = new Map<string, TitleDetails>();
+    let detailFailures = 0;
     await mapWithConcurrency([...unique], DETAILS_CONCURRENCY, async ([key, s]) => {
       stats.detailLookups++;
       try {
         const d = await tmdb.getTitleDetails(s.mediaType, s.tmdbId);
         if (d) details.set(key, d);
       } catch (err) {
+        detailFailures++;
         console.warn(`deck: details lookup failed for ${key}, leaving it out of this page:`, err);
       }
     });
+    // The same rule as the lists: titles were read but none could be looked up, so an empty page with a cursor past
+    // them would lose them and could end the deck during an outage. Throw before the cursor moves.
+    if (unique.size > 0 && detailFailures === unique.size) {
+      throw new Error("getDeck: every TMDB details lookup failed, so the deck cannot move forward");
+    }
     const imdbIds = [...details.values()].map((d) => d.imdbId).filter((id): id is string => id !== null);
     const ratingMap = await lookupRatings(imdbIds);
 
@@ -242,7 +281,13 @@ export function createDeckService(deps: DeckServiceDeps) {
     const positions = specs.map(({ spec }, i) => ({ spec, position: streams[i].position }));
     const nextCursor = positions.every((p) => p.position.page === 0)
       ? null
-      : encodeCursor({ mode, filters: canonicalFilters(filters), streams: positions });
+      : encodeCursor({
+          mode,
+          filters: canonicalFilters(filters),
+          context,
+          seeds: seedsKey,
+          positions: new Map(positions.map(({ spec, position }) => [streamId(spec), position])),
+        });
 
     deps.onStats?.(stats);
     return ok({ kind: "cards", cards, nextCursor });
@@ -296,8 +341,8 @@ function parseRequest(request: unknown): Result<ParsedRequest> {
   const f = parseFilters(filters);
   if (!f.ok) return invalid(f.error.code === "invalid_list_query" ? f.error.message : "filters are invalid");
   for (const year of [f.value.era?.fromYear, f.value.era?.toYear]) {
-    if (typeof year === "number" && (year < ERA_YEAR_RANGE.min || year > ERA_YEAR_RANGE.max)) {
-      return invalid(`era years must be from ${ERA_YEAR_RANGE.min} to ${ERA_YEAR_RANGE.max}, got ${year}`);
+    if (typeof year === "number" && (year < TMDB_YEAR_RANGE.min || year > TMDB_YEAR_RANGE.max)) {
+      return invalid(`era years must be from ${TMDB_YEAR_RANGE.min} to ${TMDB_YEAR_RANGE.max}, got ${year}`);
     }
   }
   let state: CursorState | null = null;
@@ -312,26 +357,30 @@ function parseRequest(request: unknown): Result<ParsedRequest> {
   return ok({ mode: mode as DiscoveryMode, filters: f.value, cursor: state });
 }
 
-function specMediaType(spec: StreamSpec): MediaType {
-  return spec.pool === "for_you" ? spec.seed.mediaType : spec.mediaType;
+/** The seeds in order, of the wanted media types, each once, at most FOR_YOU_SEED_COUNT. */
+function dedupeSeeds(seeds: readonly TitleId[], mediaTypes: readonly MediaType[]): TitleId[] {
+  const seen = new Set<string>();
+  const out: TitleId[] = [];
+  for (const { mediaType, tmdbId } of seeds) {
+    const key = tryFormatTitleKey({ mediaType, tmdbId });
+    if (key === null || seen.has(key) || !mediaTypes.includes(mediaType)) continue;
+    seen.add(key);
+    out.push({ mediaType, tmdbId });
+    if (out.length === FOR_YOU_SEED_COUNT) break;
+  }
+  return out;
 }
 
-/** The streams for a first page: each discover pool per media type, then one per "for you" seed, all at page 1. */
-function freshStreams(pools: readonly PoolName[], mediaTypes: readonly MediaType[], seeds: readonly TitleId[]) {
-  const start = (): StreamPosition => ({ page: 1, offset: 0 });
-  const specs: { spec: StreamSpec; position: StreamPosition }[] = [];
+/** The streams a request reads: each discover pool per media type, then one per "for you" seed, by rank. */
+function requestStreams(pools: readonly PoolName[], mediaTypes: readonly MediaType[], seeds: readonly TitleId[]): StreamSpec[] {
+  const specs: StreamSpec[] = [];
   for (const pool of pools) {
-    if (pool === "for_you") {
-      for (const seed of seeds.slice(0, FOR_YOU_SEED_COUNT)) {
-        if (mediaTypes.includes(seed.mediaType)) specs.push({ spec: { pool, seed: { mediaType: seed.mediaType, tmdbId: seed.tmdbId } }, position: start() });
-      }
-    } else if (DISCOVER_POOLS.includes(pool)) {
-      for (const mediaType of mediaTypes) specs.push({ spec: { pool, mediaType }, position: start() });
+    if (pool === "for_you") seeds.forEach((seed, rank) => specs.push({ pool, rank, seed }));
+    else if ((DISCOVER_POOLS as readonly string[]).includes(pool)) {
+      for (const mediaType of mediaTypes) specs.push({ pool: pool as DiscoverPool, mediaType });
     }
   }
-  // A seed listed twice would make two identical streams.
-  const seen = new Set<string>();
-  return specs.filter(({ spec }) => !seen.has(streamId(spec)) && seen.add(streamId(spec)));
+  return specs;
 }
 
 /** The deck's filters in TMDB discover's terms. "On my services" becomes the user's providers in their country. */
@@ -436,7 +485,7 @@ class Stream {
         return results[this.offset++];
       }
       this.progressed = true;
-      if (this.page >= Math.min(this.totalPages, MAX_LIST_PAGE)) {
+      if (this.page >= Math.min(this.totalPages, TMDB_MAX_PAGE)) {
         this.exhausted = true;
         return undefined;
       }
@@ -452,6 +501,11 @@ class Stream {
  * skipping titles `admit` rejects and repeats within the pool. Keeping the
  * streams in turn mixes movies with series, and "for you" seeds with each
  * other, in the order they were given.
+ *
+ * Each round reads its streams in parallel, so a user who has sorted the
+ * first pages of every stream waits for one round of page skips, not one per
+ * stream. A round asks only as many streams as the quota has room for, so no
+ * stream reads past a title it will not take. Titles land in stream order.
  */
 async function takeFromPool(streams: readonly Stream[], quota: number, admit: (c: TitleSummary) => boolean): Promise<TitleSummary[]> {
   const out: TitleSummary[] = [];
@@ -469,15 +523,17 @@ async function takeFromPool(streams: readonly Stream[], quota: number, admit: (c
   };
   let live = [...streams];
   while (out.length < quota && live.length > 0) {
+    const round = live.slice(0, quota - out.length);
+    // nextAdmitted checks and claims a key with no await in between, so parallel streams never take one title twice.
+    const got = await Promise.all(round.map(nextAdmitted));
     const still: Stream[] = [];
-    for (const s of live) {
-      if (out.length >= quota) break;
-      const c = await nextAdmitted(s);
-      if (c === undefined) continue;
+    round.forEach((s, i) => {
+      const c = got[i];
+      if (c === undefined) return;
       out.push(c);
       still.push(s);
-    }
-    live = still;
+    });
+    live = [...still, ...live.slice(round.length)];
   }
   return out;
 }

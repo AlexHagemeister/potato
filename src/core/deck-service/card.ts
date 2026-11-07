@@ -1,14 +1,17 @@
 // Builds a card from TMDB details. getDeck and getCard both build cards here,
 // so a card opened from Search shows exactly what the deck shows.
 
+import { STREAMING_MONETIZATION } from "../tmdb/client";
 import { logoUrl } from "../tmdb/images";
 import type { CountryProviders, TitleDetails, WatchProvider } from "../tmdb/types";
 import type { ImdbRating } from "../types";
 import { JUSTWATCH_ATTRIBUTION } from "./constants";
 import type { Card, CardImdb, CardProvider, CardStreaming, CardUserState, StreamingOffer } from "./types";
 
+type OfferKind = keyof Omit<CountryProviders, "link">;
+
 /** TMDB's offer lists, in the order a card names them, with the card's word for each. */
-const OFFER_KINDS: readonly [keyof Omit<CountryProviders, "link">, StreamingOffer][] = [
+const OFFER_KINDS: readonly [OfferKind, StreamingOffer][] = [
   ["flatrate", "subscription"],
   ["free", "free"],
   ["ads", "ads"],
@@ -16,7 +19,8 @@ const OFFER_KINDS: readonly [keyof Omit<CountryProviders, "link">, StreamingOffe
   ["buy", "buy"],
 ];
 
-const STREAMING_OFFERS: ReadonlySet<StreamingOffer> = new Set(["subscription", "free", "ads"]);
+/** The kinds that count as streaming: the TMDB module's list, the same one the deck's "on my services" filter and discover use. */
+const STREAMING_KINDS: ReadonlySet<OfferKind> = new Set(STREAMING_MONETIZATION);
 
 /**
  * The card's IMDb state for a title. `ratings` is the lookup result, or
@@ -37,13 +41,15 @@ export function streamingFor(
 ): CardStreaming {
   const listing = details.providersByCountry[country];
   const mine = new Set(userProviderIds);
-  const byId = new Map<number, { provider: WatchProvider; offers: StreamingOffer[] }>();
+  const byId = new Map<number, { provider: WatchProvider; offers: StreamingOffer[]; streams: boolean }>();
   for (const [kind, offer] of OFFER_KINDS) {
+    const streams = STREAMING_KINDS.has(kind);
     for (const p of listing?.[kind] ?? []) {
       const entry = byId.get(p.id);
-      if (!entry) byId.set(p.id, { provider: p, offers: [offer] });
+      if (!entry) byId.set(p.id, { provider: p, offers: [offer], streams });
       else if (!entry.offers.includes(offer)) {
         entry.offers.push(offer);
+        entry.streams ||= streams;
         if (p.displayPriority < entry.provider.displayPriority) entry.provider = p;
       }
     }
@@ -51,12 +57,12 @@ export function streamingFor(
   const group = (p: CardProvider) => (p.streams ? (p.isMine ? 0 : 1) : 2);
   const priority = new Map([...byId.values()].map(({ provider }) => [provider.id, provider.displayPriority]));
   const providers = [...byId.values()]
-    .map(({ provider, offers }): CardProvider => ({
+    .map(({ provider, offers, streams }): CardProvider => ({
       id: provider.id,
       name: provider.name,
       logoUrl: logoUrl(provider.logoPath),
       offers,
-      streams: offers.some((o) => STREAMING_OFFERS.has(o)),
+      streams,
       isMine: mine.has(provider.id),
     }))
     .sort(

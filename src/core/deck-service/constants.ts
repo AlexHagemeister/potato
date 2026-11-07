@@ -3,8 +3,9 @@
 
 /**
  * Titles taken from each pool per getDeck call, before the engine filters and
- * orders them. One title costs one details lookup, so this bounds the details
- * lookups per call: 20 for a single mode, 8 * 4 = 32 for the blend.
+ * orders them. In the blend, a pool takes `blend` times its blend weight
+ * (rounded up). One title costs one details lookup, so this bounds the details
+ * lookups per call: 20 for a single mode, 8 * 4 = 32 for the blend at even weights.
  */
 export const POOL_QUOTA = { single: 20, blend: 8 } as const;
 
@@ -21,11 +22,12 @@ export const FOR_YOU_SEED_COUNT = 5;
 /** Parallel details lookups when enriching a page. */
 export const DETAILS_CONCURRENCY = 8;
 
-/** TMDB serves at most 500 pages of any list. */
-export const MAX_LIST_PAGE = 500;
-
-/** Era bounds the deck accepts. TMDB's discover rejects years outside this range. */
-export const ERA_YEAR_RANGE = { min: 1800, max: 9999 } as const;
+/**
+ * How long a "the IMDb ratings table has rows" answer is trusted before the
+ * service asks again. Only a yes is kept: an empty table is asked about on
+ * every lookup that finds no ratings, so the first daily load shows at once.
+ */
+export const RATINGS_PROBE_TTL_MS = 60 * 60 * 1000;
 
 /**
  * The credit every place that shows streaming availability must carry
