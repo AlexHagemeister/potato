@@ -125,6 +125,14 @@ describe("loadImdbRatings", () => {
     expect(result).toMatchObject({ linesRead: 3, rowsKept: 1 });
   });
 
+  test("a file whose data lines are all malformed fails the absolute guard and rolls back", async () => {
+    const target = new MemoryLoadTarget();
+    target.rows.set("tt9", { rating: 7, votes: 500 });
+    const { fetch } = await fetchOf(tsv(["garbage", "tt1\tnot-a-number\t150", "tt2\t7.0"]));
+    await expect(loadImdbRatings({ target, fetch, minExpectedTitles: 1, minFractionOfCurrent: 0 })).rejects.toThrow("had only 0 titles");
+    expect(Object.fromEntries(target.rows)).toEqual({ tt9: { rating: 7, votes: 500 } });
+  });
+
   test("raising the vote floor is not mistaken for a shrink", async () => {
     const target = new MemoryLoadTarget();
     for (let i = 0; i < 10; i++) target.rows.set(`tt${i}`, { rating: 7, votes: i < 2 ? 500 : 5 });

@@ -28,9 +28,9 @@ export const IMDB_BATCH_SIZE = 10_000;
 
 /**
  * A file with fewer titles than this is treated as broken (a truncated
- * download or a format change) and is not swapped in. It counts every data
- * line, whatever the vote floor keeps. The 2026-11-06 file had 1,729,431
- * titles, and the file only grows.
+ * download or a format change) and is not swapped in. It counts every title
+ * that parsed, whatever the vote floor keeps, and never a malformed line. The
+ * 2026-11-06 file had 1,729,431 titles, and the file only grows.
  */
 export const IMDB_MIN_EXPECTED_TITLES = 1_500_000;
 
@@ -119,9 +119,10 @@ export async function loadImdbRatings(options: LoadImdbRatingsOptions): Promise<
     const lines = splitLines(readStream(text, stallTimeoutMs));
     yield* batch(parseRatings(lines, minVotes, stats), options.batchSize ?? IMDB_BATCH_SIZE);
     // Thrown inside the target's transaction, so a short file never replaces a good table.
-    if (stats.linesRead < minExpectedTitles) {
+    const titles = stats.rowsKept + stats.belowMinVotes;
+    if (titles < minExpectedTitles) {
       throw new ImdbLoadGuardError(
-        `IMDb file had only ${stats.linesRead} titles (expected at least ${minExpectedTitles}); not swapping in`,
+        `IMDb file had only ${titles} titles (expected at least ${minExpectedTitles}; ${stats.malformed} malformed lines); not swapping in`,
       );
     }
   }
