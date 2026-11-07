@@ -10,6 +10,11 @@ export interface CacheEntry {
 export interface CacheStore {
   /** The stored entry, expired or not. The caller decides what expired means, so it can use its own clock. */
   get(key: string): Promise<CacheEntry | null>;
+  /**
+   * Many entries in one read, keyed by cache key. Missing keys are absent.
+   * Optional: callers fall back to one get per key without it.
+   */
+  getMany?(keys: readonly string[]): Promise<Map<string, CacheEntry>>;
   /** Insert or replace. */
   set(key: string, data: unknown, expiresAt: Date): Promise<void>;
 }
@@ -22,6 +27,15 @@ export class MemoryCacheStore implements CacheStore {
     const entry = this.entries.get(key);
     if (!entry) return null;
     return { data: JSON.parse(entry.json), expiresAt: entry.expiresAt };
+  }
+
+  async getMany(keys: readonly string[]): Promise<Map<string, CacheEntry>> {
+    const out = new Map<string, CacheEntry>();
+    for (const key of keys) {
+      const entry = await this.get(key);
+      if (entry) out.set(key, entry);
+    }
+    return out;
   }
 
   async set(key: string, data: unknown, expiresAt: Date): Promise<void> {

@@ -1,7 +1,7 @@
 // The CacheStore backed by the tmdb_cache table. This is the cache store the
 // app uses. Reads and writes are single statements over the HTTP driver.
 
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { getDb, type Db } from "@/db/client";
 import { tmdbCache } from "@/db/schema";
 import type { CacheEntry, CacheStore } from "./cache-store";
@@ -17,6 +17,18 @@ export class PostgresCacheStore implements CacheStore {
       .where(eq(tmdbCache.key, key))
       .limit(1);
     return rows[0] ?? null;
+  }
+
+  /** One statement for the whole batch, so a list of titles costs one round trip, not one per title. */
+  async getMany(keys: readonly string[]): Promise<Map<string, CacheEntry>> {
+    const out = new Map<string, CacheEntry>();
+    if (keys.length === 0) return out;
+    const rows = await this.db()
+      .select({ key: tmdbCache.key, data: tmdbCache.data, expiresAt: tmdbCache.expiresAt })
+      .from(tmdbCache)
+      .where(inArray(tmdbCache.key, [...new Set(keys)]));
+    for (const { key, data, expiresAt } of rows) out.set(key, { data, expiresAt });
+    return out;
   }
 
   async set(key: string, data: unknown, expiresAt: Date): Promise<void> {
