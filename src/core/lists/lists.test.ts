@@ -122,6 +122,19 @@ describe("createTitleInfoLookup", () => {
       expect(found.get("movie:603")).toMatchObject({ providerIds: [8], imdb: { rating: 8.7 } });
     });
 
+    test("rows stay keyed by the requested ref, even when TMDB's answer carries another key", async () => {
+      // A details entry whose own (media type, TMDB ID) differs from the ref that asked for it.
+      const odd = { ...rated, tmdbId: 9603 } as DetailsCore;
+      const tmdb = {
+        lookupTitles: async () => new Map([["movie:603", odd]]),
+        attachProviderIds: async <T extends Candidate>(cs: readonly T[]): Promise<T[]> => cs.map((c) => ({ ...c, providerIds: [8] })),
+      };
+      for (const context of [undefined, { country: "US" }, { imdbRatings: true }]) {
+        const found = await createTitleInfoLookup(tmdb, ratings)(refs, context);
+        expect([...found.keys()]).toEqual(["movie:603"]);
+      }
+    });
+
     test("an empty ratings table throws, so the list shows a failure instead of emptying", async () => {
       const lookup = createTitleInfoLookup(tmdbWith([rated]), () => new MemoryRatingsStore());
       await expect(lookup(refs, { imdbRatings: true })).rejects.toThrow(/not loaded/);

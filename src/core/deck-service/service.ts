@@ -14,10 +14,12 @@
 //   stream, and discover pages are shared across users in the cache.
 // - Details lookups: one per title taken, at most POOL_QUOTA per pool (times
 //   the pool's blend weight in the blend), so 20 for a single mode and 32 for
-//   the blend at even weights. They run DETAILS_CONCURRENCY at a time. The
-//   details cache is shared, and getCard reads the same entries.
-// - One IMDb ratings query for the whole page, plus a one-row probe of the
-//   ratings table when that query finds nothing (see lookupRatings).
+//   the blend at even weights. With a minimum IMDb rating a thin page takes up
+//   to MIN_RATING_TAKE_ROUNDS rounds, so at most 3 times that (60 and 96).
+//   They run DETAILS_CONCURRENCY at a time. The details cache is shared, and
+//   getCard reads the same entries.
+// - One IMDb ratings query per round, plus a one-row probe of the ratings
+//   table when a query finds nothing (see lookupRatings).
 
 import { mapWithConcurrency } from "../concurrency";
 import { MEDIA_TYPES } from "@/db/schema";
@@ -48,6 +50,8 @@ import {
   FOR_YOU_SEED_COUNT,
   MAX_HIDDEN_CHECK,
   MAX_PAGES_PER_STREAM,
+  MIN_RATING_PAGE_TARGET,
+  MIN_RATING_TAKE_ROUNDS,
   POOL_QUOTA,
   RATINGS_PROBE_TTL_MS,
 } from "./constants";
@@ -118,12 +122,12 @@ export function createDeckService(deps: DeckServiceDeps) {
     try {
       const found = await getRatings(ratings, imdbIds);
       if (found.size === 0 && imdbIds.length > 0 && !(await datasetLoaded())) {
-        console.warn("deck: the IMDb ratings table is empty, cards show the rating as unavailable");
+        console.warn("deck: the IMDb ratings table is empty");
         return "unavailable";
       }
       return found;
     } catch (err) {
-      console.warn("deck: IMDb ratings lookup failed, cards show the rating as unavailable:", err);
+      console.warn("deck: IMDb ratings lookup failed:", err);
       return "unavailable";
     }
   }
@@ -213,74 +217,106 @@ export function createDeckService(deps: DeckServiceDeps) {
     // "On my services" needs availability, and a minimum IMDb rating needs the IMDb ID, both of which the details
     // bring. The engine checks them after enrichment. A list summary has neither, so checking them here would take nothing.
     const matches = createFilterMatcher({ ...filters, onMyServices: false, minImdbRating: undefined }, []);
-    const taken = await Promise.all(
-      active.map(({ pool, weight }) =>
-        takeFromPool(
-          streams.filter((s) => s.spec.pool === pool),
-          mode === "blend" ? Math.ceil(POOL_QUOTA.blend * weight) : POOL_QUOTA.single,
-          (c) => visible(c) && matches(c),
-        ),
-      ),
-    );
-
-    const live = streams.filter((s) => !s.exhaustedAtStart);
-    if (live.length > 0 && !live.some((s) => s.progressed)) {
-      throw new Error("getDeck: every TMDB list lookup failed, so the deck cannot move forward");
-    }
-
-    // Enrich each taken title once, even when two pools took it.
-    const unique = new Map<string, TitleSummary>();
-    for (const list of taken) for (const s of list) unique.set(tryFormatTitleKey(s)!, s);
+    const quotas = active.map(({ weight }) => (mode === "blend" ? Math.ceil(POOL_QUOTA.blend * weight) : POOL_QUOTA.single));
+    // A minimum IMDb rating drops titles only after their details, so a thin page takes more rounds, within a fixed
+    // bound (MIN_RATING_TAKE_ROUNDS). Without a minimum one round is the whole call, as before.
+    const maxRounds = typeof filters.minImdbRating === "number" ? MIN_RATING_TAKE_ROUNDS : 1;
+    const taken: TitleSummary[][] = active.map(() => []);
+    const takenKeys = active.map(() => new Set<string>());
     const details = new Map<string, TitleDetails>();
-    let detailFailures = 0;
-    await mapWithConcurrency([...unique], DETAILS_CONCURRENCY, async ([key, s]) => {
-      stats.detailLookups++;
-      try {
-        const d = await tmdb.getTitleDetails(s.mediaType, s.tmdbId);
-        if (d) details.set(key, d);
-      } catch (err) {
-        // A request TMDB will always refuse is a title it cannot serve, like a 404: skip it, never count it as an outage.
-        if (!isPermanentTmdbFailure(err)) detailFailures++;
-        console.warn(`deck: details lookup failed for ${key}, leaving it out of this page:`, err);
+    const lookedUp = new Set<string>();
+    let ratingMap: ReadonlyMap<string, ImdbRating> | "unavailable" = new Map();
+    let result: ReturnType<typeof buildDeck> | null = null;
+
+    for (let round = 0; round < maxRounds; round++) {
+      const fresh = await Promise.all(
+        active.map(({ pool }, i) =>
+          takeFromPool(
+            streams.filter((s) => s.spec.pool === pool),
+            quotas[i],
+            (c) => visible(c) && matches(c),
+            takenKeys[i],
+          ),
+        ),
+      );
+      if (round === 0) {
+        const live = streams.filter((s) => !s.exhaustedAtStart);
+        if (live.length > 0 && !live.some((s) => s.progressed)) {
+          throw new Error("getDeck: every TMDB list lookup failed, so the deck cannot move forward");
+        }
+      } else if (fresh.every((list) => list.length === 0)) {
+        break;
       }
-    });
-    // Most lookups failing is an outage: an empty or thin page with a cursor past these titles would lose them, and
-    // could end the deck. Throw before the cursor moves. A few failures are titles TMDB cannot serve right now: skip
-    // them, so one title that always fails never blocks the deck.
-    if (detailFailures >= DETAILS_OUTAGE_MIN_FAILURES && detailFailures * 2 > unique.size) {
-      throw new Error(`getDeck: ${detailFailures} of ${unique.size} TMDB details lookups failed, so the deck cannot move forward`);
-    }
-    const imdbIds = [...details.values()].map((d) => d.imdbId).filter((id): id is string => id !== null);
-    const ratingMap = await lookupRatings(imdbIds);
-    // With a minimum IMDb rating, ratings that can't be read would drop every title while the cursor moves past
-    // them, and the deck would read as empty. That is an outage: throw before the cursor moves, as for TMDB.
-    if (typeof filters.minImdbRating === "number" && ratingMap === "unavailable") {
-      throw new Error("getDeck: IMDb ratings are unavailable, so a minimum IMDb rating can't be applied");
-    }
+      fresh.forEach((list, i) => taken[i].push(...list));
 
-    const candidatePools: Partial<Record<PoolName, Candidate[]>> = {};
-    pools.forEach((pool, i) => {
-      const enriched = taken[i].flatMap((s) => {
-        const d = details.get(tryFormatTitleKey(s)!);
-        return d ? [toCandidate(s, d, ratingMap, country)] : [];
+      // Enrich each new title once, even when two pools took it.
+      const unique = new Map<string, TitleSummary>();
+      for (const list of fresh) for (const s of list) {
+        const key = tryFormatTitleKey(s)!;
+        if (!lookedUp.has(key)) unique.set(key, s);
+      }
+      for (const key of unique.keys()) lookedUp.add(key);
+      const before = new Set(details.keys());
+      let detailFailures = 0;
+      await mapWithConcurrency([...unique], DETAILS_CONCURRENCY, async ([key, s]) => {
+        stats.detailLookups++;
+        try {
+          const d = await tmdb.getTitleDetails(s.mediaType, s.tmdbId);
+          if (d) details.set(key, d);
+        } catch (err) {
+          // A request TMDB will always refuse is a title it cannot serve, like a 404: skip it, never count it as an outage.
+          if (!isPermanentTmdbFailure(err)) detailFailures++;
+          console.warn(`deck: details lookup failed for ${key}, leaving it out of this page:`, err);
+        }
       });
-      candidatePools[pool] = enriched;
-      stats.pools[pool] = { taken: taken[i].length, enriched: enriched.length, dealt: 0 };
-    });
+      // Most lookups failing is an outage: an empty or thin page with a cursor past these titles would lose them, and
+      // could end the deck. Throw before the cursor moves. A few failures are titles TMDB cannot serve right now: skip
+      // them, so one title that always fails never blocks the deck.
+      if (detailFailures >= DETAILS_OUTAGE_MIN_FAILURES && detailFailures * 2 > unique.size) {
+        throw new Error(`getDeck: ${detailFailures} of ${unique.size} TMDB details lookups failed, so the deck cannot move forward`);
+      }
+      const imdbIds = [...details].flatMap(([key, d]) => (!before.has(key) && d.imdbId !== null ? [d.imdbId] : []));
+      const found = await lookupRatings(imdbIds);
+      if (found === "unavailable") {
+        // With a minimum IMDb rating, ratings that can't be read would drop every title while the cursor moves past
+        // them, and the deck would read as empty. That is an outage: throw before the cursor moves, as for TMDB.
+        if (typeof filters.minImdbRating === "number") {
+          throw new Error("getDeck: IMDb ratings are unavailable, so a minimum IMDb rating can't be applied");
+        }
+        console.warn("deck: IMDb ratings are unavailable, cards show the rating as unavailable");
+        ratingMap = "unavailable";
+      } else if (ratingMap !== "unavailable") {
+        ratingMap = new Map([...ratingMap, ...found]);
+      }
 
-    const result = buildDeck({
-      states: states.value,
-      userProviderIds: providerIds,
-      filters,
-      mode,
-      now,
-      ratedCount,
-      pools: candidatePools,
+      const candidatePools: Partial<Record<PoolName, Candidate[]>> = {};
+      pools.forEach((pool, i) => {
+        candidatePools[pool] = taken[i].flatMap((s) => {
+          const d = details.get(tryFormatTitleKey(s)!);
+          return d ? [toCandidate(s, d, ratingMap, country)] : [];
+        });
+      });
+      result = buildDeck({
+        states: states.value,
+        userProviderIds: providerIds,
+        filters,
+        mode,
+        now,
+        ratedCount,
+        pools: candidatePools,
+      });
+      if (result.kind !== "cards") throw new Error("getDeck: the engine locked a deck the service had unlocked");
+      if (result.cards.length >= MIN_RATING_PAGE_TARGET) break;
+    }
+    if (result === null || result.kind !== "cards") throw new Error("getDeck: the engine locked a deck the service had unlocked");
+    const dealt = result;
+    pools.forEach((pool, i) => {
+      const enriched = taken[i].filter((s) => details.has(tryFormatTitleKey(s)!)).length;
+      stats.pools[pool] = { taken: taken[i].length, enriched, dealt: 0 };
     });
-    if (result.kind !== "cards") throw new Error("getDeck: the engine locked a deck the service had unlocked");
 
     const stateByKey = new Map(states.value.map((s) => [tryFormatTitleKey(s), s]));
-    const cards = result.cards.map((c): DeckPageCard => {
+    const cards = dealt.cards.map((c): DeckPageCard => {
       const key = tryFormatTitleKey(c)!;
       const d = details.get(key)!;
       stats.pools[c.source]!.dealt++;
@@ -570,9 +606,13 @@ class Stream {
  * stream. A round asks only as many streams as the quota has room for, so no
  * stream reads past a title it will not take. Titles land in stream order.
  */
-async function takeFromPool(streams: readonly Stream[], quota: number, admit: (c: TitleSummary) => boolean): Promise<TitleSummary[]> {
+async function takeFromPool(
+  streams: readonly Stream[],
+  quota: number,
+  admit: (c: TitleSummary) => boolean,
+  keys: Set<string> = new Set(),
+): Promise<TitleSummary[]> {
   const out: TitleSummary[] = [];
-  const keys = new Set<string>();
   const nextAdmitted = async (s: Stream): Promise<TitleSummary | undefined> => {
     for (;;) {
       const c = await s.next();

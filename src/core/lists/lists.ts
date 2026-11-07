@@ -7,7 +7,7 @@
 // review edits, undo) are the library's moveTitle, updateRatingReview, and
 // restoreTitleState. Callers use those directly.
 
-import { getRatingsForFilter, type RatingsDatasetProbe, type RatingsStore } from "../imdb/ratings";
+import { attachImdbRatings, getRatingsForFilter, type RatingsDatasetProbe, type RatingsStore } from "../imdb/ratings";
 import { PostgresRatingsStore } from "../imdb/postgres";
 import { getList } from "../library/queries";
 import type { DetailsLookupContext, TitleDetailsLookup, TitleRecord } from "../library/types";
@@ -77,17 +77,17 @@ export function createTitleInfoLookup(
   ratings: () => RatingsStore & RatingsDatasetProbe = appRatings,
 ): TitleInfoLookup {
   return async (refs, context) => {
-    let infos: TitleInfo[] = [...(await tmdb.lookupTitles(refs)).values()];
-    if (context?.country) infos = await tmdb.attachProviderIds(infos, context.country);
-    if (context?.imdbRatings) {
-      const ids = infos.map((i) => i.imdbId).filter((id): id is string => id !== null);
-      const found = await getRatingsForFilter(ratings(), ids);
-      infos = infos.map((i) => {
-        const r = i.imdbId === null ? undefined : found.get(i.imdbId);
-        return r ? { ...i, imdb: { rating: r.rating, votes: r.votes } } : i;
-      });
+    const found = await tmdb.lookupTitles(refs);
+    if (!context?.country && !context?.imdbRatings) return found;
+    // Keyed by the requested ref, as lookupTitles keys it. Both attach steps keep order and length.
+    const keys = [...found.keys()];
+    let infos: TitleInfo[] = [...found.values()];
+    if (context.country) infos = await tmdb.attachProviderIds(infos, context.country);
+    if (context.imdbRatings) {
+      const ids = new Map(infos.map((i) => [formatTitleKey(i), i.imdbId]));
+      infos = await attachImdbRatings(ratings(), infos, ids, getRatingsForFilter);
     }
-    return new Map(infos.map((info) => [formatTitleKey(info), info]));
+    return new Map(keys.map((key, i) => [key, infos[i]]));
   };
 }
 

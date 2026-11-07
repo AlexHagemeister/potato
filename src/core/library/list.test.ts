@@ -99,6 +99,13 @@ describe("parseListQuery", () => {
       },
     });
   });
+
+  test("a minimum IMDb rating of 0 means no minimum, so unrated titles are not hidden", () => {
+    const result = parseListQuery("watchlist", { filters: { minImdbRating: 0 } });
+    if (!result.ok) throw new Error("expected ok");
+    expect("minImdbRating" in result.value.filters).toBe(false);
+    expect(filtersNeedDetails(result.value.filters)).toBe(false);
+  });
 });
 
 describe("cursors", () => {
@@ -127,7 +134,6 @@ describe("filters", () => {
     expect(filtersNeedDetails({ onMyServices: true })).toBe(true);
     // The IMDb rating needs the IMDb ID, which comes with the details.
     expect(filtersNeedDetails({ minImdbRating: 7.5 })).toBe(true);
-    expect(filtersNeedDetails({ minImdbRating: 0 })).toBe(true);
   });
 
   test("a minimum IMDb rating keeps rows rated at or above it, and drops rows with no IMDb rating", () => {

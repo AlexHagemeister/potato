@@ -84,6 +84,13 @@ describe("attachImdbRatings", () => {
     expect(input[2].imdb).toEqual({ rating: 1, votes: 1 }); // input not mutated
   });
 
+  test("with the filter-safe read, an unloaded table throws instead of attaching nothing", async () => {
+    const ids = new Map([["movie:603", "tt0133093"]]);
+    await expect(attachImdbRatings(new MemoryRatingsStore(), [candidate("movie", 603)], ids, getRatingsForFilter)).rejects.toThrow(/not loaded/);
+    const out = await attachImdbRatings(store(), [candidate("movie", 603)], ids, getRatingsForFilter);
+    expect(out[0].imdb).toEqual({ rating: 8.7, votes: 2_207_468 });
+  });
+
   test("movie and series with the same TMDB ID stay distinct", async () => {
     const out = await attachImdbRatings(
       store(),

@@ -3,7 +3,7 @@
 // into Postgres by ./loader.ts.
 
 import { formatTitleKey } from "../title-id";
-import type { Candidate, ImdbRating } from "../types";
+import type { ImdbRating, TitleId } from "../types";
 
 /** Reads ratings by IMDb ID (tconst). The Postgres implementation reads the imdb_ratings table. */
 export interface RatingsStore {
@@ -49,18 +49,21 @@ export async function getRatingsForFilter(
 }
 
 /**
- * Returns copies of the candidates with `imdb` set from the ratings store.
- * `imdbIds` maps formatTitleKey(candidate) to its IMDb ID, as the TMDB
- * client's resolveImdbIds returns it. A candidate with no IMDb ID or no
- * dataset row keeps `imdb` absent, which the deck engine reads as "use TMDB".
+ * Returns copies of the titles with `imdb` set from the ratings store.
+ * `imdbIds` maps formatTitleKey(title) to its IMDb ID, as the TMDB client's
+ * resolveImdbIds returns it. A title with no IMDb ID or no dataset row keeps
+ * `imdb` absent. `read` picks the lookup: getRatings by default, or
+ * getRatingsForFilter where a filter judges the rating, so an unloaded table
+ * throws instead of reading as "no title is rated".
  */
-export async function attachImdbRatings<T extends Candidate>(
-  store: RatingsStore,
+export async function attachImdbRatings<T extends TitleId & { imdb?: ImdbRating }, S extends RatingsStore>(
+  store: S,
   candidates: readonly T[],
   imdbIds: ReadonlyMap<string, string | null>,
+  read: (store: S, imdbIds: readonly string[]) => Promise<ReadonlyMap<string, ImdbRating>> = getRatings,
 ): Promise<T[]> {
   const idFor = (c: T) => imdbIds.get(formatTitleKey(c)) ?? null;
-  const ratings = await getRatings(
+  const ratings = await read(
     store,
     candidates.map(idFor).filter((id): id is string => id !== null),
   );

@@ -16,6 +16,21 @@ export const POOL_QUOTA = { single: 20, blend: 8 } as const;
  */
 export const MAX_PAGES_PER_STREAM = 3;
 
+/**
+ * With a minimum IMDb rating, the most take rounds one getDeck call runs. A
+ * TMDB list summary carries no IMDb rating, so the minimum drops titles only
+ * after their details are read. On narrow filters one round of POOL_QUOTA
+ * titles can deal nothing. Each extra round takes another POOL_QUOTA per pool
+ * from where the last stopped, while the page is short of
+ * MIN_RATING_PAGE_TARGET cards. This caps a call's details lookups at
+ * POOL_QUOTA times this (60 for a single mode, 96 for the blend). List
+ * lookups keep their own MAX_PAGES_PER_STREAM budget across rounds.
+ */
+export const MIN_RATING_TAKE_ROUNDS = 3;
+
+/** With a minimum IMDb rating, a page with this many cards stops taking more rounds. Matches the Discover queue's low-water mark. */
+export const MIN_RATING_PAGE_TARGET = 5;
+
 /** How many of the user's highest-rated Seen titles seed "for you". One recommendations stream each. */
 export const FOR_YOU_SEED_COUNT = 5;
 

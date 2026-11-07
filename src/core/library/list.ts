@@ -80,7 +80,8 @@ export function parseFilters(input: unknown): Result<DeckFilters> {
     if (typeof r !== "number" || !Number.isFinite(r) || r < 0 || r > 10) {
       return bad("filters.minImdbRating must be a number from 0 to 10");
     }
-    out.minImdbRating = r;
+    // 0 asks for no minimum. Kept as a number, it would hide every unrated title and bind cursors to a no-op.
+    if (r > 0) out.minImdbRating = r;
   }
   return ok(out);
 }

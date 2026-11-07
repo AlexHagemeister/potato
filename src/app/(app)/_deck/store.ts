@@ -34,7 +34,7 @@ import {
   restartCursor,
   resumeQueue,
   returnToFront,
-  stalled,
+  queueStop,
   startAgain,
   titleKey,
   type DeckQueue,
@@ -45,6 +45,7 @@ import {
   DEFAULT_DECK_CHOICE,
   deckChoiceKey,
   deckChoiceToParams,
+  MIN_RATING_LABELS,
   normalizeDeckChoice,
   type DeckChoice,
 } from "@/core/filters";
@@ -97,6 +98,8 @@ export type DeckView =
   | { kind: "loading" }
   | { kind: "error" }
   | { kind: "stalled" }
+  /** Stopped under a minimum IMDb rating: the bounded search found nothing more rated that high. */
+  | { kind: "reach_spent"; minimum: string }
   | { kind: "done" }
   | { kind: "locked"; remaining: number }
   | { kind: "no_seeds" };
@@ -174,7 +177,9 @@ export function viewOf(s: DeckState): DeckView {
   if (s.gate?.kind === "no_seeds") return { kind: "no_seeds" };
   if (s.fetching) return { kind: "loading" };
   if (s.failed) return { kind: "error" };
-  if (stalled(s.queue)) return { kind: "stalled" };
+  const stop = queueStop(s.queue, s.choice.filters.minRating !== "any");
+  if (stop === "reach_spent") return { kind: "reach_spent", minimum: MIN_RATING_LABELS[s.choice.filters.minRating] };
+  if (stop === "stalled") return { kind: "stalled" };
   if (s.queue.exhausted) return { kind: "done" };
   return { kind: "loading" };
 }
