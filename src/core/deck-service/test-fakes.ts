@@ -96,10 +96,12 @@ export interface Calls {
   stats: DeckStats[];
   ratingLookups: number;
   ratingProbes: number;
+  /** Each getTitleStatesFor call's titles, by key. */
+  stateLookups: string[][];
 }
 
 export function fakeService(w: FakeWorld) {
-  const calls: Calls = { lists: [], details: [], seeds: [], stats: [], ratingLookups: 0, ratingProbes: 0 };
+  const calls: Calls = { lists: [], details: [], seeds: [], stats: [], ratingLookups: 0, ratingProbes: 0, stateLookups: [] };
   const known = new Map<string, TitleSummary>();
   for (const pages of Object.values(w.lists)) for (const page of pages) for (const s of page) known.set(formatTitleKey(s), s);
 
@@ -145,6 +147,11 @@ export function fakeService(w: FakeWorld) {
     },
     getUserSettings: async () => ok(w.settings),
     getTitleState: async (_u, ref): Promise<Result<CardUserState | null>> => ok(w.rows[formatTitleKey(ref)] ?? null),
+    getTitleStatesFor: async (_u, refs) => {
+      calls.stateLookups.push(refs.map(formatTitleKey));
+      const wanted = new Set(refs.map(formatTitleKey));
+      return ok(w.states.filter((s) => wanted.has(formatTitleKey(s))));
+    },
     getTopRatedSeen: async (_u, mediaTypes, limit) => {
       calls.seeds.push({ mediaTypes, limit });
       return ok(w.seeds.filter((s) => mediaTypes.includes(s.mediaType)).slice(0, limit));

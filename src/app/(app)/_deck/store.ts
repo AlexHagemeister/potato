@@ -7,7 +7,9 @@
 // A change to the user's country or services (the settings key) refreshes the
 // queued cards, since their streaming data is stale. So does a change to the
 // mode or filters (the choice), since they are the wrong cards. Core's
-// deckInputChange is the one rule for both. The choice is saved to the
+// deckInputChange is the one rule for both. A queued title sorted elsewhere
+// (Search, Lists, another device) is checked for on each return to the tab
+// and dropped (core's dropTitles). The choice is saved to the
 // profile (core's saveDeckChoice), so it follows the user across devices: the
 // deck applies a change at once and saves it behind, and rolls it back with
 // an error notice if the save fails. The page hands in the saved choice when
@@ -22,9 +24,11 @@ import {
   addPage,
   afterRefusal,
   deckInputChange,
+  dropTitles,
   emptyQueue,
   forgetTitle,
   needsMore,
+  queuedTitles,
   refreshQueue,
   removeCard,
   restartCursor,
@@ -35,6 +39,7 @@ import {
   titleKey,
   type DeckQueue,
 } from "@/core/deck-queue";
+import { MAX_HIDDEN_CHECK } from "@/core/deck-service/constants";
 import type { DeckPage, DeckPageCard } from "@/core/deck-service/types";
 import {
   DEFAULT_DECK_CHOICE,
@@ -44,6 +49,7 @@ import {
   type DeckChoice,
 } from "@/core/filters";
 import type { TitleId } from "@/core/types";
+import type { HiddenResponse } from "@/app/api/deck/hidden/route";
 import type { DeckResponse } from "@/app/api/deck/route";
 import {
   markSeenAction,
@@ -138,6 +144,13 @@ let toastTimer: ReturnType<typeof setTimeout> | undefined;
 let nextId = 0;
 /** Titles whose sort is still saving, by key. Check again keeps them out of the new deck. */
 const saving = new Set<string>();
+/** The title an Undo is restoring, until the server confirms. A check on return must not drop it. */
+let undoingKey: string | null = null;
+/**
+ * While a sorted-elsewhere check is on its way: the titles sorted or undone
+ * here meanwhile, which its answer leaves alone. Null when none is.
+ */
+let touchedDuringCheck: Set<string> | null = null;
 const preloaded = new Set<string>();
 const listeners = new Set<() => void>();
 
@@ -172,7 +185,8 @@ export function useDeck(): DeckState {
  * Called each time Discover mounts (the app opens, or the user taps back to
  * the tab). Binds the store to the signed-in user, refreshes the queued cards
  * if the country or services changed, re-checks a locked or no_seeds deck
- * (ratings made elsewhere may unlock it), and fills the queue.
+ * (ratings made elsewhere may unlock it), drops queued cards sorted elsewhere
+ * meanwhile (dropSortedElsewhere), and fills the queue.
  *
  * `savedChoice` is the mode and filters saved to the profile. The deck takes
  * it when it starts for a user (the app opens or reloads). Later visits keep
@@ -183,12 +197,62 @@ export function useDeck(): DeckState {
 export function startDeck(userId: string, settingsKey: string, savedChoice: DeckChoice) {
   if (state.userId !== userId) {
     reset(userId, settingsKey, savedChoice);
-  } else if (!rebase(settingsKey, state.choice) && state.gate) {
-    fetchEpoch++;
-    set({ gate: null, queue: restartCursor(state.queue) });
+  } else if (!rebase(settingsKey, state.choice)) {
+    // A refresh above already dropped the queued cards, so only a kept queue needs the check.
+    if (state.gate) {
+      fetchEpoch++;
+      set({ gate: null, queue: restartCursor(state.queue) });
+    } else {
+      void dropSortedElsewhere();
+    }
   }
   // Coming back to the tab is also a retry after a failed fetch.
   void fill();
+}
+
+/**
+ * Asks the server which queued titles were sorted since they were dealt (in
+ * Search, Lists, or on another device) and drops them, the card on screen
+ * included (core's dropTitles, VISION invariant 3). One small request per
+ * return to the tab, no deck refetch. One at a time: a return while a check
+ * is on its way (or React's development double mount) relies on that check.
+ * If it fails, the deck keeps its cards: the next return asks again. Titles
+ * sorted or undone here while it is on its way, and a sort or Undo still
+ * saving, stay put, since the answer may predate them.
+ */
+async function dropSortedElsewhere() {
+  if (touchedDuringCheck) return;
+  const titles = queuedTitles(state.queue, MAX_HIDDEN_CHECK);
+  if (titles.length === 0) return;
+  const gen = generation;
+  const touched = new Set<string>();
+  touchedDuringCheck = touched;
+  let body: HiddenResponse;
+  try {
+    const res = await fetch("/api/deck/hidden", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ titles }),
+      cache: "no-store",
+    });
+    body = (await res.json()) as HiddenResponse;
+  } catch {
+    return;
+  } finally {
+    touchedDuringCheck = null;
+  }
+  if (!body.ok || gen !== generation) return;
+  const keep = [...saving, ...touched, ...(undoingKey ? [undoingKey] : [])];
+  const queue = dropTitles(state.queue, body.hidden.map(titleKey), keep);
+  if (queue === state.queue) return;
+  set({ queue });
+  preload();
+  void fill();
+}
+
+/** A sort or Undo on this screen: any check on its way must leave the title alone. */
+function touch(key: string) {
+  touchedDuringCheck?.add(key);
 }
 
 /** The choice the profile is known to hold. A failed save rolls back to it. */
@@ -262,6 +326,7 @@ function reset(userId: string, settingsKey: string, savedChoice: DeckChoice) {
   lastSort = null;
   clearTimeout(toastTimer);
   saving.clear();
+  undoingKey = null;
   preloaded.clear();
   profileChoice = normalizeDeckChoice(savedChoice);
   state = { ...initialState(userId, settingsKey, profileChoice), fetching: filling };
@@ -409,6 +474,7 @@ export function sortCard(kind: Exclude<SortKind, "seen">, card: DeckPageCard) {
   const settingsKey = state.settingsKey;
   const key = titleKey(card);
   saving.add(key);
+  touch(key);
   set({ queue: removeCard(state.queue, card) });
   preload();
 
@@ -442,6 +508,7 @@ export function sortCard(kind: Exclude<SortKind, "seen">, card: DeckPageCard) {
  */
 export async function markCardSeen(card: DeckPageCard, rating: number, review: string | null): Promise<string | null> {
   const gen = generation;
+  touch(titleKey(card));
   let result: DeckActionResult;
   try {
     result = await markSeenAction(refOf(card), rating, review);
@@ -463,6 +530,9 @@ export async function undoLastSort() {
   const gen = generation;
   lastSort = null;
   clearTimeout(toastTimer);
+  const key = titleKey(sort.card);
+  touch(key);
+  undoingKey = key;
   set({ toast: null, undoing: true, queue: returnToFront(state.queue, sort.card) });
 
   let undone: DeckActionResult;
@@ -474,6 +544,7 @@ export async function undoLastSort() {
   } catch {
     undone = { ok: false, error: "Couldn't undo. Check your connection." };
   } finally {
+    if (undoingKey === key) undoingKey = null;
     if (gen === generation) set({ undoing: false });
   }
   if (gen !== generation || undone.ok) return;

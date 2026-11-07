@@ -151,7 +151,8 @@ export type DeckInputChange =
   | { refresh: true; dropUndo: boolean };
 
 /**
- * The one staleness rule for the queue. A new mode or new filters make the
+ * The staleness rule for the deck's inputs (dropTitles is the one for titles
+ * sorted elsewhere). A new mode or new filters make the
  * queued cards the wrong ones, and new settings make their streaming data
  * stale: either way the queue refreshes (refreshQueue), and the card on
  * screen stays on top if the first new page deals it. Only a settings change
@@ -162,6 +163,38 @@ export function deckInputChange(prev: DeckInputs, next: DeckInputs): DeckInputCh
   const settings = prev.settingsKey !== next.settingsKey;
   if (!settings && prev.choiceKey === next.choiceKey) return { refresh: false };
   return { refresh: true, dropUndo: settings };
+}
+
+/**
+ * The queued titles to check when Discover becomes active again, at most
+ * `max` (the service's MAX_HIDDEN_CHECK), the card on screen first. Only the
+ * identities: the check needs nothing else.
+ */
+export function queuedTitles(queue: DeckQueue, max: number): TitleId[] {
+  return queue.cards.slice(0, max).map(({ mediaType, tmdbId }) => ({ mediaType, tmdbId }));
+}
+
+/**
+ * The second staleness rule, beside deckInputChange: a queued title was
+ * sorted somewhere else (Search, Lists, another device) while Discover was in
+ * the background, so it must not be dealt (VISION invariant 3). The check
+ * (the deck service's hiddenTitles) returns those titles, and this takes them
+ * out of the queue, the card on screen included. They stay in dealt, so a
+ * later page can't deal them again. `keep` names titles this screen is still
+ * sorting or undoing: the check may have read a row that is about to change,
+ * so they stay where they are. Returns the same queue when nothing changes,
+ * so a check that finds nothing costs no re-render.
+ */
+export function dropTitles(queue: DeckQueue, keys: Iterable<string>, keep: Iterable<string> = []): DeckQueue {
+  const drop = new Set(keys);
+  for (const key of keep) drop.delete(key);
+  if (drop.size === 0) return queue;
+  const cards = queue.cards.filter((c) => !drop.has(titleKey(c)));
+  const keepOnTop = queue.keepOnTop !== null && drop.has(queue.keepOnTop) ? null : queue.keepOnTop;
+  if (cards.length === queue.cards.length && keepOnTop === queue.keepOnTop) return queue;
+  const dealt = new Set(queue.dealt);
+  for (const key of drop) dealt.add(key);
+  return { ...queue, cards, dealt, keepOnTop };
 }
 
 /**

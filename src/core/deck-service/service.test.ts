@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { FOR_YOU_MIN_RATINGS } from "../deck/constants";
 import { formatTitleKey } from "../title-id";
+import type { UserTitleState } from "../types";
 import type { DeckPage, DeckPageCard } from "./types";
-import { FOR_YOU_SEED_COUNT, JUSTWATCH_ATTRIBUTION, MAX_PAGES_PER_STREAM, POOL_QUOTA } from "./constants";
+import { FOR_YOU_SEED_COUNT, JUSTWATCH_ATTRIBUTION, MAX_HIDDEN_CHECK, MAX_PAGES_PER_STREAM, POOL_QUOTA } from "./constants";
 import { canonicalFilters, decodeCursor, encodeCursor } from "./cursor";
 import { detailsFor, emptyCountry, fakeService, provider, range, summary, world, type FakeWorld } from "./test-fakes";
 
@@ -620,5 +621,58 @@ describe("getCard", () => {
     expect(await fakeService(w3).service.getCard(USER, { mediaType: "movie", tmdbId: 603 })).toMatchObject({
       value: { imdb: { kind: "unavailable", imdbId: "tt0000603" } },
     });
+  });
+});
+
+describe("hiddenTitles", () => {
+  // NOW is 2026-11-07T12:00:00Z (test-fakes).
+  const states: UserTitleState[] = [
+    { mediaType: "tv", tmdbId: 2734, status: "watchlist" },
+    { mediaType: "movie", tmdbId: 2, status: "passed" },
+    { mediaType: "movie", tmdbId: 3, status: "seen" },
+    { mediaType: "movie", tmdbId: 4, status: "skipped", skipUntil: new Date("2026-11-21T12:00:00Z") },
+    { mediaType: "movie", tmdbId: 5, status: "skipped", skipUntil: new Date("2026-11-01T00:00:00Z") },
+  ];
+  const ref = (mediaType: "movie" | "tv", tmdbId: number) => ({ mediaType, tmdbId });
+
+  test("returns the titles on a list or skipped until later, by the deck's own rule", async () => {
+    const { service, calls } = fakeService(world({ states }));
+    const asked = [ref("tv", 2734), ref("movie", 2), ref("movie", 3), ref("movie", 4), ref("movie", 5), ref("movie", 6)];
+    const result = await service.hiddenTitles(USER, asked);
+    if (!result.ok) throw new Error(JSON.stringify(result.error));
+    // movie:5's skip has expired (that is how the deck dealt it), and movie:6 has no row: both stay.
+    expect(keysOf(result.value)).toEqual(["tv:2734", "movie:2", "movie:3", "movie:4"]);
+    // One read, for exactly the titles asked about.
+    expect(calls.stateLookups).toEqual([keysOf(asked)]);
+  });
+
+  test("keeps a movie and a series with the same TMDB ID apart", async () => {
+    const { service } = fakeService(world({ states }));
+    expect(await service.hiddenTitles(USER, [ref("movie", 2734), ref("tv", 2)])).toEqual({ ok: true, value: [] });
+  });
+
+  test("asks about each title once, and an empty list reads nothing", async () => {
+    const { service, calls } = fakeService(world({ states }));
+    const result = await service.hiddenTitles(USER, [ref("movie", 2), ref("movie", 2)]);
+    expect(result.ok && keysOf(result.value)).toEqual(["movie:2"]);
+    expect(await service.hiddenTitles(USER, [])).toEqual({ ok: true, value: [] });
+    expect(calls.stateLookups).toEqual([["movie:2"]]);
+  });
+
+  test("refuses input that is not a short list of titles, before reading anything", async () => {
+    const { service, calls } = fakeService(world({ states }));
+    for (const bad of [null, "tv:2734", [{ mediaType: "film", tmdbId: 1 }], [{ mediaType: "tv", tmdbId: -1 }]]) {
+      expect(await service.hiddenTitles(USER, bad)).toMatchObject({ ok: false, error: { code: "invalid_title" } });
+    }
+    const tooMany = Array.from({ length: MAX_HIDDEN_CHECK + 1 }, (_, i) => ref("movie", i + 1));
+    expect(await service.hiddenTitles(USER, tooMany)).toMatchObject({ ok: false, error: { code: "invalid_title" } });
+    expect(await service.hiddenTitles("", [ref("movie", 2)])).toMatchObject({ ok: false, error: { code: "invalid_user" } });
+    expect(calls.stateLookups).toEqual([]);
+  });
+
+  test("passes only the identity on, not other fields the caller sent", async () => {
+    const { service } = fakeService(world({ states }));
+    const result = await service.hiddenTitles(USER, [{ mediaType: "movie", tmdbId: 2, status: "seen", extra: 1 }]);
+    expect(result).toEqual({ ok: true, value: [{ mediaType: "movie", tmdbId: 2 }] });
   });
 });

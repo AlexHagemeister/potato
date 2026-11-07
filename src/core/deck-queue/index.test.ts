@@ -7,11 +7,13 @@ import {
   afterRefusal,
   deckInputChange,
   deckSettingsKey,
+  dropTitles,
   emptyQueue,
   forgetTitle,
   MAX_EMPTY_PAGES,
   needsMore,
   QUEUE_LOW_WATER,
+  queuedTitles,
   refreshQueue,
   removeCard,
   restartCursor,
@@ -236,5 +238,54 @@ describe("forgetTitle", () => {
     q = forgetTitle(q, card(1));
     q = addPage(q, { cards: [card(1)], nextCursor: null });
     expect(ids(q)).toEqual(["movie:2", "movie:1"]);
+  });
+});
+
+describe("dropTitles (a queued title sorted elsewhere)", () => {
+  test("drops the card on screen and a later card, and a later page can't deal them again", () => {
+    let q = addPage(emptyQueue(), { cards: [card(2734, "tv"), card(1), card(2), card(3)], nextCursor: "c" });
+    q = dropTitles(q, ["tv:2734", "movie:2"]);
+    expect(ids(q)).toEqual(["movie:1", "movie:3"]);
+    expect(q.cursor).toBe("c");
+    q = addPage(q, { cards: [card(2734, "tv"), card(2), card(4)], nextCursor: null });
+    expect(ids(q)).toEqual(["movie:1", "movie:3", "movie:4"]);
+  });
+
+  test("keeps titles this screen is still sorting or undoing", () => {
+    const q = addPage(emptyQueue(), { cards: [card(1), card(2)], nextCursor: "c" });
+    expect(ids(dropTitles(q, ["movie:1", "movie:2"], ["movie:1"]))).toEqual(["movie:1"]);
+  });
+
+  test("returns the same queue when nothing changes, so a quiet check costs no re-render", () => {
+    const q = addPage(emptyQueue(), { cards: [card(1), card(2)], nextCursor: "c" });
+    expect(dropTitles(q, [])).toBe(q);
+    expect(dropTitles(q, ["movie:9"])).toBe(q);
+    expect(dropTitles(q, ["movie:1"], ["movie:1"])).toBe(q);
+  });
+
+  test("keeps a movie and a series with the same TMDB ID apart", () => {
+    const q = addPage(emptyQueue(), { cards: [card(7, "movie"), card(7, "tv")], nextCursor: "c" });
+    expect(ids(dropTitles(q, ["tv:7"]))).toEqual(["movie:7"]);
+  });
+
+  test("a dropped title can't come back on top after a refresh", () => {
+    let q = addPage(emptyQueue(), { cards: [card(1), card(2)], nextCursor: "c" });
+    q = refreshQueue(q);
+    expect(q.keepOnTop).toBe("movie:1");
+    q = dropTitles(q, ["movie:1"]);
+    expect(q.keepOnTop).toBeNull();
+    q = addPage(q, { cards: [card(2), card(1)], nextCursor: null });
+    expect(ids(q)).toEqual(["movie:2"]);
+  });
+});
+
+describe("queuedTitles", () => {
+  test("lists the queued identities, the card on screen first, at most max", () => {
+    const q = addPage(emptyQueue(), { cards: [card(2734, "tv"), card(1), card(2)], nextCursor: "c" });
+    expect(queuedTitles(q, 2)).toEqual([
+      { mediaType: "tv", tmdbId: 2734 },
+      { mediaType: "movie", tmdbId: 1 },
+    ]);
+    expect(queuedTitles(emptyQueue(), 10)).toEqual([]);
   });
 });
