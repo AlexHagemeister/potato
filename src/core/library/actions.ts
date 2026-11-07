@@ -6,10 +6,14 @@
 // Each write is a single SQL statement. Its first CTE reads the row as it was
 // and the next one writes, and both see the same snapshot, so the previous
 // state comes back atomically with no transaction (the Neon HTTP driver has
-// none). The read takes no row lock on purpose: a lock taken in the same
-// statement as the write depends on which CTE the planner runs first, and a
-// lost previous state would turn an undo into a delete. Two writes racing on
-// one user's one title can at worst hand back a slightly stale previous.
+// none). The read takes no row lock: a lock taken in the same statement as
+// the write depends on which CTE the planner runs first, and a lock could not
+// fix the one real race anyway. That race: two writes on the same user's same
+// title land at once (a double tap on two devices). The later one can return
+// a stale previous, and when the title had no row before both, a null
+// previous, so undoing it deletes the row the earlier write made. The user
+// can redo with one tap. Closing it needs a transaction with a retry, which
+// this driver cannot do.
 //
 // Timestamps come from the caller's clock (`now`), at millisecond precision,
 // so a state read back into JavaScript restores to exactly the same value.
