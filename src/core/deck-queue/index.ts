@@ -1,0 +1,172 @@
+// The client's queue of deck cards: which card is on top, which come next,
+// and when to ask the deck service for another page. Pure functions over an
+// immutable value, so the Discover screen, a future native app, and tests
+// share one set of paging rules (CLAUDE.md architecture rule 3). It runs in
+// the browser, so it may import only pure modules: today that is types and
+// formatTitleKey from ../title-id. Never import server-only code here.
+//
+// The paging rules come from DeckPage (src/core/deck-service/types.ts):
+// keep calling while nextCursor is not null, even when a page has no cards,
+// and drop any card already dealt, by (media type, TMDB ID).
+
+import type { DeckPageCard } from "../deck-service/types";
+import { formatTitleKey } from "../title-id";
+import type { TitleId } from "../types";
+
+/** Ask for another page when fewer cards than this are queued. */
+export const QUEUE_LOW_WATER = 5;
+
+/**
+ * Pages in a row that may add no new card before the queue stops asking.
+ * The service moves its cursor on every call, but a narrow filter can burn
+ * many pages. Past this, the screen offers a retry instead of looping.
+ */
+export const MAX_EMPTY_PAGES = 6;
+
+export interface DeckQueue {
+  /** Cards waiting to be shown. cards[0] is on screen. */
+  cards: DeckPageCard[];
+  /**
+   * Every title this queue has dealt, by key, including cards already sorted.
+   * A page fetched while a sort is still saving can deal that title again, so
+   * dedupe against everything, not only what is still queued.
+   */
+  dealt: ReadonlySet<string>;
+  /** The cursor for the next page. Null before the first page and after the last. */
+  cursor: string | null;
+  /** True once a page came back with nextCursor null: the service has nothing more. */
+  exhausted: boolean;
+  /** Pages in a row that added no card. */
+  emptyPages: number;
+  /**
+   * After a refresh: the title that was on screen. If the next page deals it
+   * again, it goes back on top, so the user keeps their card with fresh data.
+   */
+  keepOnTop: string | null;
+}
+
+export function titleKey(ref: TitleId): string {
+  return formatTitleKey(ref);
+}
+
+export function emptyQueue(): DeckQueue {
+  return { cards: [], dealt: new Set(), cursor: null, exhausted: false, emptyPages: 0, keepOnTop: null };
+}
+
+/** Appends a page's new cards and takes its cursor. */
+export function addPage(queue: DeckQueue, page: { cards: DeckPageCard[]; nextCursor: string | null }): DeckQueue {
+  const dealt = new Set(queue.dealt);
+  const fresh: DeckPageCard[] = [];
+  for (const card of page.cards) {
+    const key = titleKey(card);
+    if (dealt.has(key)) continue;
+    dealt.add(key);
+    fresh.push(card);
+  }
+  const top = queue.keepOnTop === null ? -1 : fresh.findIndex((c) => titleKey(c) === queue.keepOnTop);
+  if (top > 0) fresh.unshift(...fresh.splice(top, 1));
+  return {
+    cards: [...queue.cards, ...fresh],
+    dealt,
+    cursor: page.nextCursor,
+    exhausted: page.nextCursor === null,
+    emptyPages: fresh.length > 0 ? 0 : queue.emptyPages + 1,
+    // Only the first page after a refresh may put the old card back on top.
+    keepOnTop: null,
+  };
+}
+
+/** True when the queue is running low and the service may have more. */
+export function needsMore(queue: DeckQueue): boolean {
+  return !queue.exhausted && queue.cards.length < QUEUE_LOW_WATER && queue.emptyPages < MAX_EMPTY_PAGES;
+}
+
+/** True when too many pages in a row came back empty and the queue stopped asking. */
+export function stalled(queue: DeckQueue): boolean {
+  return !queue.exhausted && queue.emptyPages >= MAX_EMPTY_PAGES;
+}
+
+/** Lets a stalled queue ask again (the screen's retry). */
+export function resumeQueue(queue: DeckQueue): DeckQueue {
+  return { ...queue, emptyPages: 0 };
+}
+
+/**
+ * Forgets the cursor but keeps the cards and what was dealt: the service
+ * rejected the cursor (stale after a settings change), so the next page
+ * starts the deck again and dedupe drops what this queue already showed.
+ */
+export function restartCursor(queue: DeckQueue): DeckQueue {
+  return { ...queue, cursor: null, exhausted: false, emptyPages: 0 };
+}
+
+/**
+ * What to do when the service refuses a page. A stale cursor (an old cursor
+ * version after a deploy, or a cursor from before a settings change) gets one
+ * restart without the cursor: returns the queue to retry with. Anything else,
+ * or a second refusal in the same run, returns null: show the error.
+ */
+export function afterRefusal(queue: DeckQueue, error: string, alreadyRestarted: boolean): DeckQueue | null {
+  if (error !== "invalid_deck_query" || queue.cursor === null || alreadyRestarted) return null;
+  return restartCursor(queue);
+}
+
+/**
+ * The user's country or services changed, so every queued card shows stale
+ * streaming data. Drops the queued cards and starts the deck again from the
+ * first page. The dropped titles are forgotten, so the next pages deal them
+ * again with fresh data. Sorted titles stay in dealt, so a sort still saving
+ * can't come back. The card on screen returns on top if the first page has it.
+ */
+export function refreshQueue(queue: DeckQueue): DeckQueue {
+  const dealt = new Set(queue.dealt);
+  for (const card of queue.cards) dealt.delete(titleKey(card));
+  const top = queue.cards[0];
+  return { cards: [], dealt, cursor: null, exhausted: false, emptyPages: 0, keepOnTop: top ? titleKey(top) : null };
+}
+
+/**
+ * The settings a deck's cards depend on (country and streaming services), as
+ * one comparable string. When it changes, the queued cards are stale.
+ */
+export function deckSettingsKey(settings: { country: string; providerIds: readonly number[] }): string {
+  const ids = [...new Set(settings.providerIds)].sort((a, b) => a - b);
+  return `${settings.country.toUpperCase()}:${ids.join(",")}`;
+}
+
+/**
+ * Starts the deck again from the first page (Check again) and forgets the
+ * titles it dealt, except the queued cards and `keep` (sorts still saving),
+ * so a skip that expired or a title moved in Lists can be dealt again.
+ */
+export function startAgain(queue: DeckQueue, keep: Iterable<string>): DeckQueue {
+  const dealt = new Set(keep);
+  for (const card of queue.cards) dealt.add(titleKey(card));
+  return { ...restartCursor(queue), dealt };
+}
+
+/**
+ * Forgets one dealt title that is not queued, so a later page may deal it
+ * again with fresh data (its sort failed after the queue was refreshed).
+ */
+export function forgetTitle(queue: DeckQueue, ref: TitleId): DeckQueue {
+  const key = titleKey(ref);
+  if (!queue.dealt.has(key) || queue.cards.some((c) => titleKey(c) === key)) return queue;
+  const dealt = new Set(queue.dealt);
+  dealt.delete(key);
+  return { ...queue, dealt };
+}
+
+/** Takes a title out of the queue (it was sorted). Unknown titles leave it unchanged. */
+export function removeCard(queue: DeckQueue, ref: TitleId): DeckQueue {
+  const key = titleKey(ref);
+  const cards = queue.cards.filter((c) => titleKey(c) !== key);
+  return cards.length === queue.cards.length ? queue : { ...queue, cards };
+}
+
+/** Puts a card back on top (undo, or a sort that failed to save). Never duplicates it. */
+export function returnToFront(queue: DeckQueue, card: DeckPageCard): DeckQueue {
+  const key = titleKey(card);
+  const dealt = queue.dealt.has(key) ? queue.dealt : new Set([...queue.dealt, key]);
+  return { ...queue, dealt, cards: [card, ...queue.cards.filter((c) => titleKey(c) !== key)] };
+}
