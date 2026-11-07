@@ -5,8 +5,9 @@ import { formatTitleKey } from "@/core/title-id";
 import { Trailer } from "./trailer";
 
 // One card, top to bottom in VISION's order: poster; title, year, and type;
-// genres and runtime or seasons; the IMDb rating; the synopsis; where to
-// stream it; the trailer. Presentation only: every field comes from core.
+// genres and runtime or seasons; the synopsis; where to stream it; the
+// trailer. One change to that order: the IMDb rating sits on the poster, so it
+// is in view at rest (issue 60). Presentation only: every field comes from core.
 
 const regionNames = new Intl.DisplayNames(["en"], { type: "region" });
 const compact = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
@@ -40,20 +41,27 @@ const OFFER_WORDS: Record<StreamingOffer, string> = {
   buy: "Buy",
 };
 
-/** The IMDb rating, large (VISION invariant 5). "Not loaded" is a neutral dash, never "no rating". */
-function ImdbRating({ imdb }: { imdb: CardImdb }) {
+/**
+ * The IMDb rating (VISION invariant 5), on the poster's bottom-left corner, so it is in view at rest on every
+ * card whatever the title length, genre line, or status line (issue 60). A solid chip keeps it readable on any
+ * poster. "Not loaded" is a neutral dash, never "no rating".
+ */
+function ImdbChip({ imdb }: { imdb: CardImdb }) {
   return (
-    <div className="flex items-center gap-3" data-imdb={imdb.kind}>
+    <div
+      data-imdb={imdb.kind}
+      className="absolute bottom-3 left-3 flex items-center gap-2 rounded-xl bg-black/85 py-1.5 pr-3 pl-1.5 text-white shadow-lg"
+    >
       <span className="rounded-md bg-accent px-1.5 py-0.5 text-sm font-black tracking-tight text-black">IMDb</span>
       {imdb.kind === "rated" && (
-        <p className="flex items-baseline gap-2">
-          <span className="text-3xl font-bold tabular-nums">{imdb.rating.toFixed(1)}</span>
-          <span className="text-sm text-muted">{compact.format(imdb.votes)} votes</span>
+        <p className="flex items-baseline gap-1.5">
+          <span className="text-2xl leading-none font-bold tabular-nums">{imdb.rating.toFixed(1)}</span>
+          <span className="text-xs text-white/70">{compact.format(imdb.votes)} votes</span>
         </p>
       )}
-      {imdb.kind === "none" && <p className="text-lg text-muted">No rating</p>}
+      {imdb.kind === "none" && <p className="text-sm text-white/70">No rating</p>}
       {imdb.kind === "unavailable" && (
-        <p className="text-3xl font-bold text-muted" aria-label="IMDb rating not available right now">
+        <p className="text-2xl leading-none font-bold text-white/70" aria-label="IMDb rating not available right now">
           –
         </p>
       )}
@@ -134,21 +142,24 @@ export function CardView({ card }: { card: Card }) {
 
   return (
     <article aria-label={card.title} data-title-key={formatTitleKey(card)} className="pb-4">
-      {card.posterUrl ? (
-        // eslint-disable-next-line @next/next/no-img-element -- TMDB serves posters at fixed sizes
-        <img
-          src={card.posterUrl}
-          alt={`${card.title} poster`}
-          width={500}
-          height={750}
-          decoding="async"
-          className="mx-auto block aspect-[2/3] h-[min(52svh,calc((100vw-2rem)*1.5))] w-auto rounded-2xl bg-surface object-cover shadow-lg"
-        />
-      ) : (
-        <div className="mx-auto flex aspect-[2/3] h-[min(52svh,calc((100vw-2rem)*1.5))] items-center justify-center rounded-2xl bg-surface p-6 text-center text-xl font-semibold text-muted">
-          {card.title}
-        </div>
-      )}
+      <div className="relative mx-auto w-fit">
+        {card.posterUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element -- TMDB serves posters at fixed sizes
+          <img
+            src={card.posterUrl}
+            alt={`${card.title} poster`}
+            width={500}
+            height={750}
+            decoding="async"
+            className="block aspect-[2/3] h-[min(52svh,calc((100vw-2rem)*1.5))] w-auto rounded-2xl bg-surface object-cover shadow-lg"
+          />
+        ) : (
+          <div className="flex aspect-[2/3] h-[min(52svh,calc((100vw-2rem)*1.5))] items-center justify-center rounded-2xl bg-surface p-6 text-center text-xl font-semibold text-muted">
+            {card.title}
+          </div>
+        )}
+        <ImdbChip imdb={card.imdb} />
+      </div>
 
       <header className="mt-5">
         <h2 className="text-2xl leading-tight font-bold tracking-tight">{card.title}</h2>
@@ -165,10 +176,6 @@ export function CardView({ card }: { card: Card }) {
           {length && <span className="px-1 text-muted">{length}</span>}
         </p>
       )}
-
-      <div className="mt-4">
-        <ImdbRating imdb={card.imdb} />
-      </div>
 
       {card.synopsis && <p className="mt-4 leading-relaxed text-foreground/90">{card.synopsis}</p>}
 
