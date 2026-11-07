@@ -60,7 +60,6 @@ export interface TmdbClientOptions {
 
 export type TmdbClient = ReturnType<typeof createTmdbClient>;
 
-const MAX_PAGE = TMDB_MAX_PAGE;
 
 /**
  * The ways of watching that count as "on my streaming services": by
@@ -490,7 +489,7 @@ function toPage(raw: unknown, mediaTypeFor: (r: RawTitle) => MediaType | null): 
     const summary = normalizeSummary(r, mediaType);
     if (summary) results.push(summary);
   }
-  return { results, page: body.page ?? 1, totalPages: Math.min(body.total_pages ?? 0, MAX_PAGE) };
+  return { results, page: body.page ?? 1, totalPages: Math.min(body.total_pages ?? 0, TMDB_MAX_PAGE) };
 }
 
 function mediaTypeOf(value: unknown): MediaType | null {
@@ -503,7 +502,7 @@ function emptyPage(page: number): ResultPage<TitleSummary> {
 
 function clampPage(page: number): number {
   if (!Number.isSafeInteger(page)) return 1;
-  return Math.min(Math.max(page, 1), MAX_PAGE);
+  return Math.min(Math.max(page, 1), TMDB_MAX_PAGE);
 }
 
 function uniqueSorted(ids: readonly number[]): number[] {

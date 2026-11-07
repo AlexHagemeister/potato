@@ -4,7 +4,7 @@
 // injected ones (tests).
 
 import { PostgresRatingsStore } from "../imdb/postgres";
-import { getList, getRatedCount, getTitleState, getUserSettings, getUserTitleStates } from "../library";
+import { getTitleState, getTopRatedSeen, getUserSettings, getUserTitleStates } from "../library";
 import { ok, type Result } from "../result";
 import { getTmdb } from "../tmdb/client";
 import type { TitleId } from "../types";
@@ -18,19 +18,14 @@ export { createDeckService, type DeckLibrary, type DeckService, type DeckService
 /** The library core, in the shape the deck service reads. */
 export const libraryForDeck: DeckLibrary = {
   getUserTitleStates,
-  getRatedCount,
   getUserSettings,
+  getTopRatedSeen,
   async getTitleState(userId, ref) {
     const row = await getTitleState(userId, ref);
     if (!row.ok) return row;
     if (!row.value) return ok(null);
     const { status, rating, review, skipUntil } = row.value;
     return ok({ status, rating, review, skipUntil });
-  },
-  async getTopRatedSeen(userId, mediaTypes, limit): Promise<Result<TitleId[]>> {
-    const page = await getList(userId, "seen", { sort: "rating_desc", limit, filters: { mediaTypes: [...mediaTypes] } });
-    if (!page.ok) return page;
-    return ok(page.value.entries.map(({ mediaType, tmdbId }) => ({ mediaType, tmdbId })));
   },
 };
 

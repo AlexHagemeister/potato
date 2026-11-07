@@ -27,6 +27,18 @@ export class TmdbError extends Error {
   }
 }
 
+/**
+ * True when TMDB refused this one request in a way a retry will not change:
+ * an HTTP 4xx other than 401 and 403 (our token, so every request fails),
+ * 408 (a timeout), and 429 (rate limit), which say nothing about the request
+ * itself. A network error, a timeout, a 429, or a 5xx can heal, so they are
+ * false. A 404 never gets here: tmdbGet resolves it to null.
+ */
+export function isPermanentTmdbFailure(err: unknown): boolean {
+  if (!(err instanceof TmdbError)) return false;
+  return err.status >= 400 && err.status < 500 && ![401, 403, 408, 429].includes(err.status);
+}
+
 export interface TmdbHttpOptions {
   token: string;
   fetch: FetchFn;

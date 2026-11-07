@@ -3,6 +3,8 @@ export {
   buildDeck,
   createFilterMatcher,
   createVisibilityCheck,
+  dealsForYou,
+  forYouLock,
   isForYouUnlocked,
   matchesFilters,
   type ActivePool,

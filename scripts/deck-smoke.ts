@@ -114,16 +114,25 @@ try {
     ["movie", 550, 4], ["movie", 278, 5], ["tv", 1396, 5], ["tv", 66732, 4], ["tv", 95396, 4.5],
   ];
   for (const [mediaType, tmdbId, rating] of seen) must(await lib.markSeen(userId, { mediaType, tmdbId }, { rating }));
+  const seeds = must(await lib.getTopRatedSeen(userId, ["movie", "tv"], 5));
+  console.log(`seeds (top 5 rated, ties newest first): ${seeds.map((s) => `${s.mediaType}:${s.tmdbId}`).join(", ")}`);
   const forYou = await run("for you after 10 ratings", { mode: "for_you" });
   if (forYou.kind === "cards" && forYou.nextCursor) await run("for you, page 2", { mode: "for_you", cursor: forYou.nextCursor });
   await run("blend with for you unlocked", {});
 
-  // A cursor is bound to the user's country and services: after a change it is rejected, not silently replayed.
-  const before = await run("blend before a services change", {});
+  // With "on my services", a cursor is bound to the user's country and services: after a change it is rejected.
+  // Without the filter the lists do not depend on them, so the cursor carries on.
+  const mine = { mode: "blend" as const, filters: { onMyServices: true } };
+  const beforeMine = await run("on my services, before a services change", mine);
+  const beforePlain = await run("blend, before a services change", {});
   must(await lib.updateUserSettings(userId, { country: "US", providerIds: [8, 9] }));
-  if (before.kind === "cards" && before.nextCursor) {
-    const stale = await service.getDeck(userId, { cursor: before.nextCursor });
-    console.log(`stale cursor after a services change: ${stale.ok ? "accepted (WRONG)" : JSON.stringify(stale.error)}`);
+  if (beforeMine.kind === "cards" && beforeMine.nextCursor) {
+    const stale = await service.getDeck(userId, { ...mine, cursor: beforeMine.nextCursor });
+    console.log(`on my services cursor after a services change: ${stale.ok ? "accepted (WRONG)" : JSON.stringify(stale.error)}`);
+  }
+  if (beforePlain.kind === "cards" && beforePlain.nextCursor) {
+    const kept = await service.getDeck(userId, { cursor: beforePlain.nextCursor });
+    console.log(`plain blend cursor after a services change: ${kept.ok ? "accepted" : `rejected (WRONG) ${JSON.stringify(kept.error)}`}`);
   }
 
   for (const ref of [

@@ -1,11 +1,11 @@
 // Reads over a user's library. Each takes the user id explicitly, like the
 // actions, so the app, the API, and a future AI connection share them.
 
-import { and, count, eq } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "@/db/client";
 import { titleStatus } from "@/db/schema";
 import { getUserSettings } from "../settings/user-settings";
-import type { Candidate, ListStatus, TitleId, UserTitleState } from "../types";
+import type { Candidate, ListStatus, MediaType, TitleId, UserTitleState } from "../types";
 import { fail, ok, validateUserId, type Result } from "../result";
 import { applyListFilters, filtersNeedDetails, pageRows, parseListQuery, withDetails } from "./list";
 import { recordFromDrizzle } from "./rows";
@@ -66,6 +66,25 @@ export async function getRatedCount(userId: string): Promise<Result<number>> {
     .from(titleStatus)
     .where(and(eq(titleStatus.userId, u.value), eq(titleStatus.status, "seen")));
   return ok(Number(row?.n ?? 0));
+}
+
+/**
+ * The user's highest-rated Seen titles of these media types, at most `limit`.
+ * Ties on rating go to the most recently changed, then by identity: the order
+ * of the Seen list's rating_desc sort. Reads only the identities, so the deck
+ * can call it on every page. Seeds "for you".
+ */
+export async function getTopRatedSeen(userId: string, mediaTypes: readonly MediaType[], limit: number): Promise<Result<TitleId[]>> {
+  const u = validateUserId(userId);
+  if (!u.ok) return u;
+  if (mediaTypes.length === 0 || !Number.isSafeInteger(limit) || limit <= 0) return ok([]);
+  const rows = await getDb()
+    .select({ mediaType: titleStatus.mediaType, tmdbId: titleStatus.tmdbId })
+    .from(titleStatus)
+    .where(and(eq(titleStatus.userId, u.value), eq(titleStatus.status, "seen"), inArray(titleStatus.mediaType, [...mediaTypes])))
+    .orderBy(desc(titleStatus.rating), desc(titleStatus.updatedAt), asc(titleStatus.mediaType), asc(titleStatus.tmdbId))
+    .limit(limit);
+  return ok(rows.map(({ mediaType, tmdbId }) => ({ mediaType, tmdbId })));
 }
 
 /**

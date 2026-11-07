@@ -3,17 +3,16 @@
 // recommendations list per "for you" seed. The cursor records where each
 // stream stopped, so the next page reads on from there.
 //
-// The cursor names no titles. A "for you" stream is named by its seed's rank
-// (for_you:0 is the top-rated seed), and the seeds are read again on every
-// call. Two fingerprints bind the cursor to its context:
-// - `context` covers the user, country, and services. A mismatch means
-//   another user's cursor, or settings changed mid-session (the discover
-//   lists differ), so the service rejects it.
-// - `seeds` covers the user's seed titles. A mismatch means the user rated
-//   something that changed the top seeds, so the service restarts the "for
-//   you" streams and keeps the rest.
-// The fingerprints are hashes, so a cursor shows neither the user's settings
-// nor their titles.
+// The cursor names no titles. A "for you" stream is named by a hash of the
+// user and its seed title (for_you:<hash>), and the seeds are read again on
+// every call. So a seed keeps its stream's place when the seeds reorder, a new
+// seed starts at page 1, and a dropped seed's place is ignored.
+// A `context` fingerprint binds the cursor to the user and, when "on my
+// services" is on, to their country and services (the discover lists depend
+// on them only then). A mismatch means another user's cursor, or settings
+// that changed the lists mid-session, so the service rejects it.
+// Both are hashes, so a cursor shows neither the user's settings nor their
+// titles.
 //
 // The cursor is opaque to callers and arrives from the client, so decoding
 // checks everything: a tampered cursor gets a typed error, never extra TMDB
@@ -27,8 +26,8 @@ import { FOR_YOU_SEED_COUNT } from "./constants";
 
 export type StreamSpec =
   | { pool: DiscoverPool; mediaType: MediaType }
-  /** `rank` is the seed's place among the user's top-rated seeds, from 0. */
-  | { pool: "for_you"; rank: number; seed: TitleId };
+  /** `seedHash` names the stream in the cursor without naming the title (see seedStreamHash). */
+  | { pool: "for_you"; seedHash: string; seed: TitleId };
 
 /** Where a stream stands: the next title is item `offset` of page `page`. Page 0 means exhausted. */
 export interface StreamPosition {
@@ -40,32 +39,38 @@ export interface CursorState {
   mode: DiscoveryMode;
   filters: string;
   context: string;
-  seeds: string;
   /** Positions by stream ID. */
   positions: Map<string, StreamPosition>;
 }
 
-const CURSOR_VERSION = 2;
+const CURSOR_VERSION = 3;
 /** A TMDB page holds 20 results. Anything far past that is tampering. */
 const MAX_OFFSET = 1000;
 const MAX_STREAMS = DISCOVER_POOLS.length * 2 + FOR_YOU_SEED_COUNT;
 const FINGERPRINT = /^[A-Za-z0-9_-]{1,64}$/;
+const SEED_HASH_LENGTH = 12;
+const SEED_HASH = new RegExp(`^[A-Za-z0-9_-]{${SEED_HASH_LENGTH}}$`);
 
 export function streamId(spec: StreamSpec): string {
-  return spec.pool === "for_you" ? `for_you:${spec.rank}` : `${spec.pool}:${spec.mediaType}`;
+  return spec.pool === "for_you" ? `for_you:${spec.seedHash}` : `${spec.pool}:${spec.mediaType}`;
 }
 
 function isStreamId(id: unknown): id is string {
   if (typeof id !== "string") return false;
   const [pool, rest, extra] = id.split(":");
-  if (extra !== undefined) return false;
-  if (pool === "for_you") return /^\d$/.test(rest ?? "") && Number(rest) < FOR_YOU_SEED_COUNT;
+  if (extra !== undefined || rest === undefined) return false;
+  if (pool === "for_you") return SEED_HASH.test(rest);
   return (DISCOVER_POOLS as readonly string[]).includes(pool) && (rest === "movie" || rest === "tv");
 }
 
 /** A short, one-way hash of the parts. */
 export function fingerprint(parts: readonly (string | number)[]): string {
   return createHash("sha256").update(JSON.stringify(parts)).digest("base64url").slice(0, 22);
+}
+
+/** The cursor's name for a seed's stream: a hash of the user and the seed, so the cursor shows no title. */
+export function seedStreamHash(userId: string, seed: TitleId): string {
+  return fingerprint([userId, seed.mediaType, seed.tmdbId]).slice(0, SEED_HASH_LENGTH);
 }
 
 /** A canonical string for a filter set, so a cursor can only continue the deck it came from. */
@@ -84,7 +89,6 @@ export function encodeCursor(state: CursorState): string {
     m: state.mode,
     f: state.filters,
     c: state.context,
-    k: state.seeds,
     s: [...state.positions].map(([id, position]) => [id, position.page, position.offset]),
   };
   return Buffer.from(JSON.stringify(body), "utf8").toString("base64url");
@@ -102,9 +106,9 @@ export function decodeCursor(cursor: unknown): CursorState | string {
     return "cursor is malformed";
   }
   if (typeof body !== "object" || body === null) return "cursor is malformed";
-  const { v, m, f, c, k, s } = body as Record<string, unknown>;
+  const { v, m, f, c, s } = body as Record<string, unknown>;
   if (v !== CURSOR_VERSION || typeof m !== "string" || typeof f !== "string" || !Array.isArray(s)) return "cursor is malformed";
-  if (typeof c !== "string" || !FINGERPRINT.test(c) || typeof k !== "string" || !FINGERPRINT.test(k)) return "cursor is malformed";
+  if (typeof c !== "string" || !FINGERPRINT.test(c)) return "cursor is malformed";
   if (s.length > MAX_STREAMS) return "cursor names too many streams";
   const positions = new Map<string, StreamPosition>();
   for (const entry of s) {
@@ -114,5 +118,5 @@ export function decodeCursor(cursor: unknown): CursorState | string {
     if (positions.has(id)) return "cursor repeats a stream";
     positions.set(id, { page, offset });
   }
-  return { mode: m as DiscoveryMode, filters: f, context: c, seeds: k, positions };
+  return { mode: m as DiscoveryMode, filters: f, context: c, positions };
 }
