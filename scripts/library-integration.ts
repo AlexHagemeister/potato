@@ -504,8 +504,10 @@ try {
         [drama.tmdbId, { genreIds: [18], year: 2001, providerIds: [8] }],
       ]);
       let lookups = 0;
-      const lookupDetails = async (refs: readonly TitleId[]) => {
+      const countries: (string | undefined)[] = [];
+      const lookupDetails = async (refs: readonly TitleId[], context?: { country?: string }) => {
         lookups++;
+        countries.push(context?.country);
         return new Map(
           refs.map((r) => [
             `${r.mediaType}:${r.tmdbId}`,
@@ -521,8 +523,16 @@ try {
       assert.deepEqual(page.entries.map((e) => e.tmdbId), [sciFiOnNetflix.tmdbId]);
       assert.equal(page.entries[0]?.details?.year, 2023);
       assert.equal(lookups, 1, "one batched lookup");
+      assert.deepEqual(countries, ["US"], "on my services passes the user's country to the lookup");
+      const genreOnly = unwrap(await lib.getList(D, "watchlist", { filters: { genreIds: [10765] }, lookupDetails }));
+      assert.equal(genreOnly.entries.length, 2);
+      assert.deepEqual(countries, ["US", undefined], "no country without on my services");
       const tvOnly = unwrap(await lib.getList(D, "watchlist", { filters: { mediaTypes: ["tv"] } }));
       assert.equal(tvOnly.entries.length, 2, "media type needs no lookup");
+      unwrap(await lib.updateUserSettings(D, { providerIds: [] }));
+      const noServices = unwrap(await lib.getList(D, "watchlist", { filters: { onMyServices: true }, lookupDetails }));
+      assert.deepEqual(noServices, { status: "watchlist", entries: [], nextCursor: null });
+      assert.equal(lookups, 2, "no services: nothing can match, so no lookup");
     } finally {
       await db.delete(users).where(inArray(users.id, [D]));
     }

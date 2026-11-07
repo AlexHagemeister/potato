@@ -1,12 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { DEFAULT_FILTER_CHOICE, filterChoiceToParams, isDefaultFilterChoice, type FilterChoice } from "@/core/filters";
 import type { ActionOutcome, TitleRecord } from "@/core/library/types";
 import type { ListRow, ListRowsPage } from "@/core/lists";
 import { formatTitleKey } from "@/core/title-id";
 import type { ListStatus, TitleId } from "@/core/types";
+import { FilterControl } from "../_components/filter-control";
 import { Poster } from "../_components/poster";
 import { RatingSheet } from "../_components/rating-sheet";
 import { Stars } from "../_components/stars";
@@ -14,6 +15,7 @@ import { Screen, ScreenTitle } from "../_shell/screen";
 import {
   addToWatchlistAction,
   editRatingAction,
+  loadListsAction,
   loadMoreAction,
   markSeenAction,
   undoAction,
@@ -46,9 +48,24 @@ const subtitleOf = (row: ListRow) => [row.year, row.mediaType === "movie" ? "Mov
 
 const SAVE_FAILED = "Couldn't save. Try again.";
 const LOAD_FAILED = "Couldn't load more. Try again.";
+const FILTER_FAILED = "Couldn't load your lists. Try again.";
 
-/** After a refresh: the pages to fetch again for each list, from the fresh first page's cursor. */
-type Refill = Partial<Record<ListStatus, { cursor: string; have: number; want: number }>>;
+/**
+ * After a reload: the pages to fetch again for each list, from the fresh first
+ * page's cursor, under the filters the reload used.
+ */
+type Refill = {
+  filters: FilterChoice;
+  jobs: Partial<Record<ListStatus, { cursor: string; have: number; want: number }>>;
+};
+
+/** The address for a list and filters, so a reload reopens both. */
+function listsUrl(status: ListStatus, filters: FilterChoice): string {
+  const params = new URLSearchParams(filterChoiceToParams(filters));
+  if (status !== "watchlist") params.set("list", status);
+  const query = params.toString();
+  return query ? `/lists?${query}` : "/lists";
+}
 
 /**
  * Calls a server action and never rejects. A call that fails outright (offline,
@@ -101,25 +118,36 @@ interface Toast {
 
 type Sheet = { mode: "markSeen" | "edit"; row: ListRow };
 
-export function ListsScreen({ lists: fromServer, initialList }: { lists: Record<ListStatus, ListRowsPage>; initialList: ListStatus }) {
-  const router = useRouter();
+export function ListsScreen({
+  lists: fromServer,
+  initialList,
+  filters: filtersFromServer,
+  hasServices,
+}: {
+  lists: Record<ListStatus, ListRowsPage>;
+  initialList: ListStatus;
+  /** The filters the server loaded `lists` with (from the address). */
+  filters: FilterChoice;
+  hasServices: boolean;
+}) {
   const [lists, setLists] = useState(() => toLists(fromServer));
-  // A refresh (router.refresh after a stale write) brings new server data: start from it.
-  // Rows past the first page (loaded with Show more) are fetched again, so the
-  // refresh doesn't drop them.
+  const [filters, setFilters] = useState(filtersFromServer);
+  const [filtering, setFiltering] = useState(false);
+  // A navigation back to this tab brings new server data: start from it.
   const [synced, setSynced] = useState(fromServer);
   const [refill, setRefill] = useState<Refill | null>(null);
+  // Counts list loads, so a slower, older load never overwrites a newer one,
+  // or the server data a navigation brought in meanwhile.
+  const loadSeq = useRef(0);
+  useEffect(() => {
+    loadSeq.current++;
+  }, [synced]);
   if (fromServer !== synced) {
-    const fresh = toLists(fromServer);
-    const want: Refill = {};
-    for (const { status } of TABS) {
-      const shown = lists[status].rows.length;
-      const cursor = fresh[status].nextCursor;
-      if (cursor && shown > fresh[status].rows.length) want[status] = { cursor, have: fresh[status].rows.length, want: shown };
-    }
     setSynced(fromServer);
-    setLists(fresh);
-    setRefill(Object.keys(want).length > 0 ? want : null);
+    setLists(toLists(fromServer));
+    setFilters(filtersFromServer);
+    setFiltering(false);
+    setRefill(null);
   }
   const [active, setActive] = useState(initialList);
   const [sheet, setSheet] = useState<Sheet | null>(null);
@@ -140,14 +168,17 @@ export function ListsScreen({ lists: fromServer, initialList }: { lists: Record<
     let cancelled = false;
     (async () => {
       for (const { status } of TABS) {
-        const job = refill[status];
+        const job = refill.jobs[status];
         if (!job) continue;
-        // Page by page, until the list shows as many rows as it did before the refresh.
+        // Page by page, until the list shows as many rows as it did before the reload.
         let cursor: string | null = job.cursor;
         let have = job.have;
         while (!cancelled && cursor && have < job.want) {
           const from: string = cursor;
-          const result: ActionResult<ListRowsPage> = await call(() => loadMoreAction(status, from), LOAD_FAILED);
+          const result: ActionResult<ListRowsPage> = await call(
+            () => loadMoreAction(status, from, refill.filters),
+            LOAD_FAILED,
+          );
           if (cancelled || !result.ok) break;
           const page: ListRowsPage = result.value;
           setLists((prev) => ({ ...prev, [status]: appendPage(prev[status], page) }));
@@ -174,13 +205,54 @@ export function ListsScreen({ lists: fromServer, initialList }: { lists: Record<
   /** A write failed. Say why, and reload the lists when the title changed elsewhere. */
   function failed(result: { error: string; stale?: boolean }) {
     show(result.error);
-    if (result.stale) router.refresh();
+    if (result.stale) void reload();
+  }
+
+  /**
+   * Loads the first page of every list again under the current filters. Rows
+   * past the first page (loaded with Show more) are fetched again, so the
+   * reload doesn't drop them.
+   */
+  async function reload() {
+    const seq = ++loadSeq.current;
+    const using = filters;
+    const shown = lists;
+    const result = await call(() => loadListsAction(using), FILTER_FAILED);
+    if (seq !== loadSeq.current || !result.ok) return;
+    const fresh = toLists(result.value);
+    const jobs: Refill["jobs"] = {};
+    for (const { status } of TABS) {
+      const cursor = fresh[status].nextCursor;
+      const want = shown[status].rows.length;
+      if (cursor && want > fresh[status].rows.length) jobs[status] = { cursor, have: fresh[status].rows.length, want };
+    }
+    setLists(fresh);
+    setRefill(Object.keys(jobs).length > 0 ? { filters: using, jobs } : null);
+  }
+
+  /** New filters from the control: load all three lists under them, or keep the old ones if that fails. */
+  async function applyFilters(next: FilterChoice) {
+    const seq = ++loadSeq.current;
+    const previous = filters;
+    setFilters(next);
+    setFiltering(true);
+    setRefill(null);
+    window.history.replaceState(null, "", listsUrl(active, next));
+    const result = await call(() => loadListsAction(next), FILTER_FAILED);
+    if (seq !== loadSeq.current) return;
+    setFiltering(false);
+    if (!result.ok) {
+      setFilters(previous);
+      window.history.replaceState(null, "", listsUrl(active, previous));
+      return failed(result);
+    }
+    setLists(toLists(result.value));
   }
 
   function select(status: ListStatus) {
     setActive(status);
-    // Keeps the chosen list across a reload, without a navigation.
-    window.history.replaceState(null, "", status === "watchlist" ? "/lists" : `/lists?list=${status}`);
+    // Keeps the chosen list and filters across a reload, without a navigation.
+    window.history.replaceState(null, "", listsUrl(status, filters));
   }
 
   /** Undo for a move or an edit: restore the row in core, then put the screen back. */
@@ -248,10 +320,13 @@ export function ListsScreen({ lists: fromServer, initialList }: { lists: Record<
   async function showMore() {
     const status = active;
     const cursor = lists[status].nextCursor;
-    if (!cursor || loadingMore) return;
+    if (!cursor || loadingMore || filtering) return;
+    // A cursor belongs to the filters that made it. If the lists reload meanwhile, this page is dropped.
+    const seq = loadSeq.current;
     setLoadingMore(true);
-    const result = await call(() => loadMoreAction(status, cursor), LOAD_FAILED);
+    const result = await call(() => loadMoreAction(status, cursor, filters), LOAD_FAILED);
     setLoadingMore(false);
+    if (seq !== loadSeq.current) return;
     if (!result.ok) return failed(result);
     const page = result.value;
     setLists((prev) => ({ ...prev, [status]: appendPage(prev[status], page) }));
@@ -282,16 +357,47 @@ export function ListsScreen({ lists: fromServer, initialList }: { lists: Record<
         ))}
       </div>
 
-      {/* Filter controls go here: the next slice builds them, shared with Discover
-          (VISION: "The filters that shape the deck also work on each list"). */}
-      <div data-slot="list-filters" />
+      {/* The deck's filters, applied to all three lists (VISION: "The filters that shape the deck also work on each list"). */}
+      <div data-slot="list-filters">
+        <FilterControl value={filters} onChange={applyFilters} hasServices={hasServices} busy={filtering} />
+      </div>
 
-      <section id="list-panel" role="tabpanel" aria-labelledby={`list-tab-${active}`}>
+      <section
+        id="list-panel"
+        role="tabpanel"
+        aria-labelledby={`list-tab-${active}`}
+        aria-busy={filtering}
+        className={filtering ? "opacity-50 transition-opacity" : undefined}
+      >
         {current.rows.length === 0 ? (
-          <div className="px-6 py-16 text-center">
-            <p className="font-semibold">{EMPTY[active].title}</p>
-            <p className="mt-1 text-sm text-muted">{EMPTY[active].note}</p>
-          </div>
+          isDefaultFilterChoice(filters) ? (
+            <div className="px-6 py-16 text-center">
+              <p className="font-semibold">{EMPTY[active].title}</p>
+              <p className="mt-1 text-sm text-muted">{EMPTY[active].note}</p>
+            </div>
+          ) : (
+            <div className="px-6 py-16 text-center">
+              <p className="font-semibold">Nothing here matches your filters</p>
+              {filters.onMyServices && !hasServices ? (
+                <p className="mt-1 text-sm text-muted">
+                  &ldquo;On my services&rdquo; needs your streaming services.{" "}
+                  <Link href="/profile" className="font-semibold text-accent">
+                    Pick them in Profile
+                  </Link>
+                </p>
+              ) : (
+                <p className="mt-1 text-sm text-muted">Try fewer filters.</p>
+              )}
+              <button
+                type="button"
+                onClick={() => applyFilters({ ...DEFAULT_FILTER_CHOICE, genres: [] })}
+                disabled={filtering}
+                className="mt-4 h-11 rounded-full bg-surface-raised px-5 text-sm font-semibold"
+              >
+                Clear filters
+              </button>
+            </div>
+          )
         ) : (
           <ul>
             {current.rows.map((row) => (

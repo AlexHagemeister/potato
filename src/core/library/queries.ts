@@ -9,7 +9,7 @@ import type { Candidate, ListStatus, MediaType, TitleId, UserTitleState } from "
 import { fail, ok, validateUserId, type Result } from "../result";
 import { applyListFilters, filtersNeedDetails, pageRows, parseListQuery, withDetails } from "./list";
 import { recordFromDrizzle } from "./rows";
-import type { ListOptions, ListPage, TitleRecord } from "./types";
+import type { DetailsLookupContext, ListOptions, ListPage, TitleRecord } from "./types";
 import { validateTitleRef } from "./validate";
 
 /** Every row the user has, in the shape the deck engine reads (only the fields it needs). */
@@ -91,7 +91,9 @@ export async function getTopRatedSeen(userId: string, mediaTypes: readonly Media
  * One page of a list (Watchlist, Passed, or Seen), with each row's timestamps,
  * rating, and review. Filters are the deck's own (matchesFilters). Genre, era,
  * and "on my services" need TMDB metadata, so they need `lookupDetails`, which
- * the app layer wires to the TMDB module. The lookup runs once per call, over
+ * the app layer wires to the TMDB module. "On my services" passes the user's
+ * country to the lookup, so it can say where each title streams there, and a
+ * user with no services gets an empty page with no lookup. The lookup runs once per call, over
  * the whole list when a filter needs it, or over the page's titles otherwise.
  * With a metadata filter, each page looks up the whole list again. That relies
  * on the TMDB module's cache to keep repeat lookups cheap.
@@ -120,16 +122,21 @@ export async function getList(
   let details: ReadonlyMap<string, Candidate> | null = null;
   let providerIds: number[] = [];
   if (needsDetails && lookup) {
-    // The lookup and the settings read are independent, so they run together.
-    const [looked, settings] = await Promise.all([
-      lookup(rows.map(({ mediaType, tmdbId }) => ({ mediaType, tmdbId }))),
-      filters.onMyServices ? getUserSettings(u.value) : null,
-    ]);
-    details = looked;
-    if (settings) {
+    // "On my services" needs the user's services, and the lookup needs their
+    // country to know where each title streams, so settings come first.
+    let context: DetailsLookupContext | undefined;
+    if (filters.onMyServices) {
+      const settings = await getUserSettings(u.value);
       if (!settings.ok) return settings;
       providerIds = settings.value.providerIds;
+      // No services: nothing can match, so skip the lookup (the deck does the same).
+      if (providerIds.length === 0) return ok({ status: query.value.status, entries: [], nextCursor: null });
+      context = { country: settings.value.country };
     }
+    details = await lookup(
+      rows.map(({ mediaType, tmdbId }) => ({ mediaType, tmdbId })),
+      context,
+    );
   }
 
   const page = pageRows(applyListFilters(rows, filters, details, providerIds), sort, cursor, limit);
