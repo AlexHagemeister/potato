@@ -142,9 +142,10 @@ describe("getTitleDetails", () => {
 
   test("rejects an invalid title identity before any request", async () => {
     const { client, calls } = setup({});
-    await expect(client.getTitleDetails("movie", 0)).rejects.toThrow("Invalid TMDB ID");
+    // Messages come from titleIdError in src/core/title-id.ts.
+    await expect(client.getTitleDetails("movie", 0)).rejects.toThrow("invalid TMDB ID");
     // @ts-expect-error: invalid media type on purpose
-    await expect(client.getTitleDetails("person", 1)).rejects.toThrow("Invalid media type");
+    await expect(client.getTitleDetails("person", 1)).rejects.toThrow("invalid media type");
     expect(calls).toHaveLength(0);
   });
 });
