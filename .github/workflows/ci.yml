@@ -21,19 +21,28 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Node runs next build. Same major as production, from engines.node.
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: package.json
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
 
-      - name: Cache Bun packages and Next.js build cache
+      - name: Cache Bun packages
         uses: actions/cache@v6
         with:
-          path: |
-            ~/.bun/install/cache
-            .next/cache
-          key: ${{ runner.os }}-bun-next-${{ hashFiles('bun.lock') }}-${{ hashFiles('src/**') }}
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+
+      - name: Cache Next.js build cache
+        uses: actions/cache@v6
+        with:
+          path: .next/cache
+          key: ${{ runner.os }}-next-${{ hashFiles('bun.lock') }}-${{ hashFiles('src/**') }}
           restore-keys: |
-            ${{ runner.os }}-bun-next-${{ hashFiles('bun.lock') }}-
+            ${{ runner.os }}-next-${{ hashFiles('bun.lock') }}-
 
       - name: Install
         run: bun install --frozen-lockfile
