@@ -1,14 +1,16 @@
 // Shared core types. A title is always the pair (media type, TMDB ID)
 // (CLAUDE.md architecture rule 1), so every title-shaped type extends TitleId.
 
+import type { TITLE_STATUSES } from "../db/schema";
 import type { MediaType, TitleId } from "./title-id";
 
 export type { MediaType, TitleId };
 
-/** Every status a user's title row can hold (CLAUDE.md architecture rule 2). */
-export const TITLE_STATUSES = ["watchlist", "passed", "seen", "skipped"] as const;
-
-/** A user's one status for a title. */
+/**
+ * A user's one status for a title (CLAUDE.md architecture rule 2). The schema's
+ * TITLE_STATUSES is the one list. This is a type-only import, so the deck pulls
+ * no database code in at runtime.
+ */
 export type TitleStatus = (typeof TITLE_STATUSES)[number];
 
 /** Statuses that put a title on one of the user's lists. A listed title never returns to the deck (VISION invariant 3). */
