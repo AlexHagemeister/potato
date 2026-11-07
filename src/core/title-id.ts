@@ -10,6 +10,10 @@ export interface TitleId {
 
 /** Stable string form of a title identity, for cache keys and URLs: "movie:603". */
 export function formatTitleKey(id: TitleId): string {
+  // Runtime check too: callers build TitleId from DB rows, URLs, and TMDB payloads.
+  if (id.mediaType !== "movie" && id.mediaType !== "tv") {
+    throw new Error(`Invalid media type: ${String(id.mediaType)}`);
+  }
   if (!Number.isSafeInteger(id.tmdbId) || id.tmdbId <= 0) {
     throw new Error(`Invalid TMDB ID: ${id.tmdbId}`);
   }

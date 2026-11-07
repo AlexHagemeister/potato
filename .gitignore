@@ -30,9 +30,12 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files: secrets stay local. .env.example is committed and must stay unignored.
-.env
-.env*.local
+# env files: every .env* file stays local. Only the empty template is committed.
+.env*
+!.env.example
+
+# agent worktrees and local agent settings
+.claude/
 
 # vercel
 .vercel

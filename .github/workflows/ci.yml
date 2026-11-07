@@ -8,9 +8,11 @@ on:
 permissions:
   contents: read
 
+# A new push to a PR cancels that PR's stale run. Runs on main are never
+# cancelled, so every merge commit gets a CI result.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   ci:
@@ -23,9 +25,22 @@ jobs:
         with:
           bun-version-file: package.json
 
+      - name: Cache Bun packages and Next.js build cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            .next/cache
+          key: ${{ runner.os }}-bun-next-${{ hashFiles('bun.lock') }}-${{ hashFiles('src/**') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-next-${{ hashFiles('bun.lock') }}-
+
       - name: Install
         run: bun install --frozen-lockfile
 
+      # Typecheck stays separate from the build's own TypeScript pass: it also
+      # covers test files (tsconfig.test.json), which next build skips, and it
+      # fails fast before the slower build step.
       - name: Typecheck
         run: bun run typecheck
 
