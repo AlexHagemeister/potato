@@ -1,0 +1,11 @@
+{
+  // Test files run on Bun, so only they get Bun's types. App code runs on
+  // Node (Vercel Functions), and tsconfig.json keeps Bun globals out of it.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "bun"],
+    "incremental": false
+  },
+  "include": ["next-env.d.ts", ".next/types/**/*.ts", "**/*.test.ts", "**/*.test.tsx"],
+  "exclude": ["node_modules", ".claude"]
+}
