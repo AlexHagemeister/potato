@@ -26,5 +26,6 @@ export default async function TitlePage({ params }: PageProps<"/title/[mediaType
     if (result.error.code === "unknown_user" || result.error.code === "invalid_user") return <SignedOutScreen />;
     throw new Error(`Could not load the card: ${result.error.code}`);
   }
-  return <TitleScreen card={result.value} />;
+  // Keyed on the title's state: when a refresh finds it changed elsewhere, the screen starts over from the new state.
+  return <TitleScreen key={JSON.stringify(result.value.userState)} card={result.value} />;
 }

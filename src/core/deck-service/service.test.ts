@@ -4,7 +4,7 @@ import { formatTitleKey } from "../title-id";
 import type { DeckPage, DeckPageCard } from "./types";
 import { FOR_YOU_SEED_COUNT, JUSTWATCH_ATTRIBUTION, MAX_PAGES_PER_STREAM, POOL_QUOTA } from "./constants";
 import { canonicalFilters, decodeCursor, encodeCursor } from "./cursor";
-import { detailsFor, emptyCountry, fakeService, provider, range, summary, world, type FakeWorld } from "./test-fakes";
+import { NOW, detailsFor, emptyCountry, fakeService, provider, range, summary, world, type FakeWorld } from "./test-fakes";
 
 const USER = "user-1";
 const TOP = { tmdbVoteCount: 5000 }; // passes the engine's TMDB top-rated gate
@@ -564,6 +564,19 @@ describe("getCard", () => {
       ["Apple TV", false, ["rent", "buy"]],
     ]);
     expect(card.streaming.providers[0].logoUrl).toBe("https://image.tmdb.org/t/p/w92/logo15.png");
+  });
+
+  test("an expired skip shows as no status, a live skip as skipped (the deck's rule, as in Search)", async () => {
+    const expired = base();
+    expired.rows["movie:603"] = { status: "skipped", rating: null, review: null, skipUntil: new Date(NOW.getTime() - 1000) };
+    expect(await fakeService(expired).service.getCard(USER, { mediaType: "movie", tmdbId: 603 })).toMatchObject({ ok: true, value: { userState: null } });
+    const live = base();
+    const until = new Date(NOW.getTime() + 86_400_000);
+    live.rows["movie:603"] = { status: "skipped", rating: null, review: null, skipUntil: until };
+    expect(await fakeService(live).service.getCard(USER, { mediaType: "movie", tmdbId: 603 })).toMatchObject({
+      ok: true,
+      value: { userState: { status: "skipped", skipUntil: until } },
+    });
   });
 
   test("a title TMDB does not know is unknown_title", async () => {

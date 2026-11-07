@@ -1,16 +1,18 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { Card, CardUserState } from "@/core/deck-service/types";
-import type { ActionOutcome, TitleRecord } from "@/core/library/types";
+import { cardUserState } from "@/core/deck-service/user-state";
+import type { ActionOutcome } from "@/core/library/types";
 import type { TitleId, TitleStatus } from "@/core/types";
 import { RatingSheet } from "../../../_components/rating-sheet";
-import { Star, starFill } from "../../../_components/stars";
+import { Stars } from "../../../_components/stars";
 import { markSeenAction, sortCardAction, undoSortAction, type DeckActionResult, type SortKind } from "../../../_deck/actions";
 import { CardView } from "../../../_deck/card-view";
 import { DeckButtons } from "../../../_deck/deck-buttons";
 import { Screen } from "../../../_shell/screen";
+import { editRatingAction } from "../../../lists/actions";
 
 // The full card for one title, opened from Search or Lists. The same card and
 // the same four buttons as the deck. The difference: the card stays on screen
@@ -19,6 +21,8 @@ import { Screen } from "../../../_shell/screen";
 // what it does to the title's row. Pass, Skip, and Watchlist show at once and
 // roll back with an error if the save fails. Seen it waits for the save, like
 // the deck. Undo restores the row exactly as it was (VISION invariant 2).
+// Core decides what the card shows for a row (cardUserState): getCard applies
+// it on the server, and this screen applies it to each action's outcome.
 
 const TOAST_MS = 4500;
 
@@ -46,19 +50,36 @@ interface Notice {
   message: string;
 }
 
-function stateOf(row: TitleRecord | null): CardUserState | null {
-  if (!row) return null;
-  return { status: row.status, rating: row.rating, review: row.review, skipUntil: row.skipUntil === null ? null : new Date(row.skipUntil) };
+const noSubscribe = () => () => {};
+
+/**
+ * False on the server and while hydrating, true after. The skip date is
+ * formatted only in the browser, in the phone's own time zone: the server runs
+ * in UTC, so its "Nov 22" can be the phone's "Nov 21".
+ */
+function useInBrowser(): boolean {
+  return useSyncExternalStore(
+    noSubscribe,
+    () => true,
+    () => false,
+  );
 }
 
-/** A skip that has run out puts the title back in the deck: the card shows it as untouched, like Search does. */
-function liveState(state: CardUserState | null): CardUserState | null {
-  if (state?.status === "skipped" && state.skipUntil && new Date(state.skipUntil).getTime() <= Date.now()) return null;
-  return state;
+/**
+ * True when this card is the page the app opened on (a shared link): the
+ * document's first URL is this one. Any history before it is outside the app,
+ * so Back must not go there. A reload of the card keeps the history it had, so
+ * it counts as cold only when there is none.
+ */
+function openedCold(): boolean {
+  const first = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+  if (!first || first.name !== window.location.href) return false;
+  return first.type !== "reload" || window.history.length <= 1;
 }
 
 /** Where the title is now, above the card. */
 function StatusLine({ state }: { state: CardUserState | null }) {
+  const inBrowser = useInBrowser();
   if (!state) return null;
   let text: ReactNode;
   switch (state.status) {
@@ -69,19 +90,13 @@ function StatusLine({ state }: { state: CardUserState | null }) {
       text = "In your Passed list";
       break;
     case "skipped":
-      text = state.skipUntil ? `Skipped until ${dateFormat.format(new Date(state.skipUntil))}` : "Skipped for now";
+      text = state.skipUntil && inBrowser ? `Skipped until ${dateFormat.format(new Date(state.skipUntil))}` : "Skipped for now";
       break;
     case "seen":
       text = (
         <>
           <span>Seen</span>
-          {state.rating !== null && (
-            <span className="flex items-center gap-0.5" aria-label={`rated ${state.rating} of 5 stars`}>
-              {[1, 2, 3, 4, 5].map((n) => (
-                <Star key={n} fill={starFill(state.rating!, n)} size={14} />
-              ))}
-            </span>
-          )}
+          {state.rating !== null && <Stars rating={state.rating} />}
         </>
       );
       break;
@@ -98,7 +113,8 @@ const PILL = "pointer-events-auto flex min-h-11 items-center gap-2 rounded-full 
 export function TitleScreen({ card }: { card: Card }) {
   const router = useRouter();
   const ref: TitleId = { mediaType: card.mediaType, tmdbId: card.tmdbId };
-  const [state, setState] = useState<CardUserState | null>(() => liveState(card.userState));
+  // getCard has already applied core's rules (an expired skip is null).
+  const [state, setState] = useState<CardUserState | null>(card.userState);
   const [busy, setBusy] = useState(false);
   const [seenOpen, setSeenOpen] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
@@ -124,7 +140,7 @@ export function TitleScreen({ card }: { card: Card }) {
 
   function done(kind: SortKind, outcome: ActionOutcome) {
     changed.current = true;
-    setState(liveState(stateOf(outcome.current)));
+    setState(cardUserState(ref, outcome.current, new Date()));
     setNotice(null);
     setToast({ id: ++seq.current, message: state?.status === "seen" && kind === "seen" ? "Rating saved" : DONE_LABEL[kind], outcome });
   }
@@ -159,6 +175,9 @@ export function TitleScreen({ card }: { card: Card }) {
   }
 
   async function saveSeen(rating: number, review: string): Promise<string | null> {
+    // A Seen title's rating is edited the way the Lists tab edits it: core changes it only while the title is
+    // still Seen, so a change made elsewhere (another device) is never silently overwritten.
+    if (state?.status === "seen") return editSeen(rating, review);
     let result: DeckActionResult;
     try {
       result = await markSeenAction(ref, rating, review === "" ? null : review);
@@ -171,12 +190,32 @@ export function TitleScreen({ card }: { card: Card }) {
     return null;
   }
 
+  async function editSeen(rating: number, review: string): Promise<string | null> {
+    let result: Awaited<ReturnType<typeof editRatingAction>>;
+    try {
+      result = await editRatingAction(ref, rating, review);
+    } catch {
+      return "Couldn't save. Check your connection.";
+    }
+    if (result.ok) {
+      setSeenOpen(false);
+      done("seen", result.value);
+      return null;
+    }
+    if (!result.stale) return result.error;
+    // The title moved since this card loaded. Reload it from the server: page.tsx keys this screen on the
+    // title's state, so the screen starts over with where the title is now.
+    setSeenOpen(false);
+    router.refresh();
+    return null;
+  }
+
   async function undo() {
     if (!toast || busy) return;
     const { outcome } = toast;
     const after = state;
     setToast(null);
-    setState(liveState(stateOf(outcome.previous)));
+    setState(cardUserState(ref, outcome.previous, new Date()));
     setBusy(true);
     let result: DeckActionResult;
     try {
@@ -186,7 +225,7 @@ export function TitleScreen({ card }: { card: Card }) {
     }
     setBusy(false);
     if (result.ok) {
-      setState(liveState(stateOf(result.outcome.current)));
+      setState(cardUserState(ref, result.outcome.current, new Date()));
       setNotice(null);
     } else {
       setState(after);
@@ -195,9 +234,8 @@ export function TitleScreen({ card }: { card: Card }) {
   }
 
   function back() {
-    // Opened cold (a shared link, a reload with no history): Back goes to Search.
-    if (window.history.length > 1) router.back();
-    else router.push("/search");
+    if (openedCold()) router.push("/search");
+    else router.back();
   }
 
   return (

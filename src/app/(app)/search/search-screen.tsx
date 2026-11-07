@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { SEARCH_QUERY_MAX_LENGTH } from "@/core/search/constants";
 import type { SearchPage, SearchResult } from "@/core/search/types";
 import type { TitleStatus } from "@/core/types";
 import type { SearchResponse } from "@/app/api/search/route";
@@ -27,9 +29,12 @@ const STATUS_WORDS: Record<TitleStatus, string> = {
 type Results = { kind: "results"; page: SearchPage; results: SearchResult[]; more: "idle" | "loading" | "error" };
 
 /** An answer from /api/search, with the query and attempt it answers. */
-type Fetched = { query: string; attempt: number } & ({ kind: "error" } | Results);
+type Fetched = { query: string; attempt: number } & (Failed | Results);
 
-type View = { kind: "idle" } | { kind: "loading" } | { kind: "error" } | (Results & { stale?: boolean });
+/** `invalid`: core refused the query itself (too long), so trying again cannot help. */
+type Failed = { kind: "error"; reason: "invalid" | "unavailable" };
+
+type View = { kind: "idle" } | { kind: "loading" } | Failed | (Results & { stale?: boolean });
 
 async function fetchResults(query: string, page: number, signal: AbortSignal): Promise<SearchResponse> {
   const params = new URLSearchParams({ q: query });
@@ -95,7 +100,11 @@ function RowsSkeleton() {
 }
 
 export function SearchScreen({ initialQuery }: { initialQuery: string }) {
+  const router = useRouter();
   const [query, setQuery] = useState(initialQuery);
+  // The query this screen arrived with. Later renders of the page carry newer ones (the URL follows the box),
+  // and those must not restart the search.
+  const [arrivedWith] = useState(initialQuery.trim());
   // The last answer, and the query and attempt it answers.
   const [fetched, setFetched] = useState<Fetched | null>(null);
   // Bumped to search the same query again (Try again).
@@ -113,11 +122,15 @@ export function SearchScreen({ initialQuery }: { initialQuery: string }) {
         ? { ...fetched, stale: true }
         : { kind: "loading" };
 
-  // The query goes into the URL, so Back from a card shows the same results.
+  // The query goes into the URL through the router, so the router's own entry for this screen holds it, and Back
+  // from a card comes back to the same query and results. Debounced like the search, so typing doesn't ask the
+  // server for the page on every keystroke.
   useEffect(() => {
     const url = trimmed ? `/search?q=${encodeURIComponent(trimmed)}` : "/search";
-    if (`${window.location.pathname}${window.location.search}` !== url) window.history.replaceState(null, "", url);
-  }, [trimmed]);
+    if (`${window.location.pathname}${window.location.search}` === url) return;
+    const timer = setTimeout(() => router.replace(url, { scroll: false }), trimmed ? DEBOUNCE_MS : 0);
+    return () => clearTimeout(timer);
+  }, [trimmed, router]);
 
   useEffect(() => {
     moreAbort.current?.abort();
@@ -136,20 +149,20 @@ export function SearchScreen({ initialQuery }: { initialQuery: string }) {
           setFetched(
             body.ok
               ? { query: trimmed, attempt, kind: "results", page: body.page, results: body.page.results, more: "idle" }
-              : { query: trimmed, attempt, kind: "error" },
+              : { query: trimmed, attempt, kind: "error", reason: body.error === "invalid_search_query" ? "invalid" : "unavailable" },
           );
         } catch {
           // Aborted: a newer query took over.
         }
       },
       // The first search on arrival (a query from the URL) runs at once.
-      attempt === 0 && trimmed === initialQuery.trim() ? 0 : DEBOUNCE_MS,
+      attempt === 0 && trimmed === arrivedWith ? 0 : DEBOUNCE_MS,
     );
     return () => {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [trimmed, attempt, initialQuery]);
+  }, [trimmed, attempt, arrivedWith]);
 
   async function loadMore() {
     if (!answered || fetched.kind !== "results" || fetched.more === "loading") return;
@@ -198,6 +211,7 @@ export function SearchScreen({ initialQuery }: { initialQuery: string }) {
             autoComplete="off"
             autoCorrect="off"
             spellCheck={false}
+            maxLength={SEARCH_QUERY_MAX_LENGTH}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             className="h-11 min-w-0 flex-1 bg-transparent text-base outline-none placeholder:text-muted [&::-webkit-search-cancel-button]:hidden"
@@ -214,7 +228,10 @@ export function SearchScreen({ initialQuery }: { initialQuery: string }) {
 
       {view.kind === "idle" && <Message title="Find any movie or series">Add it to your Watchlist, or rate something you just watched.</Message>}
       {view.kind === "loading" && <RowsSkeleton />}
-      {view.kind === "error" && (
+      {view.kind === "error" && view.reason === "invalid" && (
+        <Message title="That search is too long">Try a shorter title, up to {SEARCH_QUERY_MAX_LENGTH} characters.</Message>
+      )}
+      {view.kind === "error" && view.reason === "unavailable" && (
         <Message
           title="Search isn't working right now"
           action={
