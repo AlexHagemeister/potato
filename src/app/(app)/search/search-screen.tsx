@@ -49,14 +49,13 @@ async function fetchResults(query: string, page: number, signal: AbortSignal): P
   }
 }
 
-function ResultRow({ result, onOpen }: { result: SearchResult; onOpen: () => void }) {
+function ResultRow({ result }: { result: SearchResult }) {
   const type = result.mediaType === "movie" ? "Movie" : "Series";
   return (
     <li>
       <Link
         href={`/title/${result.mediaType}/${result.tmdbId}`}
         prefetch={false}
-        onClick={onOpen}
         data-title-key={`${result.mediaType}:${result.tmdbId}`}
         className="flex items-center gap-3 py-2"
       >
@@ -119,7 +118,7 @@ export function SearchScreen({ initialQuery }: { initialQuery: string }) {
       setWritten(initialQuery.trim());
     }
   }
-  // The pending URL write. A result tap cancels it, so a late write can't cancel the tap's navigation.
+  // The pending URL write. A link tap cancels it, so a late write can't cancel the tap's navigation.
   const urlTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   // The last answer, and the query and attempt it answers.
   const [fetched, setFetched] = useState<Fetched | null>(null);
@@ -141,9 +140,12 @@ export function SearchScreen({ initialQuery }: { initialQuery: string }) {
   // The query goes into the URL through the router, so the router's own entry for this screen holds it, and Back
   // from a card comes back to the same query and results. Debounced like the search, so typing doesn't ask the
   // server for the page on every keystroke.
+  // Compared with what this screen last wrote, never with window.location: the location lags a replace that is
+  // still rendering, so a Backspace inside that window would look already written and the URL would keep the
+  // longer query.
   useEffect(() => {
+    if (trimmed === written) return;
     const url = trimmed ? `/search?q=${encodeURIComponent(trimmed)}` : "/search";
-    if (`${window.location.pathname}${window.location.search}` === url) return;
     urlTimer.current = setTimeout(
       () => {
         setWritten(trimmed);
@@ -152,7 +154,25 @@ export function SearchScreen({ initialQuery }: { initialQuery: string }) {
       trimmed ? DEBOUNCE_MS : 0,
     );
     return () => clearTimeout(urlTimer.current);
-  }, [trimmed, router]);
+  }, [trimmed, written, router]);
+
+  // Any link tapped (a result, a tab) cancels the pending write, so a late replace can't supersede its navigation.
+  // The Search tab itself also clears the box (its URL may be the one already showing, so no render would), and
+  // the tab's own navigation writes the empty URL, so no replace may race it for the history entry.
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      const link = e.target instanceof Element ? e.target.closest<HTMLAnchorElement>("a[href]") : null;
+      if (!link) return;
+      clearTimeout(urlTimer.current);
+      const to = new URL(link.href);
+      if (to.origin === window.location.origin && to.pathname === "/search" && !to.search) {
+        setQuery("");
+        setWritten("");
+      }
+    };
+    document.addEventListener("click", onClick, true);
+    return () => document.removeEventListener("click", onClick, true);
+  }, []);
 
   useEffect(() => {
     moreAbort.current?.abort();
@@ -269,7 +289,7 @@ export function SearchScreen({ initialQuery }: { initialQuery: string }) {
         <>
           <ul aria-label="Results" aria-busy={view.stale || undefined} className={`divide-y divide-hairline transition-opacity ${view.stale ? "opacity-50" : ""}`}>
             {view.results.map((r) => (
-              <ResultRow key={`${r.mediaType}:${r.tmdbId}`} result={r} onOpen={() => clearTimeout(urlTimer.current)} />
+              <ResultRow key={`${r.mediaType}:${r.tmdbId}`} result={r} />
             ))}
           </ul>
           {!view.stale && view.page.page < view.page.totalPages && (
