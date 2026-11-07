@@ -17,8 +17,9 @@ export const FOR_YOU_MIN_RATINGS = 10;
 
 /**
  * Turns per round in the default blend (Alex's ruling on issue 5: an even
- * blend, with "for you" as an equal fourth once unlocked). A weight of 2 gives
- * that pool two cards per round. A weight of 0 leaves it out of the blend.
+ * blend, with "for you" as an equal fourth once unlocked). Each weight is a
+ * whole number of turns per round: 2 gives that pool two cards per round, and
+ * 0 leaves it out of the blend. Fractions and negatives throw.
  */
 export const BLEND_WEIGHTS: Readonly<Record<PoolName, number>> = {
   popular: 1,

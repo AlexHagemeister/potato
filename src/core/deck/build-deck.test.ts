@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { Candidate, PoolName, UserTitleState } from "../types";
-import { buildDeck, interleave, type DeckCard, type DeckInput, type DeckResult } from "./build-deck";
+import { LIST_STATUSES, TITLE_STATUSES, type Candidate, type PoolName, type UserTitleState } from "../types";
+import { buildDeck, interleave, matchesFilters, type DeckInput, type DeckResult } from "./build-deck";
 import {
   BLEND_WEIGHTS,
   DEEP_CUTS_MIN_SCORE,
@@ -113,7 +113,7 @@ describe("skip expiry (Alex's ruling on issue 4)", () => {
     expect(keys({ pools, states: skippedAt(NOW) })).toEqual(["movie:1", "movie:2"]);
   });
 
-  test("a skipped title stays back after its return time", () => {
+  test("a skipped title is in the deck after its return time", () => {
     const skipUntil = new Date(NOW.getTime() - 1);
     expect(keys({ pools, states: skippedAt(skipUntil) })).toEqual(["movie:1", "movie:2"]);
   });
@@ -242,6 +242,27 @@ describe("single modes", () => {
       top_rated: [cand(1, { imdb, tmdbVoteAverage: 7.0 }), cand(2, { imdb, tmdbVoteAverage: 7.8 })],
     };
     expect(keys({ pools, mode: "top_rated" })).toEqual(["movie:2", "movie:1"]);
+  });
+
+  test("the vote tiebreak compares like with like", () => {
+    const imdbMin = VOTE_THRESHOLDS.imdb.topRatedMin;
+    // Both IMDb: more IMDb votes wins, whatever the TMDB counts say.
+    const bothImdb = {
+      top_rated: [
+        cand(1, { imdb: { rating: 8, votes: imdbMin }, tmdbVoteAverage: 7, tmdbVoteCount: 5_000 }),
+        cand(2, { imdb: { rating: 8, votes: imdbMin * 4 }, tmdbVoteAverage: 7, tmdbVoteCount: 100 }),
+      ],
+    };
+    expect(keys({ pools: bothImdb, mode: "top_rated" })).toEqual(["movie:2", "movie:1"]);
+    // IMDb against TMDB, equal on score and TMDB average: compare TMDB vote counts, which both titles have,
+    // not IMDb votes against TMDB votes (which the IMDb title would always win).
+    const mixed = {
+      top_rated: [
+        cand(1, { imdb: { rating: 8, votes: imdbMin * 4 }, tmdbVoteAverage: 8, tmdbVoteCount: 1_200 }),
+        cand(2, { tmdbVoteAverage: 8, tmdbVoteCount: 5_000 }),
+      ],
+    };
+    expect(keys({ pools: mixed, mode: "top_rated" })).toEqual(["movie:2", "movie:1"]);
   });
 
   test("top rated gates on votes from the same source as the rating", () => {
@@ -384,7 +405,10 @@ describe("blend (Alex's ruling on issue 5)", () => {
 
   test("filters and list exclusion apply inside the blend", () => {
     const states: UserTitleState[] = [{ mediaType: "movie", tmdbId: 21, status: "passed" }];
-    const filtered = keys({ pools, mode: "blend", states, filters: { mediaTypes: ["movie"] } });
+    const withSeries = { ...pools, popular: [cand(10, { mediaType: "tv", popularity: 99 }), ...pools.popular] };
+    expect(keys({ pools: withSeries, mode: "blend", states }).slice(0, 3)).toEqual(["tv:10", "movie:22", "movie:31"]);
+    const filtered = keys({ pools: withSeries, mode: "blend", states, filters: { mediaTypes: ["movie"] } });
+    expect(filtered).not.toContain("tv:10");
     expect(filtered).not.toContain("movie:21");
     expect(filtered.slice(0, 3)).toEqual(["movie:11", "movie:22", "movie:31"]);
   });
@@ -398,17 +422,81 @@ describe("blend (Alex's ruling on issue 5)", () => {
 });
 
 describe("blend weights", () => {
-  const card = (tmdbId: number, source: PoolName): DeckCard => ({ ...cand(tmdbId), source });
-  const a = [card(1, "popular"), card(2, "popular"), card(3, "popular")];
-  const b = [card(11, "top_rated"), card(12, "top_rated"), card(13, "top_rated")];
-  const ids = (cards: DeckCard[]) => cards.map((c) => c.tmdbId);
+  const a = [1, 2, 3];
+  const b = [11, 12, 13];
+  const key = (n: number) => String(n);
 
   test("a weight of 2 gives that pool two cards per round", () => {
-    expect(ids(interleave([a, b], [2, 1]))).toEqual([1, 2, 11, 3, 12, 13]);
+    expect(interleave([a, b], [2, 1], key)).toEqual([1, 2, 11, 3, 12, 13]);
   });
 
   test("a weight of 0 leaves that pool out", () => {
-    expect(ids(interleave([a, b], [0, 1]))).toEqual([11, 12, 13]);
+    expect(interleave([a, b], [0, 1], key)).toEqual([11, 12, 13]);
+  });
+
+  test("fractional, negative, and non-numeric weights throw, as does a missing weight", () => {
+    for (const bad of [0.5, 1.5, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => interleave([a, b], [1, bad], key)).toThrow(RangeError);
+    }
+    expect(() => interleave([a, b], [1], key)).toThrow(RangeError);
+  });
+
+  test("the shipped weights are all valid", () => {
+    const weights = Object.values(BLEND_WEIGHTS);
+    expect(weights.every((w) => Number.isInteger(w) && w >= 0)).toBe(true);
+    expect(() => interleave([a, b, a, b], weights, key)).not.toThrow();
+  });
+});
+
+describe("malformed rows", () => {
+  test("a candidate with a bad media type or ID is skipped, and the rest of the deck survives", () => {
+    const bad = [
+      cand(0),
+      cand(-5),
+      cand(1.5),
+      { ...cand(7), mediaType: "person" } as unknown as Candidate,
+    ];
+    expect(keys({ pools: { popular: [cand(1), ...bad, cand(2)] } })).toEqual(["movie:1", "movie:2"]);
+    expect(keys({ mode: "blend", pools: { popular: [...bad, cand(1)], for_you: bad } })).toEqual(["movie:1"]);
+  });
+
+  test("a state row with a bad ID is ignored", () => {
+    const states = [
+      { mediaType: "movie", tmdbId: 0, status: "seen" },
+      { mediaType: "person", tmdbId: 1, status: "seen" },
+    ] as unknown as UserTitleState[];
+    expect(keys({ pools: { popular: [cand(1)] }, states })).toEqual(["movie:1"]);
+  });
+
+  test("skipUntil as an ISO string works like a Date", () => {
+    const pools = { popular: [cand(1), cand(2)] };
+    const skipped = (skipUntil: string): UserTitleState[] => [{ mediaType: "movie", tmdbId: 1, status: "skipped", skipUntil }];
+    expect(keys({ pools, states: skipped(new Date(NOW.getTime() + 1).toISOString()) })).toEqual(["movie:2"]);
+    expect(keys({ pools, states: skipped(NOW.toISOString()) })).toEqual(["movie:1", "movie:2"]);
+  });
+
+  test("a skipUntil that does not parse keeps the title hidden", () => {
+    const pools = { popular: [cand(1), cand(2)] };
+    for (const skipUntil of ["not a date", new Date(Number.NaN)]) {
+      const states: UserTitleState[] = [{ mediaType: "movie", tmdbId: 1, status: "skipped", skipUntil }];
+      expect(keys({ pools, states })).toEqual(["movie:2"]);
+    }
+  });
+});
+
+describe("matchesFilters (shared with the Lists screens)", () => {
+  test("applies the same rules as the deck", () => {
+    const filters = { mediaTypes: ["tv" as const], genreIds: [10765], era: { fromYear: 2015 }, onMyServices: true };
+    expect(matchesFilters(cand(1, { mediaType: "tv", genreIds: [10765], year: 2022, providerIds: [8] }), filters, [8])).toBe(true);
+    expect(matchesFilters(cand(1, { mediaType: "tv", genreIds: [10765], year: 2022, providerIds: [8] }), filters, [9])).toBe(false);
+    expect(matchesFilters(cand(1, { mediaType: "movie", genreIds: [10765], year: 2022, providerIds: [8] }), filters, [8])).toBe(false);
+    expect(matchesFilters(cand(1), {}, [])).toBe(true);
+  });
+});
+
+describe("status constants", () => {
+  test("list statuses are every status but skipped", () => {
+    expect(TITLE_STATUSES.filter((s) => s !== "skipped")).toEqual([...LIST_STATUSES]);
   });
 });
 

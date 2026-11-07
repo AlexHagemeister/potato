@@ -2,7 +2,7 @@
 // input always gives the same output. It reads no clock, no randomness, no
 // database, and never mutates its input.
 
-import { formatTitleKey } from "../title-id";
+import { formatTitleKey, type TitleId } from "../title-id";
 import type { Candidate, DeckFilters, DiscoveryMode, PoolName, UserTitleState } from "../types";
 import {
   BLEND_ORDER,
@@ -33,6 +33,20 @@ export type DeckResult =
   | { kind: "cards"; cards: DeckCard[] }
   | { kind: "locked"; mode: "for_you"; ratedCount: number; required: number; remaining: number };
 
+/** The rating a title is judged by, and the votes behind it, from one source. */
+interface Quality {
+  source: "imdb" | "tmdb";
+  score: number;
+  votes: number;
+}
+
+/** A candidate with its identity key and quality computed once, before filtering and sorting. */
+interface Entry {
+  card: DeckCard;
+  key: string;
+  q: Quality;
+}
+
 export function buildDeck(input: DeckInput): DeckResult {
   const forYouUnlocked = input.ratedCount >= FOR_YOU_MIN_RATINGS;
 
@@ -48,35 +62,64 @@ export function buildDeck(input: DeckInput): DeckResult {
 
   const hidden = hiddenKeys(input.states, input.now);
   const userProviders = new Set(input.userProviderIds);
-  const eligible = (c: Candidate) =>
-    !hidden.has(formatTitleKey(c)) && passesFilters(c, input.filters, userProviders);
 
-  const ordered = (pool: PoolName): DeckCard[] =>
-    orderPool(pool, (input.pools[pool] ?? []).filter(eligible)).map((c) => ({ ...c, source: pool }));
+  const ordered = (pool: PoolName): Entry[] => {
+    const entries: Entry[] = [];
+    for (const c of input.pools[pool] ?? []) {
+      const key = titleKeyOrNull(c);
+      // A malformed row (bad media type or ID) is skipped, not allowed to sink the whole deck.
+      if (key === null || hidden.has(key) || !passesFilters(c, input.filters, userProviders)) continue;
+      entries.push({ card: { ...c, source: pool }, key, q: quality(c) });
+    }
+    return orderPool(pool, entries);
+  };
 
-  if (input.mode !== "blend") {
-    return { kind: "cards", cards: interleave([ordered(input.mode)], [1]) };
-  }
+  const pools: PoolName[] =
+    input.mode === "blend"
+      ? BLEND_ORDER.filter((pool) => BLEND_WEIGHTS[pool] > 0 && (pool !== "for_you" || forYouUnlocked))
+      : [input.mode];
+  const weights = input.mode === "blend" ? pools.map((pool) => BLEND_WEIGHTS[pool]) : [1];
 
-  const blendPools = BLEND_ORDER.filter(
-    (pool) => BLEND_WEIGHTS[pool] > 0 && (pool !== "for_you" || forYouUnlocked),
-  );
   return {
     kind: "cards",
-    cards: interleave(
-      blendPools.map(ordered),
-      blendPools.map((pool) => BLEND_WEIGHTS[pool]),
-    ),
+    cards: interleave(pools.map(ordered), weights, (e) => e.key).map((e) => e.card),
   };
 }
 
-/** Keys of titles the deck must not show: anything on a list, and skipped titles before their return time. */
+/**
+ * Whether a title passes the user's filters. The deck uses it, and the Lists
+ * screens apply the same filters (VISION: "The filters that shape the deck also
+ * work on each list").
+ */
+export function matchesFilters(c: Candidate, filters: DeckFilters, userProviderIds: readonly number[]): boolean {
+  return passesFilters(c, filters, new Set(userProviderIds));
+}
+
+/** formatTitleKey, but null instead of a throw for a malformed row. */
+function titleKeyOrNull(id: TitleId): string | null {
+  try {
+    return formatTitleKey(id);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Keys of titles the deck must not show: anything on a list, and skipped titles
+ * before their return time. A skipped row whose return time does not parse
+ * stays hidden: a skip that holds too long is cheaper than one that ends early.
+ */
 function hiddenKeys(states: readonly UserTitleState[], now: Date): Set<string> {
   const hidden = new Set<string>();
   for (const state of states) {
-    if (state.status !== "skipped" || now.getTime() < state.skipUntil.getTime()) {
-      hidden.add(formatTitleKey(state));
+    const key = titleKeyOrNull(state);
+    if (key === null) continue; // Matches no valid candidate anyway.
+    if (state.status !== "skipped") {
+      hidden.add(key);
+      continue;
     }
+    const returnsAt = new Date(state.skipUntil).getTime();
+    if (Number.isNaN(returnsAt) || now.getTime() < returnsAt) hidden.add(key);
   }
   return hidden;
 }
@@ -101,73 +144,77 @@ function passesFilters(c: Candidate, filters: DeckFilters, userProviders: Readon
   return true;
 }
 
-/**
- * The rating a title is judged by, and the votes behind it. IMDb when the
- * title has IMDb data (the score Alex trusts, VISION invariant 5), else TMDB.
- */
-function quality(c: Candidate): { score: number; votes: number; thresholds: (typeof VOTE_THRESHOLDS)["imdb" | "tmdb"] } {
+/** IMDb when the title has IMDb data (the score Alex trusts, VISION invariant 5), else TMDB. */
+function quality(c: Candidate): Quality {
   return c.imdb
-    ? { score: c.imdb.rating, votes: c.imdb.votes, thresholds: VOTE_THRESHOLDS.imdb }
-    : { score: c.tmdbVoteAverage, votes: c.tmdbVoteCount, thresholds: VOTE_THRESHOLDS.tmdb };
+    ? { source: "imdb", score: c.imdb.rating, votes: c.imdb.votes }
+    : { source: "tmdb", score: c.tmdbVoteAverage, votes: c.tmdbVoteCount };
 }
 
 /** Orders one pool by its own signal. Returns a new array. Ties keep pool order (Array.prototype.sort is stable). */
-function orderPool(pool: PoolName, candidates: Candidate[]): Candidate[] {
+function orderPool(pool: PoolName, entries: Entry[]): Entry[] {
   switch (pool) {
     case "popular":
-      return [...candidates].sort((a, b) => b.popularity - a.popularity);
+      return entries.sort((a, b) => b.card.popularity - a.card.popularity);
 
     case "top_rated":
-      return candidates
-        .filter((c) => {
-          const q = quality(c);
-          return q.votes >= q.thresholds.topRatedMin;
-        })
-        .sort(byQuality);
+      return entries.filter(({ q }) => q.votes >= VOTE_THRESHOLDS[q.source].topRatedMin).sort(byQuality);
 
     case "deep_cuts":
-      return candidates
-        .filter((c) => {
-          const q = quality(c);
-          return (
-            q.votes >= q.thresholds.deepCutsMin &&
-            q.votes < q.thresholds.topRatedMin &&
-            q.score >= DEEP_CUTS_MIN_SCORE
-          );
+      return entries
+        .filter(({ q }) => {
+          const t = VOTE_THRESHOLDS[q.source];
+          return q.votes >= t.deepCutsMin && q.votes < t.topRatedMin && q.score >= DEEP_CUTS_MIN_SCORE;
         })
         .sort(byQuality);
 
     case "for_you":
-      return [...candidates];
+      return entries;
   }
 }
 
-/** Higher quality score first, then higher TMDB vote average, then more votes. */
-function byQuality(a: Candidate, b: Candidate): number {
-  const qa = quality(a);
-  const qb = quality(b);
-  return qb.score - qa.score || b.tmdbVoteAverage - a.tmdbVoteAverage || qb.votes - qa.votes;
+/**
+ * Higher quality score first, then higher TMDB vote average, then more votes.
+ * The vote tiebreak compares like with like: IMDb votes when both titles have
+ * them, else TMDB vote counts, which every title has.
+ */
+function byQuality(a: Entry, b: Entry): number {
+  const votes =
+    a.q.source === "imdb" && b.q.source === "imdb"
+      ? b.q.votes - a.q.votes
+      : b.card.tmdbVoteCount - a.card.tmdbVoteCount;
+  return b.q.score - a.q.score || b.card.tmdbVoteAverage - a.card.tmdbVoteAverage || votes;
 }
 
 /**
  * Weighted round robin across ordered lists. Each round, list i gives up to
- * weights[i] cards. A title already dealt is skipped without costing its list
- * the turn, so the first appearance wins. An exhausted list drops out and the
- * rest keep turning. Exported for tests only.
+ * weights[i] items. Weights are whole turns per round, so each must be a
+ * non-negative integer. An item whose key was already dealt is skipped without
+ * costing its list the turn, so the first appearance wins. An exhausted list
+ * drops out and the rest keep turning.
  */
-export function interleave(lists: DeckCard[][], weights: number[]): DeckCard[] {
-  const out: DeckCard[] = [];
+export function interleave<T>(lists: readonly (readonly T[])[], weights: readonly number[], keyOf: (item: T) => string): T[] {
+  if (weights.length !== lists.length) {
+    throw new RangeError(`interleave: ${lists.length} lists but ${weights.length} weights`);
+  }
+  for (const w of weights) {
+    if (!Number.isInteger(w) || w < 0) {
+      throw new RangeError(`interleave: weight ${w} is not a non-negative integer`);
+    }
+  }
+
+  const out: T[] = [];
   const dealt = new Set<string>();
   const cursors = lists.map(() => 0);
 
-  const nextFresh = (i: number): DeckCard | undefined => {
+  const nextFresh = (i: number): T | undefined => {
     const list = lists[i];
     while (cursors[i] < list.length) {
-      const card = list[cursors[i]++];
-      const key = formatTitleKey(card);
+      const item = list[cursors[i]++];
+      const key = keyOf(item);
       if (!dealt.has(key)) {
         dealt.add(key);
-        return card;
+        return item;
       }
     }
     return undefined;
@@ -178,9 +225,9 @@ export function interleave(lists: DeckCard[][], weights: number[]): DeckCard[] {
     dealtThisRound = false;
     for (let i = 0; i < lists.length; i++) {
       for (let turn = 0; turn < weights[i]; turn++) {
-        const card = nextFresh(i);
-        if (!card) break;
-        out.push(card);
+        const item = nextFresh(i);
+        if (item === undefined) break;
+        out.push(item);
         dealtThisRound = true;
       }
     }
