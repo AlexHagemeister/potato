@@ -352,6 +352,20 @@ describe("searchTitles", () => {
     expect(calls).toHaveLength(0);
   });
 
+  test("a 429 on search is retried after Retry-After, then cached", async () => {
+    const { client, calls, sleeps } = setup({
+      "/search/multi": [
+        status(429, { "retry-after": "1" }),
+        json({ page: 1, total_pages: 1, results: [{ id: 438631, media_type: "movie", title: "Dune", release_date: "2021-09-15" }] }),
+      ],
+    });
+    const r = await client.searchTitles("dune");
+    expect(r.results.map((t) => t.tmdbId)).toEqual([438631]);
+    expect(sleeps).toEqual([1000]);
+    await client.searchTitles("dune");
+    expect(calls).toHaveLength(2);
+  });
+
   test("search is cached for an hour", async () => {
     const { client, calls, advance } = setup({ "/search/multi": json({ page: 1, total_pages: 0, results: [] }) });
     await client.searchTitles("dune");

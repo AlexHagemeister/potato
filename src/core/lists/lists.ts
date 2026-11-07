@@ -11,7 +11,7 @@ import { getList } from "../library/queries";
 import type { TitleDetailsLookup, TitleRecord } from "../library/types";
 import { ok, type Result } from "../result";
 import { formatTitleKey } from "../title-id";
-import { getTmdb, posterUrl, type DetailsCore } from "../tmdb";
+import { getTmdb, posterUrl, ROW_POSTER_SIZE, type DetailsCore } from "../tmdb";
 import { LIST_STATUSES, type ListStatus, type TitleId } from "../types";
 
 /** Rows per page. Enough to fill several screens, small enough that a cold metadata cache stays quick. */
@@ -47,9 +47,6 @@ export interface ListRowsPage {
 export type TitleInfoLookup = (refs: readonly TitleId[]) => Promise<ReadonlyMap<string, DetailsCore>>;
 
 const tmdbLookup: TitleInfoLookup = (refs) => getTmdb().lookupTitles(refs);
-
-/** Thumbnail size: rows show posters about 56pt wide, so w185 stays sharp at 3x. */
-const ROW_POSTER_SIZE = "w185";
 
 export function toListRow(record: TitleRecord, info: DetailsCore | undefined): ListRow {
   return {

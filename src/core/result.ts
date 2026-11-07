@@ -40,6 +40,8 @@ export type CoreError =
   | { code: "invalid_settings"; message: string }
   /** A deck request's mode, filters, or cursor is invalid, or the cursor belongs to another user, mode, filters, country, or services. */
   | { code: "invalid_deck_query"; message: string }
+  /** A search query is not a string or is too long, or the page is not a whole number in TMDB's range. */
+  | { code: "invalid_search_query"; message: string }
   /** TMDB has no title with this (media type, TMDB ID). */
   | { code: "unknown_title" }
   /** The country is well formed, but TMDB has no streaming data for it. */
