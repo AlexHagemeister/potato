@@ -29,8 +29,9 @@ if (targetName !== "dev" && targetName !== "prod") {
 const target = TARGETS[targetName];
 
 // The URL comes only from the target's env file, never from process.env:
-// `bun run` loads .env.local (production) into the environment of every
-// package.json script, so an inherited DATABASE_URL can't be trusted here.
+// Bun loads .env files automatically, and which one wins depends on NODE_ENV
+// (.env.local points at production), so an inherited DATABASE_URL can't be
+// trusted here.
 const env = parseEnv(readFileSync(target.envFile, "utf8"));
 // Migrations use the direct (unpooled) connection, as Neon recommends for DDL.
 const url = env.DATABASE_URL_UNPOOLED;
