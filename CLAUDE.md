@@ -37,7 +37,7 @@ Before any work, orient from the record:
 4. **Each external service has exactly one module,** with caching: one for TMDB, one for IMDb. TMDB publishes no fixed rate limit, so the TMDB module handles HTTP 429 responses.
 5. **The deck engine is a pure function.** Input: the user's lists, the filters, and the discovery mode. Output: an ordered list of titles. It has unit tests.
 6. **Reviews carry a visibility field, default private.** Nothing is public yet. The field keeps the social direction open (VISION invariant 9).
-7. **Attribution is mandatory.** The Profile tab shows the TMDB logo and the notice "This product uses the TMDB API but is not endorsed or certified by TMDB." Every place that shows streaming availability credits JustWatch as the data source. TMDB revokes API access for non-compliance.
+7. **Attribution is mandatory.** The Profile tab shows the TMDB logo and the notice "This product uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB." Every place that shows streaming availability credits JustWatch as the data source. The Profile tab also shows IMDb's required statement for its ratings: "Information courtesy of IMDb (https://www.imdb.com). Used with permission." TMDB revokes API access for non-compliance, and IMDb can withdraw permission at any time.
 8. **Secrets never enter git.** `.env.local` holds them. `.env.example` lists every variable with no values.
 
 ## How work happens
