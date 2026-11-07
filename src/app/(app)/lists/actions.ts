@@ -51,9 +51,10 @@ async function run<T>(
   fn: (userId: string) => Promise<Result<T>>,
   outage = "Couldn't save. Try again.",
 ): Promise<ActionResult<T>> {
-  const user = await getCurrentUserForRequest();
-  if (!user) return { ok: false, error: SIGNED_OUT };
   try {
+    // The session read is a database read too, so it sits inside the try.
+    const user = await getCurrentUserForRequest();
+    if (!user) return { ok: false, error: SIGNED_OUT };
     const result = await fn(user.id);
     return result.ok ? result : failure(result.error);
   } catch (err) {

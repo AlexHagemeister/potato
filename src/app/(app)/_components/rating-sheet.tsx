@@ -34,7 +34,13 @@ export function RatingSheet(props: RatingSheetProps) {
     if (rating === null || pending) return;
     setPending(true);
     setError(null);
-    const message = await props.onSave(rating, review);
+    let message: string | null;
+    try {
+      message = await props.onSave(rating, review);
+    } catch {
+      // onSave should resolve with its own words. This is the backstop for a throw.
+      message = "Couldn't save. Try again.";
+    }
     // On success the caller unmounts the sheet. On failure, keep what was typed.
     if (message) {
       setError(message);
@@ -50,7 +56,13 @@ export function RatingSheet(props: RatingSheetProps) {
       className="sheet-in fixed inset-0 z-50 flex flex-col bg-background"
     >
       <header className="grid shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b border-hairline px-2 pt-[env(safe-area-inset-top)]">
-        <button type="button" onClick={props.onCancel} className="h-14 justify-self-start px-3 text-accent">
+        {/* Disabled while saving: the save can't be called back, so Cancel would hide its result. */}
+        <button
+          type="button"
+          onClick={props.onCancel}
+          disabled={pending}
+          className="h-14 justify-self-start px-3 text-accent disabled:text-muted"
+        >
           Cancel
         </button>
         <h2 id="rating-sheet-heading" className="text-base font-semibold">
