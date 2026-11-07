@@ -3,6 +3,7 @@
 // addressed by (media type, TMDB ID) (rule 1).
 
 import type { CacheStore } from "../cache/cache-store";
+import { PostgresCacheStore } from "../cache/postgres-cache-store";
 import { mapWithConcurrency } from "../concurrency";
 import { formatTitleKey } from "../title-id";
 import type { Candidate, MediaType, TitleId } from "../types";
@@ -310,6 +311,14 @@ export function createTmdbClientFromEnv(cache: CacheStore): TmdbClient {
   const token = process.env.TMDB_API_READ_TOKEN;
   if (!token) throw new Error("TMDB_API_READ_TOKEN is not set");
   return createTmdbClient({ token, cache });
+}
+
+let appClient: TmdbClient | undefined;
+
+/** The app's TMDB client: environment token, Postgres cache (tmdb_cache). Created on first use. */
+export function getTmdb(): TmdbClient {
+  appClient ??= createTmdbClientFromEnv(new PostgresCacheStore());
+  return appClient;
 }
 
 function poolParams(pool: DiscoverPool): Params {

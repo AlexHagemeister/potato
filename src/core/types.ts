@@ -5,8 +5,11 @@ import type { MediaType, TitleId } from "./title-id";
 
 export type { MediaType, TitleId };
 
-/** A user's one status for a title (CLAUDE.md architecture rule 2). */
-export type TitleStatus = "watchlist" | "passed" | "seen" | "skipped";
+/** Every status a user's title row can hold (CLAUDE.md architecture rule 2). */
+export const TITLE_STATUSES = ["watchlist", "passed", "seen", "skipped"] as const;
+
+/** A user's one status for a title. */
+export type TitleStatus = (typeof TITLE_STATUSES)[number];
 
 /** Statuses that put a title on one of the user's lists. A listed title never returns to the deck (VISION invariant 3). */
 export const LIST_STATUSES = ["watchlist", "passed", "seen"] as const satisfies readonly TitleStatus[];
@@ -15,14 +18,16 @@ export type ListStatus = (typeof LIST_STATUSES)[number];
 /**
  * The part of a user's title_status row the deck needs. A skipped row always
  * carries the moment it returns to the deck, matching the schema check
- * (skip_until is not null exactly when status = 'skipped').
+ * (skip_until is not null exactly when status = 'skipped'). skipUntil may be
+ * an ISO string, since rows can cross a JSON boundary (API, cache, MCP).
  */
 export type UserTitleState =
   | (TitleId & { status: ListStatus })
-  | (TitleId & { status: "skipped"; skipUntil: Date });
+  | (TitleId & { status: "skipped"; skipUntil: Date | string });
 
 /** The discovery modes a deck can be ordered by (VISION: Shaping the deck). */
-export type DiscoveryMode = "blend" | "popular" | "deep_cuts" | "top_rated" | "for_you";
+export const DISCOVERY_MODES = ["blend", "popular", "deep_cuts", "top_rated", "for_you"] as const;
+export type DiscoveryMode = (typeof DISCOVERY_MODES)[number];
 
 /** The single modes, each backed by its own candidate pool. `blend` mixes them. */
 export type PoolName = Exclude<DiscoveryMode, "blend">;
@@ -59,8 +64,8 @@ export interface DeckFilters {
   mediaTypes?: MediaType[];
   /** Matches a title in any of these genres. */
   genreIds?: number[];
-  /** Inclusive year bounds. */
-  era?: { fromYear?: number; toYear?: number };
+  /** Inclusive year bounds. A missing or null bound is unbounded (null is the usual JSON shape for a cleared bound). */
+  era?: { fromYear?: number | null; toYear?: number | null };
   /** Only titles streaming on at least one of the user's services. */
   onMyServices?: boolean;
 }
