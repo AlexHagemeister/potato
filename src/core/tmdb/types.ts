@@ -61,6 +61,14 @@ export interface ProviderListEntry extends WatchProvider {
   mediaTypes: MediaType[];
 }
 
+/** A country TMDB has streaming data for (JustWatch's coverage). */
+export interface WatchRegion {
+  /** ISO 3166-1 alpha-2 code ("US"). */
+  code: string;
+  /** English name ("United States"). */
+  name: string;
+}
+
 /** Filters for one discover query. TMDB discover runs per media type, so there is one media type, not a list. */
 export interface DiscoverFilters {
   mediaType: MediaType;
@@ -68,7 +76,7 @@ export interface DiscoverFilters {
   genreIds?: number[];
   /** Inclusive year bounds on release year (movie) or first air year (series). */
   era?: { fromYear?: number; toYear?: number };
-  /** Only titles streaming by subscription on at least one of these services in `watchRegion`. */
+  /** Only titles streaming (subscription, free, or with ads) on at least one of these services in `watchRegion`. */
   providerIds?: number[];
   /** ISO 3166-1 country code. Required when providerIds is set. */
   watchRegion?: string;

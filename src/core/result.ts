@@ -37,7 +37,11 @@ export type CoreError =
   /** A filter needs title metadata and no details lookup was passed. */
   | { code: "details_lookup_required" }
   /** A settings value is invalid. */
-  | { code: "invalid_settings"; message: string };
+  | { code: "invalid_settings"; message: string }
+  /** The country is well formed, but TMDB has no streaming data for it. */
+  | { code: "unknown_country"; country: string }
+  /** The change saves more streaming services than one user may keep. */
+  | { code: "too_many_services"; max: number };
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: CoreError };
 

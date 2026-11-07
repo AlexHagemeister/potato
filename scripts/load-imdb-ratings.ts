@@ -4,12 +4,18 @@
 // Run: bun run imdb:load:dev             (loads into potato_dev)
 //      bun run imdb:load:dev --dry-run   (downloads and parses, writes nothing)
 //
-// The package script passes --no-env-file --env-file=.env.development.local,
-// so .env.local (production) is never loaded. As a second guard, this script
-// refuses any DATABASE_URL whose database is not potato_dev.
+// The connection strings come only from .env.development.local, never from
+// the inherited environment (Bun auto-loads .env files, and .env.local points
+// at production). The script refuses any database other than potato_dev.
 
-import { loadImdbRatings, MemoryLoadTarget } from "../src/core/imdb";
+import { existsSync, readFileSync } from "node:fs";
+import { parseEnv } from "node:util";
+import { count } from "drizzle-orm";
+import { getDb } from "../src/db/client";
+import { imdbRatings } from "../src/db/schema";
+import { createPostgresRatingsLoadTarget, loadImdbRatings, MemoryLoadTarget } from "../src/core/imdb";
 
+const ENV_FILE = ".env.development.local";
 const DEV_DATABASE = "potato_dev";
 
 function databaseName(url: string | undefined): string | null {
@@ -22,21 +28,25 @@ function databaseName(url: string | undefined): string | null {
 }
 
 async function main() {
-  const dryRun = process.argv.includes("--dry-run");
-
-  if (dryRun) {
+  if (process.argv.includes("--dry-run")) {
     console.log("dry run: download and parse only, no database writes");
-    const result = await loadImdbRatings({ target: new MemoryLoadTarget(false) });
-    console.log(result);
+    console.log(await loadImdbRatings({ target: new MemoryLoadTarget(false) }));
     return;
   }
 
-  const db = databaseName(process.env.DATABASE_URL);
-  console.log(`database: ${db ?? "(DATABASE_URL not set)"}`);
-  if (db !== DEV_DATABASE) {
-    throw new Error(`Refusing to load: DATABASE_URL must point at ${DEV_DATABASE}, not ${db ?? "nothing"}.`);
+  if (!existsSync(ENV_FILE)) throw new Error(`Missing ${ENV_FILE} (the potato_dev connection strings).`);
+  const env = parseEnv(readFileSync(ENV_FILE, "utf8"));
+  for (const name of ["DATABASE_URL", "DATABASE_URL_UNPOOLED"] as const) {
+    const db = databaseName(env[name]);
+    if (db !== DEV_DATABASE) throw new Error(`Refusing to load: ${name} in ${ENV_FILE} points at ${db ?? "nothing"}, not ${DEV_DATABASE}.`);
+    process.env[name] = env[name];
   }
-  throw new Error("The Postgres load target is not wired yet (waiting on the db-auth PR). Use --dry-run.");
+  console.log(`database: ${DEV_DATABASE} (${new URL(env.DATABASE_URL!).hostname})`);
+
+  const result = await loadImdbRatings({ target: createPostgresRatingsLoadTarget() });
+  console.log(result);
+  const [{ rows }] = await getDb().select({ rows: count() }).from(imdbRatings);
+  console.log(`imdb_ratings now holds ${rows} rows`);
 }
 
 main().catch((err) => {

@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import type { StreamingService } from "@/core/settings/profile";
-import type { WatchRegion } from "@/core/tmdb/regions";
+import type { WatchRegion } from "@/core/tmdb/types";
 import { changeCountryAction, saveServicesAction } from "./actions";
 
 interface Props {

@@ -1,11 +1,8 @@
 // What the Profile tab shows and changes: the user's settings, the countries
 // to pick from, and the streaming services in the chosen country.
 
-import { logoUrl } from "../tmdb/images";
-import { getTmdbClient, getWatchRegionsFromEnv } from "../tmdb/default-client";
-import type { ProviderListEntry } from "../tmdb/types";
-import type { WatchRegion } from "../tmdb/regions";
 import { ok, type Result } from "../result";
+import { getTmdb, logoUrl, type ProviderListEntry, type WatchRegion } from "../tmdb";
 import { getUserSettings, updateUserSettings, validateSettingsPatch } from "./user-settings";
 
 /** A streaming service as the Profile tab lists it. Data from JustWatch, via TMDB. */
@@ -38,7 +35,7 @@ export function countriesFor(saved: string, regions: readonly WatchRegion[]): Wa
 
 /** The streaming services available in a country (an uppercase ISO code), in TMDB's display order. */
 async function listStreamingServices(country: string): Promise<StreamingService[]> {
-  return toStreamingServices(await getTmdbClient().getProviderList(country));
+  return toStreamingServices(await getTmdb().getProviderList(country));
 }
 
 /**
@@ -51,7 +48,7 @@ export async function getProfileSettings(userId: string): Promise<Result<Profile
   const read = await getUserSettings(userId);
   if (!read.ok) return read;
   const { country, providerIds } = read.value;
-  const [regions, services] = await Promise.allSettled([getWatchRegionsFromEnv(), listStreamingServices(country)]);
+  const [regions, services] = await Promise.allSettled([getTmdb().getWatchRegions(), listStreamingServices(country)]);
   if (regions.status === "rejected") console.error("watch regions unavailable:", regions.reason);
   if (services.status === "rejected") console.error(`streaming services unavailable for ${country}:`, services.reason);
   return ok({
