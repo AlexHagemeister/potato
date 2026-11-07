@@ -9,6 +9,7 @@ import { DeckButtons } from "./deck-buttons";
 import { RatingSheet } from "../_components/rating-sheet";
 import { FilterControl } from "../_components/filter-control";
 import { ModePicker } from "./mode-picker";
+import { NoticePill, UndoPill } from "../_components/toast-pills";
 import type { DeckPageCard } from "@/core/deck-service/types";
 import { DEFAULT_FILTER_CHOICE, describeFilterChoice, isDefaultFilterChoice, type DeckChoice } from "@/core/filters";
 import {
@@ -24,8 +25,6 @@ import {
   useDeck,
   viewOf,
   type DeckView,
-  type Notice,
-  type Toast,
 } from "./store";
 
 /** The loading card: quiet grey blocks in the card's shape, no spinner. */
@@ -136,38 +135,6 @@ function Body({ view, filters, onClearFilters }: { view: Exclude<DeckView, { kin
   }
 }
 
-const PILL = "pointer-events-auto flex min-h-11 items-center gap-2 rounded-full bg-surface-raised py-1 pr-1 pl-4 shadow-xl ring-1 ring-hairline";
-
-/** The Undo toast, with an error notice stacked above it. A notice never replaces the Undo. */
-function Toasts({ toast, notice }: { toast: Toast | null; notice: Notice | null }) {
-  if (!toast && !notice) return null;
-  return (
-    <div
-      role="status"
-      className="pointer-events-none fixed inset-x-4 z-40 flex flex-col items-center gap-2"
-      // Just above the four buttons, so fast taps on them never land on the toast.
-      style={{ bottom: "calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + var(--deck-actions-height) + 0.5rem)" }}
-    >
-      {notice && (
-        <div data-toast="notice" className={PILL}>
-          <span className="text-sm">{notice.message}</span>
-          <button type="button" aria-label="Dismiss" onClick={() => dismissNotice(notice.id)} className="h-9 rounded-full px-3 text-sm text-muted">
-            OK
-          </button>
-        </div>
-      )}
-      {toast && (
-        <div data-toast="undo" className={PILL}>
-          <span className="text-sm">{toast.message}</span>
-          <button type="button" onClick={() => void undoLastSort()} className="h-9 rounded-full px-4 text-sm font-semibold text-accent">
-            Undo
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 /**
  * Discover: the deck, one card at a time, with the four buttons above the tab
  * bar. `settingsKey` names the user's country and services: when it changes,
@@ -201,6 +168,9 @@ export function Deck({
   // failed Pass puts another card on top meanwhile. The sheet covers the
   // screen, so nothing else can be sorted while it is open.
   const [seenCard, setSeenCard] = useState<DeckPageCard | null>(null);
+  // Hidden while the Seen it sheet is open: the sheet covers the screen.
+  const toast = seenCard ? null : state.toast;
+  const notice = seenCard ? null : state.notice;
   const top = useRef<HTMLDivElement>(null);
 
   useEffect(() => startDeck(userId, settingsKey, savedChoice), [userId, settingsKey, savedChoice]);
@@ -220,9 +190,11 @@ export function Deck({
   return (
     <Screen actions={<DeckButtons disabled={!card || seenCard !== null || state.undoing} onTap={onTap} />}>
       <div ref={top} />
+      {/* The Undo toast takes the title's place in this row, clear of the card and the four buttons (issue 50). */}
       <div data-slot="deck-controls" className="mb-3 flex h-11 items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold">Discover</h1>
-        <div className={`flex items-center gap-2 ${ready ? "" : "invisible"}`}>
+        <h1 className={toast ? "sr-only" : "text-lg font-semibold"}>Discover</h1>
+        {toast && <UndoPill message={toast.message} onUndo={() => void undoLastSort()} />}
+        <div className={`flex shrink-0 items-center gap-2 ${ready ? "" : "invisible"}`}>
           <ModePicker value={choice.mode} onChange={(mode) => chooseDeck({ ...choice, mode })} />
           <FilterControl
             compact
@@ -236,6 +208,11 @@ export function Deck({
         <p data-slot="deck-filter-summary" className="-mt-1 mb-3 truncate text-sm text-muted">
           {applied.join(" · ")}
         </p>
+      )}
+      {notice && (
+        <div className="mb-3 flex">
+          <NoticePill message={notice.message} onDismiss={() => dismissNotice(notice.id)} />
+        </div>
       )}
 
       {card ? (
@@ -267,7 +244,6 @@ export function Deck({
           }}
         />
       )}
-      {!seenCard && <Toasts toast={state.toast} notice={state.notice} />}
     </Screen>
   );
 }
