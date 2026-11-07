@@ -150,7 +150,7 @@ export function Deck({ userId }: { userId: string }) {
   const sheetOpen = card !== null && seenFor === titleKey(card);
 
   return (
-    <Screen actions={<DeckButtons disabled={!card || sheetOpen} onTap={onTap} />}>
+    <Screen actions={<DeckButtons disabled={!card || sheetOpen || state.undoing} onTap={onTap} />}>
       <div ref={top} />
       {/* The filter and mode controls go in this row (the next slice). The deck is the blend until then. */}
       <div data-slot="deck-controls" className="mb-3 flex h-8 items-center justify-between">

@@ -70,10 +70,12 @@ export interface DeckState {
   /** A non-card page ("for you" needs ratings first). */
   gate: Extract<DeckPage, { kind: "locked" | "no_seeds" }> | null;
   toast: Toast | null;
+  /** An undo is on its way to the server. The buttons wait, so a new sort can't race it. */
+  undoing: boolean;
 }
 
 function initialState(userId: string | null): DeckState {
-  return { userId, queue: emptyQueue(), fetching: false, failed: false, gate: null, toast: null };
+  return { userId, queue: emptyQueue(), fetching: false, failed: false, gate: null, toast: null, undoing: false };
 }
 
 let state: DeckState = initialState(null);
@@ -161,6 +163,11 @@ async function fill() {
       const body = await fetchPage(state.queue.cursor);
       if (gen !== generation) return;
       if (!body.ok) {
+        // The session ended while the app stayed open: reload, so the shell shows the sign-in screen.
+        if (body.error === "signed_out") {
+          window.location.reload();
+          return;
+        }
         // A stale cursor (the user changed settings): start again once, without it.
         if (body.error === "invalid_deck_query" && state.queue.cursor !== null && !restarted) {
           restarted = true;
@@ -241,16 +248,18 @@ export async function undoLastSort() {
   const gen = generation;
   lastSort = null;
   clearTimeout(toastTimer);
-  set({ toast: null, queue: returnToFront(state.queue, sort.card) });
+  set({ toast: null, undoing: true, queue: returnToFront(state.queue, sort.card) });
 
-  const done = await sort.pending;
-  // A failed sort already put the card back and said so.
-  if (!done.ok || gen !== generation) return;
   let undone: DeckActionResult;
   try {
+    const done = await sort.pending;
+    // A failed sort already put the card back and said so.
+    if (!done.ok) return;
     undone = await undoSortAction(refOf(sort.card), done.outcome);
   } catch {
     undone = { ok: false, error: "Couldn't undo. Check your connection." };
+  } finally {
+    if (gen === generation) set({ undoing: false });
   }
   if (gen !== generation || undone.ok) return;
   // The sort stands, so the card leaves the deck again.
