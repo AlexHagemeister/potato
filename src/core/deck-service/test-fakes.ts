@@ -2,6 +2,7 @@
 // tables and record every call. No network, no database.
 
 import { MemoryRatingsStore } from "../imdb/ratings";
+import { TmdbError } from "../tmdb/http";
 import { ok, type Result } from "../result";
 import type { CountryProviders, TitleDetails, TitleSummary } from "../tmdb/types";
 import { formatTitleKey } from "../title-id";
@@ -60,6 +61,9 @@ export interface FakeWorld {
   failingLists?: Set<string>;
   /** Titles whose details lookups throw. */
   failingDetails?: Set<string>;
+  /** List streams, and titles, that TMDB refuses with an HTTP 400 on every try (a failure a retry will not change). */
+  refusedLists?: Set<string>;
+  refusedDetails?: Set<string>;
   ratings: Map<string, ImdbRating>;
   ratingsThrow?: boolean;
   states: UserTitleState[];
@@ -102,6 +106,7 @@ export function fakeService(w: FakeWorld) {
   const page = (stream: string, n: number, filters: unknown) => {
     calls.lists.push({ stream, page: n, filters });
     if (w.failingLists?.has(stream)) return Promise.reject(new Error(`TMDB down for ${stream}`));
+    if (w.refusedLists?.has(stream)) return Promise.reject(new TmdbError(`TMDB 400 for ${stream}`, 400, stream));
     const pages = w.lists[stream] ?? [];
     return Promise.resolve({ results: pages[n - 1] ?? [], page: n, totalPages: pages.length });
   };
@@ -113,6 +118,7 @@ export function fakeService(w: FakeWorld) {
       const key = formatTitleKey({ mediaType, tmdbId });
       calls.details.push(key);
       if (w.failingDetails?.has(key)) throw new Error(`TMDB down for ${key}`);
+      if (w.refusedDetails?.has(key)) throw new TmdbError(`TMDB 400 for ${key}`, 400, key);
       if (key in w.details) return w.details[key];
       const s = known.get(key);
       return s ? detailsFor(s) : null;

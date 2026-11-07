@@ -450,6 +450,29 @@ describe("getDeck: failures", () => {
     expect(cardsOf(page).map((c) => c.imdb.kind)).toEqual(["unavailable", "unavailable", "unavailable"]);
   });
 
+  test("a list TMDB refuses for good ends that stream, so it never blocks the deck as the last one left", async () => {
+    const w = world({
+      lists: { "popular:movie": [range("movie", 1, 5)], "popular:tv": [range("tv", 1, 5)] },
+      refusedLists: new Set(["popular:tv"]),
+    });
+    const { page } = await deck(w, { mode: "popular" });
+    expect(keysOf(cardsOf(page))).toEqual(range("movie", 1, 5).map(formatTitleKey));
+    expect((page as { nextCursor: string | null }).nextCursor).toBeNull();
+    // A transient failure on the same list keeps its place instead (the test above), so an outage never ends it.
+    w.refusedLists = new Set();
+    w.failingLists = new Set(["popular:tv"]);
+    await expect(fakeService(w).service.getDeck(USER, { mode: "popular", filters: { mediaTypes: ["tv"] } })).rejects.toThrow(
+      /every TMDB list lookup failed/,
+    );
+  });
+
+  test("titles TMDB refuses for good never count as an outage, even a final page of three", async () => {
+    const w = world({ lists: { "popular:movie": [range("movie", 1, 3)] }, refusedDetails: new Set(["movie:1", "movie:2", "movie:3"]) });
+    const { page } = await deck(w, moviesOnly);
+    expect(cardsOf(page)).toEqual([]);
+    expect((page as { nextCursor: string | null }).nextCursor).toBeNull();
+  });
+
   test("every list failing throws instead of returning a cursor that cannot move", async () => {
     const w = world({ failingLists: new Set(["popular:movie", "popular:tv"]) });
     const { service } = fakeService(w);

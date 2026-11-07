@@ -27,6 +27,7 @@ import { parseFilters } from "../library/list";
 import { fail, ok, validateUserId, type Result } from "../result";
 import { DISCOVER_POOLS, streamingProviderIds, type DiscoverPool, type TmdbClient } from "../tmdb/client";
 import { TMDB_MAX_PAGE, TMDB_YEAR_RANGE } from "../tmdb/constants";
+import { isPermanentTmdbFailure } from "../tmdb/http";
 import type { DiscoverFilters, ResultPage, TitleDetails, TitleSummary } from "../tmdb/types";
 import { titleIdError, tryFormatTitleKey } from "../title-id";
 import {
@@ -233,7 +234,8 @@ export function createDeckService(deps: DeckServiceDeps) {
         const d = await tmdb.getTitleDetails(s.mediaType, s.tmdbId);
         if (d) details.set(key, d);
       } catch (err) {
-        detailFailures++;
+        // A request TMDB will always refuse is a title it cannot serve, like a 404: skip it, never count it as an outage.
+        if (!isPermanentTmdbFailure(err)) detailFailures++;
         console.warn(`deck: details lookup failed for ${key}, leaving it out of this page:`, err);
       }
     });
@@ -441,7 +443,9 @@ function deckUserState(s: UserTitleState | undefined): CardUserState | null {
 /**
  * One TMDB list, read forward from a position. It reads at most
  * MAX_PAGES_PER_STREAM pages per call. A failed read leaves the position
- * where it was, so the next call retries it.
+ * where it was, so the next call retries it, unless TMDB refused the request
+ * in a way a retry will not change (isPermanentTmdbFailure): then the stream
+ * ends, as on a 404, so a list that always fails cannot block the deck.
  */
 class Stream {
   private page: number;
@@ -481,6 +485,12 @@ class Stream {
       this.totalPages = page.totalPages;
       return true;
     } catch (err) {
+      if (isPermanentTmdbFailure(err)) {
+        this.exhausted = true;
+        this.progressed = true;
+        console.warn(`deck: TMDB refused ${streamId(this.spec)} page ${this.page} for good, ending that stream:`, err);
+        return false;
+      }
       this.failed = true;
       console.warn(`deck: TMDB list lookup failed for ${streamId(this.spec)} page ${this.page}:`, err);
       return false;
