@@ -210,8 +210,9 @@ export function createDeckService(deps: DeckServiceDeps) {
     // Read every stream's current page in parallel, then take titles pool by pool.
     await Promise.all(streams.map((s) => s.load()));
     const visible = createVisibilityCheck(states.value, now);
-    // "On my services" needs availability, which the details bring. It is checked by the engine after enrichment.
-    const matches = createFilterMatcher({ ...filters, onMyServices: false }, []);
+    // "On my services" needs availability, and a minimum IMDb rating needs the IMDb ID, both of which the details
+    // bring. The engine checks them after enrichment. A list summary has neither, so checking them here would take nothing.
+    const matches = createFilterMatcher({ ...filters, onMyServices: false, minImdbRating: undefined }, []);
     const taken = await Promise.all(
       active.map(({ pool, weight }) =>
         takeFromPool(
@@ -251,6 +252,11 @@ export function createDeckService(deps: DeckServiceDeps) {
     }
     const imdbIds = [...details.values()].map((d) => d.imdbId).filter((id): id is string => id !== null);
     const ratingMap = await lookupRatings(imdbIds);
+    // With a minimum IMDb rating, ratings that can't be read would drop every title while the cursor moves past
+    // them, and the deck would read as empty. That is an outage: throw before the cursor moves, as for TMDB.
+    if (typeof filters.minImdbRating === "number" && ratingMap === "unavailable") {
+      throw new Error("getDeck: IMDb ratings are unavailable, so a minimum IMDb rating can't be applied");
+    }
 
     const candidatePools: Partial<Record<PoolName, Candidate[]>> = {};
     pools.forEach((pool, i) => {

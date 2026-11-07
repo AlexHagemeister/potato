@@ -6,6 +6,8 @@ import {
   DEFAULT_FILTER_CHOICE,
   ERA_CHOICES,
   ERA_LABELS,
+  MIN_RATING_CHOICES,
+  MIN_RATING_LABELS,
   TYPE_CHOICES,
   TYPE_LABELS,
   describeFilterChoice,
@@ -156,6 +158,25 @@ function FilterSheet({
               <Chip key={e} role="radio" on={draft.era === e} onClick={() => edit({ era: e })}>
                 {ERA_LABELS[e]}
               </Chip>
+            ))}
+          </div>
+        </Section>
+
+        <Section label="IMDb rating" note="At least">
+          <div role="radiogroup" aria-label="Minimum IMDb rating" className="grid grid-cols-4 gap-1 rounded-xl bg-surface p-1">
+            {MIN_RATING_CHOICES.map((r) => (
+              <button
+                key={r}
+                type="button"
+                role="radio"
+                aria-checked={draft.minRating === r}
+                onClick={() => edit({ minRating: r })}
+                className={`h-11 rounded-lg text-sm font-semibold ${
+                  draft.minRating === r ? "bg-surface-raised text-foreground" : "text-muted"
+                }`}
+              >
+                {MIN_RATING_LABELS[r]}
+              </button>
             ))}
           </div>
         </Section>

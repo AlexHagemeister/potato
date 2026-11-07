@@ -1,8 +1,9 @@
 // What the filter control holds, and how it becomes the deck's filters.
 //
 // The control speaks in user terms: a type (movies, series, or both), named
-// genres, an era preset, and "on my services". Core turns that into the
-// engine's DeckFilters (TMDB genre IDs and year bounds), so the Discover deck,
+// genres, an era preset, a minimum IMDb rating preset, and "on my services".
+// Core turns that into the engine's DeckFilters (TMDB genre IDs, year bounds,
+// and a number), so the Discover deck,
 // the Lists tab, and a future AI connection all read one choice the same way
 // (CLAUDE.md rule 3). Pure and browser-safe: the client control imports it.
 
@@ -67,17 +68,37 @@ export const ERA_LABELS: Record<EraChoice, string> = {
   before1990: "Before 1990",
 };
 
+/**
+ * Minimum IMDb rating presets (issue 52). Saved as preset names, like the era,
+ * so a saved choice never holds a number the control can't show.
+ */
+export const MIN_RATING_CHOICES = ["any", "7", "7.5", "8"] as const;
+export type MinRatingChoice = (typeof MIN_RATING_CHOICES)[number];
+
+export const MIN_RATING_LABELS: Record<MinRatingChoice, string> = { any: "Any", "7": "7+", "7.5": "7.5+", "8": "8+" };
+
+/** The rating each preset requires, on IMDb's 0 to 10 scale. Null for no minimum. */
+const MIN_RATING_VALUES: Record<MinRatingChoice, number | null> = { any: null, "7": 7, "7.5": 7.5, "8": 8 };
+
 /** The control's state. Plain JSON, so it crosses the server action boundary and the URL as is. */
 export interface FilterChoice {
   type: TypeChoice;
   /** GenreGroup keys. A title in any of them matches (the engine's any-of rule). */
   genres: string[];
   era: EraChoice;
+  /** The lowest IMDb rating a title may have. A title with no IMDb rating fails any minimum. */
+  minRating: MinRatingChoice;
   onMyServices: boolean;
 }
 
 /** No filter. Treat as read-only: normalizeFilterChoice returns fresh copies. */
-export const DEFAULT_FILTER_CHOICE: Readonly<FilterChoice> = { type: "all", genres: [], era: "any", onMyServices: false };
+export const DEFAULT_FILTER_CHOICE: Readonly<FilterChoice> = {
+  type: "all",
+  genres: [],
+  era: "any",
+  minRating: "any",
+  onMyServices: false,
+};
 
 function mediaTypesOf(type: TypeChoice): MediaType[] {
   return type === "all" ? ["movie", "tv"] : [type];
@@ -113,7 +134,8 @@ const isOneOf = <T extends string>(list: readonly T[], v: unknown): v is T => (l
 
 /**
  * A clean choice from untrusted input (a server action argument, a parsed
- * URL). Lenient: an unknown type or era falls back to the default, and an
+ * URL, a choice saved before a field existed). Lenient: an unknown or missing
+ * type, era, or minimum rating falls back to the default, and an
  * unknown genre, a duplicate, or a genre that does not exist for the chosen
  * type is dropped. Genres come back in display order, so equal choices
  * compare equal.
@@ -127,7 +149,8 @@ export function normalizeFilterChoice(input: unknown): FilterChoice {
     .filter((g) => wanted.has(g.key))
     .map((g) => g.key);
   const era = isOneOf(ERA_CHOICES, raw.era) ? raw.era : DEFAULT_FILTER_CHOICE.era;
-  return { type, genres, era, onMyServices: raw.onMyServices === true };
+  const minRating = isOneOf(MIN_RATING_CHOICES, raw.minRating) ? raw.minRating : DEFAULT_FILTER_CHOICE.minRating;
+  return { type, genres, era, minRating, onMyServices: raw.onMyServices === true };
 }
 
 /**
@@ -149,28 +172,31 @@ export function toDeckFilters(choice: FilterChoice, now: Date): DeckFilters {
   const era = eraBounds(clean.era, now);
   if (era) filters.era = era;
   if (clean.onMyServices) filters.onMyServices = true;
+  const minImdbRating = MIN_RATING_VALUES[clean.minRating];
+  if (minImdbRating !== null) filters.minImdbRating = minImdbRating;
   return filters;
 }
 
 /** True when the choice filters nothing. */
 export function isDefaultFilterChoice(choice: FilterChoice): boolean {
   const c = normalizeFilterChoice(choice);
-  return c.type === "all" && c.genres.length === 0 && c.era === "any" && !c.onMyServices;
+  return c.type === "all" && c.genres.length === 0 && c.era === "any" && c.minRating === "any" && !c.onMyServices;
 }
 
-/** Short labels for what the choice filters, in control order: type, genres, era, services. Empty for no filter. */
+/** Short labels for what the choice filters, in control order: type, genres, era, rating, services. Empty for no filter. */
 export function describeFilterChoice(choice: FilterChoice): string[] {
   const c = normalizeFilterChoice(choice);
   const parts: string[] = [];
   if (c.type !== "all") parts.push(TYPE_LABELS[c.type]);
   for (const key of c.genres) parts.push(GENRES_BY_KEY.get(key)!.label);
   if (c.era !== "any") parts.push(ERA_LABELS[c.era]);
+  if (c.minRating !== "any") parts.push(`IMDb ${MIN_RATING_LABELS[c.minRating]}`);
   if (c.onMyServices) parts.push("My services");
   return parts;
 }
 
 /** The query parameter names. Short, since they show in the address bar. */
-const PARAM = { type: "type", genres: "genre", era: "era", onMyServices: "mine" } as const;
+const PARAM = { type: "type", genres: "genre", era: "era", minRating: "imdb", onMyServices: "mine" } as const;
 
 /** The query parameters for a choice, defaults left out. Genres join with commas. */
 export function filterChoiceToParams(choice: FilterChoice): Record<string, string> {
@@ -179,6 +205,7 @@ export function filterChoiceToParams(choice: FilterChoice): Record<string, strin
   if (c.type !== "all") out[PARAM.type] = c.type;
   if (c.genres.length) out[PARAM.genres] = c.genres.join(",");
   if (c.era !== "any") out[PARAM.era] = c.era;
+  if (c.minRating !== "any") out[PARAM.minRating] = c.minRating;
   if (c.onMyServices) out[PARAM.onMyServices] = "1";
   return out;
 }
@@ -199,6 +226,7 @@ export function filterChoiceFromParams(params: URLSearchParams | Record<string, 
     type: get(PARAM.type),
     genres: (get(PARAM.genres) ?? "").split(",").filter(Boolean),
     era: get(PARAM.era),
+    minRating: get(PARAM.minRating),
     onMyServices: get(PARAM.onMyServices) === "1",
   });
 }

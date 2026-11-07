@@ -527,6 +527,28 @@ try {
       const genreOnly = unwrap(await lib.getList(D, "watchlist", { filters: { genreIds: [10765] }, lookupDetails }));
       assert.equal(genreOnly.entries.length, 2);
       assert.deepEqual(countries, ["US", undefined], "no country without on my services");
+      // A minimum IMDb rating asks the lookup for ratings, and keeps only the rows rated at or above it.
+      const contexts: unknown[] = [];
+      const ratedLookup = async (refs: readonly TitleId[], context?: { country?: string; imdbRatings?: boolean }) => {
+        contexts.push(context);
+        return new Map(
+          refs.map((r) => [
+            `${r.mediaType}:${r.tmdbId}`,
+            {
+              ...r,
+              title: "x",
+              popularity: 1,
+              tmdbVoteAverage: 9,
+              tmdbVoteCount: 10,
+              ...meta.get(r.tmdbId)!,
+              ...(r.tmdbId === sciFiOnNetflix.tmdbId ? { imdb: { rating: 8.1, votes: 5000 } } : {}),
+            },
+          ]),
+        );
+      };
+      const rated = unwrap(await lib.getList(D, "watchlist", { filters: { minImdbRating: 7.5 }, lookupDetails: ratedLookup }));
+      assert.deepEqual(rated.entries.map((e) => e.tmdbId), [sciFiOnNetflix.tmdbId]);
+      assert.deepEqual(contexts, [{ imdbRatings: true }], "a minimum IMDb rating asks the lookup for ratings");
       const tvOnly = unwrap(await lib.getList(D, "watchlist", { filters: { mediaTypes: ["tv"] } }));
       assert.equal(tvOnly.entries.length, 2, "media type needs no lookup");
       unwrap(await lib.updateUserSettings(D, { providerIds: [] }));
@@ -572,10 +594,10 @@ try {
     await db.insert(users).values({ id: D, name: "Integration Deck Choice", email: `${D}@example.invalid` });
     try {
       // No settings row yet: the read creates it and gives the default.
-      assert.deepEqual(unwrap(await lib.getDeckChoice(D)), { mode: "blend", filters: { type: "all", genres: [], era: "any", onMyServices: false } });
-      const choice = { mode: "top_rated", filters: { type: "tv", genres: ["scifi", "nosuchgenre"], era: "recent", onMyServices: true } };
+      assert.deepEqual(unwrap(await lib.getDeckChoice(D)), { mode: "blend", filters: { type: "all", genres: [], era: "any", minRating: "any", onMyServices: false } });
+      const choice = { mode: "top_rated", filters: { type: "tv", genres: ["scifi", "nosuchgenre"], era: "recent", minRating: "7.5", onMyServices: true } };
       const saved = unwrap(await lib.saveDeckChoice(D, choice));
-      assert.deepEqual(saved, { mode: "top_rated", filters: { type: "tv", genres: ["scifi"], era: "recent", onMyServices: true } });
+      assert.deepEqual(saved, { mode: "top_rated", filters: { type: "tv", genres: ["scifi"], era: "recent", minRating: "7.5", onMyServices: true } });
       assert.deepEqual(unwrap(await lib.getDeckChoice(D)), saved);
       // A settings change keeps the choice, and the choice keeps the settings.
       unwrap(await lib.updateUserSettings(D, { providerIds: [8] }));

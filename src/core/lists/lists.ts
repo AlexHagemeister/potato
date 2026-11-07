@@ -7,12 +7,14 @@
 // review edits, undo) are the library's moveTitle, updateRatingReview, and
 // restoreTitleState. Callers use those directly.
 
+import { getRatingsForFilter, type RatingsDatasetProbe, type RatingsStore } from "../imdb/ratings";
+import { PostgresRatingsStore } from "../imdb/postgres";
 import { getList } from "../library/queries";
 import type { DetailsLookupContext, TitleDetailsLookup, TitleRecord } from "../library/types";
 import { ok, type Result } from "../result";
 import { formatTitleKey } from "../title-id";
 import { getTmdb, posterUrl, ROW_POSTER_SIZE, type DetailsCore, type TmdbClient } from "../tmdb";
-import { LIST_STATUSES, type DeckFilters, type ListStatus, type TitleId } from "../types";
+import { LIST_STATUSES, type DeckFilters, type ImdbRating, type ListStatus, type TitleId } from "../types";
 
 /** Rows per page. Enough to fill several screens, small enough that a cold metadata cache stays quick. */
 export const LISTS_PAGE_SIZE = 50;
@@ -43,27 +45,49 @@ export interface ListRowsPage {
   nextCursor: string | null;
 }
 
+let ratingsStore: PostgresRatingsStore | undefined;
+/** The app's IMDb ratings store, created on first use (no database access at import time). */
+const appRatings = () => (ratingsStore ??= new PostgresRatingsStore());
+
+/** A title's display metadata, plus its IMDb rating when the lookup was asked for it. */
+export type TitleInfo = DetailsCore & { imdb?: ImdbRating };
+
 /**
  * Display metadata for many titles, keyed by formatTitleKey. A missing title
  * is unknown. With a country in the context, each title also carries
- * providerIds for that country (see DetailsLookupContext).
+ * providerIds for that country, and with imdbRatings, its IMDb rating (see
+ * DetailsLookupContext).
  */
 export type TitleInfoLookup = (
   refs: readonly TitleId[],
   context?: DetailsLookupContext,
-) => Promise<ReadonlyMap<string, DetailsCore>>;
+) => Promise<ReadonlyMap<string, TitleInfo>>;
 
 /**
- * The lists' lookup over a TMDB client. Display metadata comes from the cached
- * details, with no streaming refresh. Only when a filter asks for a country
- * (the "on my services" filter) does it add where each title streams there.
+ * The lists' lookup over a TMDB client and the IMDb ratings store. Display
+ * metadata comes from the cached details, with no streaming refresh. Only when
+ * a filter asks for a country (the "on my services" filter) does it add where
+ * each title streams there. Only when a filter asks for IMDb ratings (a
+ * minimum IMDb rating) does it read them, through the IMDb module (CLAUDE.md
+ * rule 4). It throws when the ratings can't be read, so the list shows a
+ * failure instead of emptying under the filter.
  */
-export function createTitleInfoLookup(tmdb: Pick<TmdbClient, "lookupTitles" | "attachProviderIds">): TitleInfoLookup {
+export function createTitleInfoLookup(
+  tmdb: Pick<TmdbClient, "lookupTitles" | "attachProviderIds">,
+  ratings: () => RatingsStore & RatingsDatasetProbe = appRatings,
+): TitleInfoLookup {
   return async (refs, context) => {
-    const found = await tmdb.lookupTitles(refs);
-    if (!context?.country) return found;
-    const withProviders = await tmdb.attachProviderIds([...found.values()], context.country);
-    return new Map(withProviders.map((info) => [formatTitleKey(info), info]));
+    let infos: TitleInfo[] = [...(await tmdb.lookupTitles(refs)).values()];
+    if (context?.country) infos = await tmdb.attachProviderIds(infos, context.country);
+    if (context?.imdbRatings) {
+      const ids = infos.map((i) => i.imdbId).filter((id): id is string => id !== null);
+      const found = await getRatingsForFilter(ratings(), ids);
+      infos = infos.map((i) => {
+        const r = i.imdbId === null ? undefined : found.get(i.imdbId);
+        return r ? { ...i, imdb: { rating: r.rating, votes: r.votes } } : i;
+      });
+    }
+    return new Map(infos.map((info) => [formatTitleKey(info), info]));
   };
 }
 

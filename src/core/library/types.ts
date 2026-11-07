@@ -106,6 +106,13 @@ export interface DetailsLookupContext {
    * this country, or leave them undefined (unknown) when it cannot.
    */
   country?: string;
+  /**
+   * Set when a filter reads the IMDb rating (a minimum IMDb rating). The
+   * lookup must then fill each candidate's `imdb` from IMDb's dataset, leave
+   * it absent for a title IMDb has no rating for, and throw when the ratings
+   * can't be read, so a list never reads "no rating" on IMDb's behalf.
+   */
+  imdbRatings?: boolean;
 }
 
 export interface ListOptions {

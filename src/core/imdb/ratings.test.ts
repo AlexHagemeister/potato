@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Candidate } from "../types";
-import { attachImdbRatings, getRatings, MemoryRatingsStore } from "./ratings";
+import { attachImdbRatings, getRatings, getRatingsForFilter, MemoryRatingsStore } from "./ratings";
 
 const store = () =>
   new MemoryRatingsStore(
@@ -33,6 +33,34 @@ describe("getRatings", () => {
     const spy = { getMany: async () => ((called = true), new Map()) };
     expect((await getRatings(spy, ["", "nm0000206"])).size).toBe(0);
     expect(called).toBe(false);
+  });
+});
+
+describe("getRatingsForFilter", () => {
+  test("returns what the store has, without a probe when it found any", async () => {
+    let probes = 0;
+    const s = store();
+    const counted = { getMany: (ids: readonly string[]) => s.getMany(ids), hasAnyRatings: async () => (probes++, true) };
+    const m = await getRatingsForFilter(counted, ["tt0133093", "tt0000001"]);
+    expect([...m.keys()]).toEqual(["tt0133093"]);
+    expect(probes).toBe(0);
+  });
+
+  test("finding nothing in a loaded table is an answer: no title is rated", async () => {
+    expect((await getRatingsForFilter(store(), ["tt0000001"])).size).toBe(0);
+  });
+
+  test("finding nothing in an empty table throws, so a filter never reads it as no rating", async () => {
+    await expect(getRatingsForFilter(new MemoryRatingsStore(), ["tt0000001"])).rejects.toThrow(/not loaded/);
+  });
+
+  test("no IMDb IDs to look up is an empty answer, with no probe", async () => {
+    expect((await getRatingsForFilter(new MemoryRatingsStore(), ["", "nm0000206"])).size).toBe(0);
+  });
+
+  test("a failed lookup throws", async () => {
+    const broken = { getMany: () => Promise.reject(new Error("db down")), hasAnyRatings: async () => true };
+    await expect(getRatingsForFilter(broken, ["tt0133093"])).rejects.toThrow(/db down/);
   });
 });
 

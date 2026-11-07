@@ -30,6 +30,25 @@ export async function getRatings(store: RatingsStore, imdbIds: readonly string[]
 }
 
 /**
+ * Batch lookup for a caller that filters on the rating, where a missing
+ * rating drops the title. A missing row only means "IMDb has no rating" once
+ * the dataset is known to be loaded, so when the lookup finds nothing this
+ * asks the store whether it holds any rows, and throws if it holds none (the
+ * first daily load has not landed). A failed lookup throws as well. Either
+ * way the caller shows a failure, never a list emptied on IMDb's behalf.
+ */
+export async function getRatingsForFilter(
+  store: RatingsStore & RatingsDatasetProbe,
+  imdbIds: readonly string[],
+): Promise<Map<string, ImdbRating>> {
+  const found = await getRatings(store, imdbIds);
+  if (found.size === 0 && imdbIds.some((id) => TCONST.test(id)) && !(await store.hasAnyRatings())) {
+    throw new Error("IMDb ratings are not loaded yet, so a minimum IMDb rating can't be applied");
+  }
+  return found;
+}
+
+/**
  * Returns copies of the candidates with `imdb` set from the ratings store.
  * `imdbIds` maps formatTitleKey(candidate) to its IMDb ID, as the TMDB
  * client's resolveImdbIds returns it. A candidate with no IMDb ID or no
