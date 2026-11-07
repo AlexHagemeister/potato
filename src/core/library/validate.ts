@@ -2,7 +2,8 @@
 // constraints. Checking here too turns bad input into a typed error the
 // caller can show, instead of a constraint violation.
 
-import { TITLE_STATUSES, type TitleId, type TitleStatus } from "../types";
+import { TITLE_STATUSES } from "@/db/schema";
+import type { TitleId, TitleStatus } from "../types";
 import { fail, ok, type LibraryResult } from "./errors";
 import { RATING_MAX, RATING_MIN, REVIEW_MAX_LENGTH, type TitleRecord } from "./types";
 
