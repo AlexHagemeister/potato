@@ -24,7 +24,7 @@ import { FOREIGN_KEY_VIOLATION, pgErrorCode } from "../pg-error";
 import { fail, ok, validateUserId, type Result } from "../result";
 import type { TitleId } from "../types";
 import { recordFromJson } from "./rows";
-import { columnsFor, planMove, planRatingReviewPatch, type CardIntent, type StatusColumns } from "./transitions";
+import { CARD_SEEN_FROM, columnsFor, planMove, planRatingReviewPatch, type CardIntent, type StatusColumns } from "./transitions";
 import type { ActionOptions, ActionOutcome, MoveRequest, RatingReviewPatch, TitleRecord, UndoInput } from "./types";
 import { parseTitleRecord, validateTitleRef } from "./validate";
 
@@ -87,10 +87,15 @@ function conflict(before: TitleRecord | null, expected: TitleRecord["status"][])
  * One upsert under the composite primary key. A title has one row per user,
  * so writing a status moves the title off whatever list it was on (VISION
  * invariant 3). created_at keeps the first time the user acted on the title.
+ *
+ * A Seen write changes an existing row only while it is not Seen yet
+ * (CARD_SEEN_FROM). On a Seen row it writes nothing and returns no row. The
+ * condition sits in ON CONFLICT DO UPDATE, which Postgres checks against the
+ * row it has locked, so it holds even against a write landing at the same
+ * instant.
  */
 function upsertWrite(userId: string, ref: TitleId, c: StatusColumns, now: Date): SQL {
-  // keepReview only comes with a Seen write, and only a Seen row can hold a review.
-  const review = c.keepReview ? sql`t.review` : sql`excluded.review`;
+  const guard = c.status === "seen" ? sql`where t.status <> 'seen'` : sql``;
   return sql`
     insert into title_status as t
       (user_id, media_type, tmdb_id, status, rating, review, skip_until, created_at, updated_at)
@@ -100,9 +105,10 @@ function upsertWrite(userId: string, ref: TitleId, c: StatusColumns, now: Date):
     on conflict (user_id, media_type, tmdb_id) do update set
       status = excluded.status,
       rating = excluded.rating,
-      review = ${review},
+      review = excluded.review,
       skip_until = excluded.skip_until,
       updated_at = excluded.updated_at
+    ${guard}
     returning t.*`;
 }
 
@@ -115,6 +121,8 @@ async function cardAction(userId: unknown, ref: unknown, intent: CardIntent, opt
   const { userId: u, ref: r } = ids.value;
   return guardUser(async () => {
     const { before, written } = await withPrevious(u, r, upsertWrite(u, r, columns.value, now));
+    // Only a guarded Seen write can leave no row: the title is Seen already.
+    if (!written) return conflict(before, [...CARD_SEEN_FROM]);
     return ok({ previous: before, current: written });
   });
 }
@@ -135,9 +143,13 @@ export function skipTitle(userId: string, ref: TitleId, options: ActionOptions =
 }
 
 /**
- * Seen it: the title goes to the Seen list with this rating (required). The
- * review is optional. Leaving it out keeps the review the title already has,
- * so re-rating never erases a review. A null or blank review clears it.
+ * Seen it: the title goes to the Seen list with this rating (required) and an
+ * optional review (left out, null, or blank means none). It moves a title
+ * that is on no list or on another list (CARD_SEEN_FROM). A title already
+ * Seen is left exactly as it is and the result is wrong_state, because its
+ * review may have been written elsewhere (another device, the AI connection)
+ * and the caller has not shown it. To change a Seen title's rating or
+ * review, use updateRatingReview.
  */
 export function markSeen(
   userId: string,

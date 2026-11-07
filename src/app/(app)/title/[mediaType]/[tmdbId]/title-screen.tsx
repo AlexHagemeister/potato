@@ -178,7 +178,8 @@ export function TitleScreen({ card }: { card: Card }) {
 
   async function saveSeen(rating: number, review: string): Promise<string | null> {
     // A Seen title's rating is edited the way the Lists tab edits it: core changes it only while the title is
-    // still Seen, so a change made elsewhere (another device) is never silently overwritten.
+    // still Seen. Seen it on any other title moves it only while it is not Seen yet (issue 65). Either way, a
+    // rating or review written elsewhere (another device) is never silently overwritten.
     if (state?.status === "seen") return editSeen(rating, review);
     let result: DeckActionResult;
     try {
@@ -186,6 +187,7 @@ export function TitleScreen({ card }: { card: Card }) {
     } catch {
       result = { ok: false, error: "Couldn't save. Check your connection." };
     }
+    if (!result.ok && result.stale) return reloadStale();
     if (!result.ok) return result.error;
     setSeenOpen(false);
     done("seen", result.outcome);
@@ -205,6 +207,10 @@ export function TitleScreen({ card }: { card: Card }) {
       return null;
     }
     if (!result.stale) return result.error;
+    return reloadStale();
+  }
+
+  function reloadStale(): null {
     // The title moved since this card loaded. Reload it from the server: page.tsx keys this screen on the
     // title's state, so the screen starts over with where the title is now.
     setSeenOpen(false);

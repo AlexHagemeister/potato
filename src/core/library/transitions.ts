@@ -13,14 +13,18 @@ export interface StatusColumns {
   status: TitleStatus;
   rating: number | null;
   review: string | null;
-  /**
-   * Keep the row's current review instead of writing `review`. Only a Seen
-   * write can set it, so it keeps a review only when the title is already Seen
-   * (the schema allows a review on no other status).
-   */
-  keepReview: boolean;
   skipUntil: Date | null;
 }
+
+/**
+ * Where a title can be when Seen it is tapped on a card: on no list, or on
+ * one of these. A title already Seen is changed only by a rating and review
+ * edit (updateRatingReview), which shows the current review first. So a card
+ * that went stale while the title was rated on another device can never
+ * replace or clear a review the user was not shown (issue 65, VISION
+ * invariant 6).
+ */
+export const CARD_SEEN_FROM: readonly TitleStatus[] = ["watchlist", "passed", "skipped"];
 
 /** The four card buttons, as row writes. */
 export type CardIntent =
@@ -34,15 +38,15 @@ export function columnsFor(intent: CardIntent, now: Date): Result<StatusColumns>
   switch (intent.status) {
     case "watchlist":
     case "passed":
-      return ok({ status: intent.status, rating: null, review: null, keepReview: false, skipUntil: null });
+      return ok({ status: intent.status, rating: null, review: null, skipUntil: null });
     case "skipped":
-      return ok({ status: "skipped", rating: null, review: null, keepReview: false, skipUntil: skipUntilFrom(now) });
+      return ok({ status: "skipped", rating: null, review: null, skipUntil: skipUntilFrom(now) });
     case "seen": {
       const rating = validateRating(intent.rating);
       if (!rating.ok) return rating;
       const review = validateReview(intent.review);
       if (!review.ok) return review;
-      return ok({ status: "seen", rating: rating.value, review: review.value, keepReview: intent.review === undefined, skipUntil: null });
+      return ok({ status: "seen", rating: rating.value, review: review.value, skipUntil: null });
     }
   }
 }
@@ -74,9 +78,9 @@ export function planMove(move: MoveRequest): Result<{ from: TitleStatus; columns
     if (!rating.ok) return rating;
     const review = validateReview(move.review);
     if (!review.ok) return review;
-    return ok({ from: move.from, columns: { status: "seen", rating: rating.value, review: review.value, keepReview: false, skipUntil: null } });
+    return ok({ from: move.from, columns: { status: "seen", rating: rating.value, review: review.value, skipUntil: null } });
   }
-  return ok({ from: move.from, columns: { status: "watchlist", rating: null, review: null, keepReview: false, skipUntil: null } });
+  return ok({ from: move.from, columns: { status: "watchlist", rating: null, review: null, skipUntil: null } });
 }
 
 /** The fields a rating and review edit sets. Absent fields stay as they are. */

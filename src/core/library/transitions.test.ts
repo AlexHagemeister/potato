@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { SKIP_DAYS } from "../deck/constants";
-import { ALLOWED_MOVES, columnsFor, isAllowedMove, planMove, planRatingReviewPatch } from "./transitions";
+import { ALLOWED_MOVES, CARD_SEEN_FROM, columnsFor, isAllowedMove, planMove, planRatingReviewPatch } from "./transitions";
 import type { MoveRequest } from "./types";
 
 const now = new Date("2026-11-06T12:00:00.000Z");
@@ -8,7 +8,7 @@ const now = new Date("2026-11-06T12:00:00.000Z");
 describe("columnsFor: every card action sets all four status columns", () => {
   test("watchlist and passed clear rating, review, and skipUntil", () => {
     for (const status of ["watchlist", "passed"] as const) {
-      expect(columnsFor({ status }, now)).toEqual({ ok: true, value: { status, rating: null, review: null, keepReview: false, skipUntil: null } });
+      expect(columnsFor({ status }, now)).toEqual({ ok: true, value: { status, rating: null, review: null, skipUntil: null } });
     }
   });
 
@@ -24,22 +24,21 @@ describe("columnsFor: every card action sets all four status columns", () => {
   test("seen carries the rating and review and clears skipUntil", () => {
     expect(columnsFor({ status: "seen", rating: 4, review: "Good." }, now)).toEqual({
       ok: true,
-      value: { status: "seen", rating: 4, review: "Good.", keepReview: false, skipUntil: null },
+      value: { status: "seen", rating: 4, review: "Good.", skipUntil: null },
     });
   });
 
-  test("seen with the review left out keeps the existing review; null or blank clears it", () => {
-    expect(columnsFor({ status: "seen", rating: 0.5 }, now)).toMatchObject({ ok: true, value: { review: null, keepReview: true } });
-    for (const review of [null, "", "  "]) {
-      expect(columnsFor({ status: "seen", rating: 0.5, review }, now)).toMatchObject({
+  test("seen with the review left out, null, or blank writes no review", () => {
+    for (const review of [undefined, null, "", "  "]) {
+      expect(columnsFor({ status: "seen", rating: 0.5, review }, now)).toEqual({
         ok: true,
-        value: { review: null, keepReview: false },
+        value: { status: "seen", rating: 0.5, review: null, skipUntil: null },
       });
     }
   });
 
-  test("the skipped column set never keeps a review", () => {
-    expect(columnsFor({ status: "skipped" }, now)).toMatchObject({ ok: true, value: { keepReview: false } });
+  test("a card's Seen it moves a title from no list or another list, never from Seen (issue 65)", () => {
+    expect([...CARD_SEEN_FROM].sort()).toEqual(["passed", "skipped", "watchlist"]);
   });
 
   test("seen needs a valid rating", () => {
@@ -74,7 +73,7 @@ describe("list moves", () => {
   test("Watchlist to Seen needs a rating and keeps the review", () => {
     expect(planMove({ from: "watchlist", to: "seen", rating: 5, review: "Loved it." })).toEqual({
       ok: true,
-      value: { from: "watchlist", columns: { status: "seen", rating: 5, review: "Loved it.", keepReview: false, skipUntil: null } },
+      value: { from: "watchlist", columns: { status: "seen", rating: 5, review: "Loved it.", skipUntil: null } },
     });
     expect(planMove({ from: "watchlist", to: "seen" } as unknown as MoveRequest)).toMatchObject({
       ok: false,
@@ -85,7 +84,7 @@ describe("list moves", () => {
   test("Passed to Watchlist clears everything else", () => {
     expect(planMove({ from: "passed", to: "watchlist" })).toEqual({
       ok: true,
-      value: { from: "passed", columns: { status: "watchlist", rating: null, review: null, keepReview: false, skipUntil: null } },
+      value: { from: "passed", columns: { status: "watchlist", rating: null, review: null, skipUntil: null } },
     });
   });
 

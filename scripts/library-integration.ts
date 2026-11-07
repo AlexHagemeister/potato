@@ -156,6 +156,8 @@ try {
     const statuses = Object.keys(actions) as (keyof typeof actions)[];
     for (const from of statuses) {
       for (const to of statuses) {
+        // Seen it on a Seen title refuses (issue 65), checked below.
+        if (from === "seen" && to === "seen") continue;
         const ref = fresh();
         const first = unwrap(await actions[from](ref, tick()));
         const outcome = await actThenUndo(ref, () => actions[to](ref, tick()));
@@ -170,18 +172,62 @@ try {
     }
   });
 
-  await check("markSeen leaving out the review keeps the old one; null or blank clears it; a new one replaces it", async () => {
+  await check("markSeen on a Seen title changes nothing and says where it is, whatever the review (issue 65)", async () => {
     const ref = fresh();
     unwrap(await lib.markSeen(A, ref, { rating: 2, review: "Old." }, { now: tick() }));
-    const kept = await actThenUndo(ref, () => lib.markSeen(A, ref, { rating: 2.5 }, { now: tick() }));
-    assert.equal(kept.current?.review, "Old.");
-    assert.equal(kept.current?.rating, 2.5);
-    const replaced = await actThenUndo(ref, () => lib.markSeen(A, ref, { rating: 3, review: "New." }, { now: tick() }));
-    assert.equal(replaced.current?.review, "New.");
-    for (const review of [null, "", "   "]) {
-      const cleared = await actThenUndo(ref, () => lib.markSeen(A, ref, { rating: 3, review }, { now: tick() }));
-      assert.equal(cleared.current?.review, null, `review ${JSON.stringify(review)} clears`);
+    const before = await state(A, ref);
+    for (const review of [undefined, null, "", "   ", "New."]) {
+      const r = await lib.markSeen(A, ref, { rating: 3, review }, { now: tick() });
+      assert.deepEqual(
+        r,
+        { ok: false, error: { code: "wrong_state", status: "seen", expected: ["watchlist", "passed", "skipped"] } },
+        `review ${JSON.stringify(review)}`,
+      );
+      assert.deepEqual(await state(A, ref), before, `review ${JSON.stringify(review)} leaves the row exactly as it was`);
     }
+  });
+
+  await check("two devices: a stale card's Seen it never erases or replaces a review written elsewhere (issue 65)", async () => {
+    // The phone shows the title's card while it is on the Watchlist, or on no list. Another device then marks it
+    // Seen with a review. The phone's card still shows the old state, and the user taps Seen it.
+    for (const startOn of ["watchlist", "none"] as const) {
+      for (const review of [null, "", "Stale take."]) {
+        const ref = fresh();
+        if (startOn === "watchlist") unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+        unwrap(
+          startOn === "watchlist"
+            ? await lib.moveTitle(A, ref, { from: "watchlist", to: "seen", rating: 5, review: "Elsewhere." }, { now: tick() })
+            : await lib.markSeen(A, ref, { rating: 5, review: "Elsewhere." }, { now: tick() }),
+        );
+        const elsewhere = await state(A, ref);
+        const r = await lib.markSeen(A, ref, { rating: 3, review }, { now: tick() });
+        const label = `${startOn}, review ${JSON.stringify(review)}`;
+        assert.equal(!r.ok && r.error.code, "wrong_state", label);
+        assert.deepEqual(await state(A, ref), elsewhere, `${label}: the rating and review written elsewhere survive`);
+        assert.equal((await state(A, ref))?.review, "Elsewhere.");
+      }
+    }
+  });
+
+  await check("markSeen still moves a title from no list or any other list, and undo restores the exact row", async () => {
+    for (const from of ["none", "watchlist", "passed", "skipped"] as const) {
+      const ref = fresh();
+      if (from === "watchlist") unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+      if (from === "passed") unwrap(await lib.passTitle(A, ref, { now: tick() }));
+      if (from === "skipped") unwrap(await lib.skipTitle(A, ref, { now: tick() }));
+      for (const review of [undefined, null, "", "Mine."]) {
+        const out = await actThenUndo(ref, () => lib.markSeen(A, ref, { rating: 4, review }, { now: tick() }));
+        assert.equal(out.current?.status, "seen", `${from}, review ${JSON.stringify(review)}`);
+        assert.equal(out.current?.review, review === "Mine." ? "Mine." : null);
+      }
+    }
+  });
+
+  await check("a Seen title's review can still be cleared on purpose, through the edit path", async () => {
+    const ref = fresh();
+    unwrap(await lib.markSeen(A, ref, { rating: 4, review: "To clear." }, { now: tick() }));
+    const out = await actThenUndo(ref, () => lib.updateRatingReview(A, ref, { rating: 4, review: null }, { now: tick() }));
+    assert.equal(out.current?.review, null);
   });
 
   await check("markSeen with no review on a title that was not seen writes no review", async () => {
@@ -201,8 +247,8 @@ try {
   console.log("Rating bounds");
 
   await check("every half step from 0.5 to 5 stores exactly", async () => {
-    const ref = fresh();
     for (let r = 0.5; r <= 5; r += 0.5) {
+      const ref = fresh();
       unwrap(await lib.markSeen(A, ref, { rating: r }, { now: tick() }));
       assert.equal((await state(A, ref))?.rating, r);
     }
