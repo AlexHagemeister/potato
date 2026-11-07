@@ -66,15 +66,18 @@ function useInBrowser(): boolean {
 }
 
 /**
- * True when this card is the page the app opened on (a shared link): the
- * document's first URL is this one. Any history before it is outside the app,
- * so Back must not go there. A reload of the card keeps the history it had, so
- * it counts as cold only when there is none.
+ * Whether the history entry before this card is a Potato screen, so Back can
+ * return to it. The Navigation API answers exactly (canGoBack counts only
+ * same-origin entries, and survives a reload). Without it, the card counts as
+ * in-app only when it was reached by a client navigation, that is, the
+ * document opened on another URL. That fallback never leaves the app: at worst
+ * Back goes to Search instead of the previous screen.
  */
-function openedCold(): boolean {
+function canGoBackInApp(): boolean {
+  const navigation = (window as { navigation?: { canGoBack?: unknown } }).navigation;
+  if (typeof navigation?.canGoBack === "boolean") return navigation.canGoBack;
   const first = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
-  if (!first || first.name !== window.location.href) return false;
-  return first.type !== "reload" || window.history.length <= 1;
+  return first !== undefined && first.type !== "reload" && first.name !== window.location.href;
 }
 
 /** Where the title is now, above the card. */
@@ -234,8 +237,8 @@ export function TitleScreen({ card }: { card: Card }) {
   }
 
   function back() {
-    if (openedCold()) router.push("/search");
-    else router.back();
+    if (canGoBackInApp()) router.back();
+    else router.push("/search");
   }
 
   return (

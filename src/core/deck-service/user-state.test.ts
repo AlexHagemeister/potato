@@ -32,5 +32,12 @@ describe("cardUserState", () => {
   test("a skip whose return time names no moment stays skipped, as it stays hidden in the deck", () => {
     expect(cardUserState(REF, { status: "skipped", rating: null, review: null, skipUntil: "2026-11-01T12:00:00" }, NOW)?.status).toBe("skipped");
     expect(cardUserState(REF, { status: "skipped", rating: null, review: null, skipUntil: null }, NOW)?.status).toBe("skipped");
+    // An unparseable time is skipped with no date ("Skipped for now"), never an Invalid Date.
+    expect(cardUserState(REF, { status: "skipped", rating: null, review: null, skipUntil: "" }, NOW)).toEqual({
+      status: "skipped",
+      rating: null,
+      review: null,
+      skipUntil: null,
+    });
   });
 });

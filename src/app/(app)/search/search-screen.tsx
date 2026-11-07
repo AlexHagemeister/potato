@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { SEARCH_QUERY_MAX_LENGTH } from "@/core/search/constants";
+import { mergeSearchPages } from "@/core/search/merge";
 import type { SearchPage, SearchResult } from "@/core/search/types";
 import type { TitleStatus } from "@/core/types";
 import type { SearchResponse } from "@/app/api/search/route";
@@ -48,13 +49,14 @@ async function fetchResults(query: string, page: number, signal: AbortSignal): P
   }
 }
 
-function ResultRow({ result }: { result: SearchResult }) {
+function ResultRow({ result, onOpen }: { result: SearchResult; onOpen: () => void }) {
   const type = result.mediaType === "movie" ? "Movie" : "Series";
   return (
     <li>
       <Link
         href={`/title/${result.mediaType}/${result.tmdbId}`}
         prefetch={false}
+        onClick={onOpen}
         data-title-key={`${result.mediaType}:${result.tmdbId}`}
         className="flex items-center gap-3 py-2"
       >
@@ -105,6 +107,20 @@ export function SearchScreen({ initialQuery }: { initialQuery: string }) {
   // The query this screen arrived with. Later renders of the page carry newer ones (the URL follows the box),
   // and those must not restart the search.
   const [arrivedWith] = useState(initialQuery.trim());
+  // The query in the URL as this screen last wrote it, and the last query a page render handed it.
+  const [written, setWritten] = useState(initialQuery.trim());
+  const [handed, setHanded] = useState(initialQuery);
+  // Box and URL always agree. A page render whose query this screen did not write is a navigation (tapping the
+  // Search tab while on results hands it "", Back or Forward hands it that entry's query): the box takes it.
+  if (initialQuery !== handed) {
+    setHanded(initialQuery);
+    if (initialQuery.trim() !== written) {
+      setQuery(initialQuery);
+      setWritten(initialQuery.trim());
+    }
+  }
+  // The pending URL write. A result tap cancels it, so a late write can't cancel the tap's navigation.
+  const urlTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   // The last answer, and the query and attempt it answers.
   const [fetched, setFetched] = useState<Fetched | null>(null);
   // Bumped to search the same query again (Try again).
@@ -128,8 +144,14 @@ export function SearchScreen({ initialQuery }: { initialQuery: string }) {
   useEffect(() => {
     const url = trimmed ? `/search?q=${encodeURIComponent(trimmed)}` : "/search";
     if (`${window.location.pathname}${window.location.search}` === url) return;
-    const timer = setTimeout(() => router.replace(url, { scroll: false }), trimmed ? DEBOUNCE_MS : 0);
-    return () => clearTimeout(timer);
+    urlTimer.current = setTimeout(
+      () => {
+        setWritten(trimmed);
+        router.replace(url, { scroll: false });
+      },
+      trimmed ? DEBOUNCE_MS : 0,
+    );
+    return () => clearTimeout(urlTimer.current);
   }, [trimmed, router]);
 
   useEffect(() => {
@@ -177,10 +199,7 @@ export function SearchScreen({ initialQuery }: { initialQuery: string }) {
         setFetched({ ...current, more: "error" });
         return;
       }
-      // A title can sit on two TMDB pages when its ranking shifts between requests. Keep the first.
-      const seen = new Set(current.results.map((r) => `${r.mediaType}:${r.tmdbId}`));
-      const added = body.page.results.filter((r) => !seen.has(`${r.mediaType}:${r.tmdbId}`));
-      setFetched({ ...current, page: body.page, results: [...current.results, ...added], more: "idle" });
+      setFetched({ ...current, page: body.page, results: mergeSearchPages(current.results, body.page.results), more: "idle" });
     } catch {
       // Aborted: the query changed.
     }
@@ -250,7 +269,7 @@ export function SearchScreen({ initialQuery }: { initialQuery: string }) {
         <>
           <ul aria-label="Results" aria-busy={view.stale || undefined} className={`divide-y divide-hairline transition-opacity ${view.stale ? "opacity-50" : ""}`}>
             {view.results.map((r) => (
-              <ResultRow key={`${r.mediaType}:${r.tmdbId}`} result={r} />
+              <ResultRow key={`${r.mediaType}:${r.tmdbId}`} result={r} onOpen={() => clearTimeout(urlTimer.current)} />
             ))}
           </ul>
           {!view.stale && view.page.page < view.page.totalPages && (

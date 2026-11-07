@@ -27,10 +27,12 @@ export function cardUserState(ref: TitleId, row: UserStateRow | null, now: Date)
     const visible = createVisibilityCheck([{ mediaType: ref.mediaType, tmdbId: ref.tmdbId, status: row.status, skipUntil: row.skipUntil }], now);
     if (visible(ref)) return null;
   }
-  return {
-    status: row.status,
-    rating: row.rating,
-    review: row.review,
-    skipUntil: row.skipUntil === null ? null : new Date(row.skipUntil),
-  };
+  return { status: row.status, rating: row.rating, review: row.review, skipUntil: returnDate(row.skipUntil) };
+}
+
+/** The return time as a Date, or null when it names no moment (an Invalid Date would break formatting). */
+function returnDate(raw: Date | string | null): Date | null {
+  if (raw === null) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
 }

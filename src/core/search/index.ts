@@ -10,6 +10,7 @@ import type { SearchPage } from "./types";
 
 export * from "./constants";
 export * from "./types";
+export { mergeSearchPages } from "./merge";
 export { createSearchService, type SearchLibrary, type SearchService, type SearchServiceDeps, type SearchTmdb } from "./service";
 
 let service: SearchService | undefined;
