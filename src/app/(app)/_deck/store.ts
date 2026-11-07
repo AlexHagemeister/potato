@@ -62,6 +62,8 @@ import {
 
 /** How long the Undo toast stays up. An error notice stays until dismissed or the next sort. */
 const TOAST_MS = 4500;
+/** How long the sorted-elsewhere check may take before the deck gives up on it until the next return. */
+const CHECK_TIMEOUT_MS = 10_000;
 /** Posters to load ahead of the card on screen. */
 const PRELOAD_AHEAD = 2;
 
@@ -234,6 +236,8 @@ async function dropSortedElsewhere() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ titles }),
       cache: "no-store",
+      // A request that never settles (the home-screen app suspended mid-flight) must not block every later check.
+      signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
     });
     body = (await res.json()) as HiddenResponse;
   } catch {
