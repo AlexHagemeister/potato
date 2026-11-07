@@ -55,7 +55,11 @@ function toSettings(row: typeof userSettings.$inferSelect): UserSettings {
   return { country: row.country, providerIds: row.providerIds, updatedAt: row.updatedAt };
 }
 
-/** The user's settings. Creates the default row first if it is missing (get-or-create). */
+/**
+ * The user's settings. Creates the default row first if it is missing
+ * (get-or-create). Every read of settings goes through here, so no code path
+ * depends on the sign-up hook having succeeded.
+ */
 export async function getUserSettings(userId: string): Promise<LibraryResult<UserSettings>> {
   const u = validateUserId(userId);
   if (!u.ok) return u;
