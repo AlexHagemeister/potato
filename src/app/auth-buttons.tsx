@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { authClient } from "@/lib/auth-client";
 
@@ -42,39 +41,6 @@ export function SignInButton() {
         }}
       >
         Sign in with Google
-      </button>
-      <ErrorText message={error} />
-    </>
-  );
-}
-
-export function SignOutButton() {
-  const router = useRouter();
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  return (
-    <>
-      <button
-        type="button"
-        className={buttonClass}
-        disabled={pending}
-        onClick={async () => {
-          setPending(true);
-          setError(null);
-          try {
-            const result = await authClient.signOut();
-            if (result.error) {
-              setError("Sign-out failed. Try again.");
-            } else {
-              router.refresh();
-            }
-          } catch {
-            setError("Sign-out failed. Try again.");
-          }
-          setPending(false);
-        }}
-      >
-        Sign out
       </button>
       <ErrorText message={error} />
     </>

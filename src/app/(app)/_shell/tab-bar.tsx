@@ -77,7 +77,7 @@ export function TabBar() {
   return (
     <nav
       aria-label="Main"
-      className="shrink-0 border-t border-hairline bg-[#0f0f11] pb-[env(safe-area-inset-bottom)]"
+      className="shrink-0 border-t border-hairline bg-bar pb-[env(safe-area-inset-bottom)]"
     >
       <ul className="flex h-[var(--tab-bar-height)]">
         {TABS.map((tab) => {

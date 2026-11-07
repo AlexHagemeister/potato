@@ -328,16 +328,30 @@ export function createTmdbClient(options: TmdbClientOptions) {
     return [...merged.values()].sort((a, b) => a.displayPriority - b.displayPriority || a.name.localeCompare(b.name));
   }
 
-  /** The countries TMDB has streaming data for, sorted by English name. */
+  /**
+   * The countries TMDB has streaming data for, sorted by English name. Never
+   * empty: TMDB always lists some, so a 404 or an empty list means the lookup
+   * failed. That throws and is not cached, because settings code reads an
+   * empty list as "no country is valid". If the refetch fails and an expired
+   * list is cached, that list is served.
+   */
   async function getWatchRegions(): Promise<WatchRegion[]> {
-    const regions = await cached(
-      "watch-regions",
-      TMDB_TTL_MS.watchRegions,
-      "/watch/providers/regions",
-      { language: TMDB_LANGUAGE },
-      normalizeRegions,
-    );
-    return regions ?? [];
+    const pathWithQuery = buildPath("/watch/providers/regions", { language: TMDB_LANGUAGE });
+    const key = cacheKey("watch-regions", pathWithQuery);
+    const entry = await readCacheEntry<WatchRegion[]>(key);
+    const usable = entry && entry.data.length > 0 ? entry : undefined;
+    if (usable?.fresh) return usable.data;
+    try {
+      const raw = await tmdbGet(http, pathWithQuery);
+      const regions = raw === null ? [] : normalizeRegions(raw);
+      if (regions.length === 0) throw new Error("TMDB returned no watch regions");
+      await writeCache(key, regions, TMDB_TTL_MS.watchRegions);
+      return regions;
+    } catch (err) {
+      if (!usable) throw err;
+      console.warn("tmdb watch regions refetch failed, serving stale:", err);
+      return usable.data;
+    }
   }
 
   /**

@@ -534,4 +534,23 @@ describe("getWatchRegions", () => {
     await client.getWatchRegions();
     expect(calls).toHaveLength(2);
   });
+
+  test("an empty list or a 404 throws and is not cached", async () => {
+    for (const empty of [json({ results: [] }), notFound]) {
+      const { client, calls } = setup({ "/watch/providers/regions": empty });
+      await expect(client.getWatchRegions()).rejects.toThrow();
+      await expect(client.getWatchRegions()).rejects.toThrow();
+      expect(calls).toHaveLength(2);
+    }
+  });
+
+  test("serves the expired list when a refetch fails or comes back empty", async () => {
+    const payload = { results: [{ iso_3166_1: "US", english_name: "United States" }] };
+    for (const failure of [status(503), json({ results: [] })]) {
+      const { client, advance } = setup({ "/watch/providers/regions": [json(payload), failure] });
+      await client.getWatchRegions();
+      advance(TMDB_TTL_MS.watchRegions + 1);
+      expect(await client.getWatchRegions()).toEqual([{ code: "US", name: "United States" }]);
+    }
+  });
 });

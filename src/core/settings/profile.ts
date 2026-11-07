@@ -1,7 +1,7 @@
 // What the Profile tab shows and changes: the user's settings, the countries
 // to pick from, and the streaming services in the chosen country.
 
-import { ok, type Result } from "../result";
+import { fail, ok, type Result } from "../result";
 import { getTmdb, logoUrl, type ProviderListEntry, type WatchRegion } from "../tmdb";
 import { getUserSettings, updateUserSettings, validateSettingsPatch } from "./user-settings";
 
@@ -60,18 +60,23 @@ export async function getProfileSettings(userId: string): Promise<Result<Profile
 }
 
 /**
- * Saves a new country and returns that country's streaming services. The list
- * is fetched first, so a TMDB failure leaves the saved country unchanged and
- * the screen and the database agree.
+ * Saves a new country and returns that country's streaming services. The
+ * country is checked against TMDB's list first, so an unknown code costs no
+ * services fetch. The services list is fetched before saving, so a TMDB
+ * failure leaves the saved country unchanged and the screen and the database
+ * agree.
  */
 export async function changeCountry(userId: string, country: unknown): Promise<Result<StreamingService[]>> {
   const valid = validateSettingsPatch({ country });
   if (!valid.ok) return valid;
   const code = valid.value.country!;
+  const regions = await getTmdb().getWatchRegions();
+  if (!regions.some((r) => r.code === code)) return fail({ code: "unknown_country", country: code });
   const services = await listStreamingServices(code);
   // Saved services are kept. Provider IDs are global, so one the new country
-  // lacks matches nothing there, and switching back restores it.
-  const saved = await updateUserSettings(userId, { country: code });
+  // lacks matches nothing there, and switching back restores it. The regions
+  // just read are passed on, so the save doesn't look them up again.
+  const saved = await updateUserSettings(userId, { country: code }, { watchRegions: async () => regions });
   if (!saved.ok) return saved;
   return ok(services);
 }

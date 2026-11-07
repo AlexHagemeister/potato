@@ -7,6 +7,8 @@
   --surface-raised: #1f1f22;
   --muted: #8e8e93;
   --hairline: #2a2a2e;
+  /* The tab bar, a shade above the page. */
+  --bar: #0f0f11;
   --accent: #f5c451;
   /* Shell measurements. The tab bar sits on top of the bottom safe area. */
   --tab-bar-height: 3.5rem;
@@ -22,6 +24,7 @@
   --color-surface-raised: var(--surface-raised);
   --color-muted: var(--muted);
   --color-hairline: var(--hairline);
+  --color-bar: var(--bar);
   --color-accent: var(--accent);
 }
 

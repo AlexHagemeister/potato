@@ -11,7 +11,11 @@ export const TMDB_NOTICE = "This product uses the TMDB API but is not endorsed o
 
 export function Attribution() {
   return (
-    <footer aria-label="Credits" className="mt-12 space-y-2 text-xs leading-snug text-muted">
+    <footer aria-labelledby="credits-heading" className="mt-12 space-y-2 px-1 text-xs leading-snug text-muted">
+      {/* Visible on purpose: TMDB's FAQ places attribution in a "Credits" type section. */}
+      <h2 id="credits-heading" className="font-semibold tracking-wide uppercase">
+        Credits
+      </h2>
       {/* A plain img: next/image refuses SVGs by default, and this needs no resizing. */}
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img src={TMDB_LOGO_URL} alt="TMDB" width={77} height={10} className="h-2.5 w-auto" />

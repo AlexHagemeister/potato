@@ -29,8 +29,9 @@ export function SettingsForm({ initialCountry, initialProviderIds, countries, in
   const [error, setError] = useState<string | null>(null);
   const countryRequest = useRef(0);
   const servicesRequest = useRef(0);
-  // The last set of services the server confirmed saving. A failed save rolls back to it.
+  // What the server last confirmed saving. A failed save rolls back to it.
   const confirmedIds = useRef(initialProviderIds);
+  const confirmedCountry = useRef({ country: initialCountry, services: initialServices, unavailable: servicesUnavailable });
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -41,20 +42,24 @@ export function SettingsForm({ initialCountry, initialProviderIds, countries, in
   const selectedHere = useMemo(() => services.filter((s) => selected.includes(s.id)), [services, selected]);
 
   async function onCountryChange(next: string) {
-    const previous = country;
     const request = ++countryRequest.current;
     setCountry(next);
     setError(null);
     setLoadingServices(true);
     const result = await changeCountryAction(next);
-    if (request !== countryRequest.current) return; // a newer pick superseded this one
+    // Any success is what the database now holds, even if a newer pick is pending.
+    if (result.ok) confirmedCountry.current = { country: next, services: result.value, unavailable: false };
+    if (request !== countryRequest.current) return; // a newer pick is still in flight
     setLoadingServices(false);
     if (result.ok) {
       setServices(result.value);
       setUnavailable(false);
       setQuery("");
     } else {
-      setCountry(previous);
+      // Roll back to the country the server last confirmed, with its list.
+      setCountry(confirmedCountry.current.country);
+      setServices(confirmedCountry.current.services);
+      setUnavailable(confirmedCountry.current.unavailable);
       setError(result.error);
     }
   }
