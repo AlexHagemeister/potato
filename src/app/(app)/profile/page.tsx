@@ -9,7 +9,11 @@ export default async function ProfilePage() {
   const user = await getCurrentUserForRequest();
   // Signed out: the shell layout already shows the sign-in screen.
   if (!user) return null;
-  const profile = await getProfileSettings(user.id);
+  const result = await getProfileSettings(user.id);
+  // A signed-in user whose settings can't load is a broken state (a session
+  // whose user row is gone). Fail loudly, to the tab's error boundary.
+  if (!result.ok) throw new Error(`Could not load settings: ${result.error.code}`);
+  const profile = result.value;
 
   return (
     <Screen>

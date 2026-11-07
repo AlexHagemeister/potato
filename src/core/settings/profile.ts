@@ -5,8 +5,8 @@ import { logoUrl } from "../tmdb/images";
 import { getTmdbClient, getWatchRegionsFromEnv } from "../tmdb/default-client";
 import type { ProviderListEntry } from "../tmdb/types";
 import type { WatchRegion } from "../tmdb/regions";
-import { parseCountry, setCountry } from "./settings";
-import { getUserSettings } from "./user-settings";
+import { ok, type Result } from "../result";
+import { getUserSettings, updateUserSettings, validateSettingsPatch } from "./user-settings";
 
 /** A streaming service as the Profile tab lists it. Data from JustWatch, via TMDB. */
 export interface StreamingService {
@@ -36,10 +36,9 @@ export function countriesFor(saved: string, regions: readonly WatchRegion[]): Wa
   return [...regions, { code: saved, name: saved }].sort((a, b) => a.name.localeCompare(b.name, "en"));
 }
 
-/** The streaming services available in a country, in TMDB's display order. */
-export async function listStreamingServices(country: unknown): Promise<StreamingService[]> {
-  const code = parseCountry(country);
-  return toStreamingServices(await getTmdbClient().getProviderList(code));
+/** The streaming services available in a country (an uppercase ISO code), in TMDB's display order. */
+async function listStreamingServices(country: string): Promise<StreamingService[]> {
+  return toStreamingServices(await getTmdbClient().getProviderList(country));
 }
 
 /**
@@ -48,17 +47,19 @@ export async function listStreamingServices(country: unknown): Promise<Streaming
  * work: without regions the picker offers only the saved country, and without
  * services the list shows an error.
  */
-export async function getProfileSettings(userId: string): Promise<ProfileSettings> {
-  const { country, providerIds } = await getUserSettings(userId);
+export async function getProfileSettings(userId: string): Promise<Result<ProfileSettings>> {
+  const read = await getUserSettings(userId);
+  if (!read.ok) return read;
+  const { country, providerIds } = read.value;
   const [regions, services] = await Promise.allSettled([getWatchRegionsFromEnv(), listStreamingServices(country)]);
   if (regions.status === "rejected") console.error("watch regions unavailable:", regions.reason);
   if (services.status === "rejected") console.error(`streaming services unavailable for ${country}:`, services.reason);
-  return {
+  return ok({
     settings: { country, providerIds },
     countries: countriesFor(country, regions.status === "fulfilled" ? regions.value : []),
     services: services.status === "fulfilled" ? services.value : [],
     servicesUnavailable: services.status === "rejected",
-  };
+  });
 }
 
 /**
@@ -66,9 +67,14 @@ export async function getProfileSettings(userId: string): Promise<ProfileSetting
  * is fetched first, so a TMDB failure leaves the saved country unchanged and
  * the screen and the database agree.
  */
-export async function changeCountry(userId: string, country: unknown): Promise<StreamingService[]> {
-  const code = parseCountry(country);
+export async function changeCountry(userId: string, country: unknown): Promise<Result<StreamingService[]>> {
+  const valid = validateSettingsPatch({ country });
+  if (!valid.ok) return valid;
+  const code = valid.value.country!;
   const services = await listStreamingServices(code);
-  await setCountry(userId, code);
-  return services;
+  // Saved services are kept. Provider IDs are global, so one the new country
+  // lacks matches nothing there, and switching back restores it.
+  const saved = await updateUserSettings(userId, { country: code });
+  if (!saved.ok) return saved;
+  return ok(services);
 }

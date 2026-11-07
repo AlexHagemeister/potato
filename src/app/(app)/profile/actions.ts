@@ -1,22 +1,28 @@
 "use server";
 
 // Server actions for the Profile tab. Thin glue (CLAUDE.md rule 3): each one
-// resolves the user from the session cookie, never from client input, and
-// calls core.
+// resolves the user from the session cookie, never from client input, calls
+// core, and turns core's result into a message for the screen.
 
 import { changeCountry, type StreamingService } from "@/core/settings/profile";
-import { SettingsInputError, setProviderIds } from "@/core/settings/settings";
+import { updateUserSettings, type Result } from "@/core/library";
 import { getCurrentUserForRequest } from "@/lib/current-user";
 
 export type ActionResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
-async function run<T>(fn: (userId: string) => Promise<T>): Promise<ActionResult<T>> {
+const SIGNED_OUT = "You're signed out. Sign in again to save.";
+
+async function run<T>(fn: (userId: string) => Promise<Result<T>>): Promise<ActionResult<T>> {
   const user = await getCurrentUserForRequest();
-  if (!user) return { ok: false, error: "You're signed out. Sign in again to save." };
+  if (!user) return { ok: false, error: SIGNED_OUT };
   try {
-    return { ok: true, value: await fn(user.id) };
+    const result = await fn(user.id);
+    if (result.ok) return result;
+    // invalid_settings messages are written for developers, not for the screen.
+    if (result.error.code === "invalid_user" || result.error.code === "unknown_user") return { ok: false, error: SIGNED_OUT };
+    console.error("profile action rejected:", result.error);
+    return { ok: false, error: "Couldn't save that. Try again." };
   } catch (err) {
-    if (err instanceof SettingsInputError) return { ok: false, error: err.message };
     console.error("profile action failed:", err);
     return { ok: false, error: "Couldn't save. Try again." };
   }
@@ -30,7 +36,7 @@ export async function changeCountryAction(country: string): Promise<ActionResult
 /** Replaces the saved streaming services. */
 export async function saveServicesAction(providerIds: number[]): Promise<ActionResult<null>> {
   return run(async (userId) => {
-    await setProviderIds(userId, providerIds);
-    return null;
+    const saved = await updateUserSettings(userId, { providerIds });
+    return saved.ok ? { ok: true, value: null } : saved;
   });
 }

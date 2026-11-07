@@ -9,6 +9,7 @@
     "typecheck": "next typegen && tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint",
     "test": "bun test --no-env-file",
+    "test:db": "bun --no-env-file scripts/library-integration.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "bun --no-env-file scripts/migrate.ts dev",
     "db:migrate:prod": "bun --no-env-file scripts/migrate.ts prod",
