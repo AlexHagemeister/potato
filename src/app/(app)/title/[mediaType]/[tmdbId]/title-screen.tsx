@@ -11,6 +11,7 @@ import { Stars } from "../../../_components/stars";
 import { markSeenAction, sortCardAction, undoSortAction, type DeckActionResult, type SortKind } from "../../../_deck/actions";
 import { CardView } from "../../../_deck/card-view";
 import { DeckButtons } from "../../../_deck/deck-buttons";
+import { NoticePill, UndoPill } from "../../../_components/toast-pills";
 import { Screen } from "../../../_shell/screen";
 import { editRatingAction } from "../../../lists/actions";
 
@@ -110,8 +111,6 @@ function StatusLine({ state }: { state: CardUserState | null }) {
     </p>
   );
 }
-
-const PILL = "pointer-events-auto flex min-h-11 items-center gap-2 rounded-full bg-surface-raised py-1 pr-1 pl-4 shadow-xl ring-1 ring-hairline";
 
 export function TitleScreen({ card }: { card: Card }) {
   const router = useRouter();
@@ -245,13 +244,25 @@ export function TitleScreen({ card }: { card: Card }) {
     <Screen
       actions={<DeckButtons disabled={busy || seenOpen} current={state ? KIND_OF[state.status] : null} onTap={(k) => void onTap(k)} />}
     >
-      <div className="mb-3 flex h-8 items-center">
-        <button type="button" onClick={back} className="-ml-2 flex h-11 items-center gap-1 px-2 text-accent">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <path d="M15 5l-7 7 7 7" />
-          </svg>
-          Back
-        </button>
+      {/*
+        The top bar: Back, and the Undo toast beside it, clear of the card and the four buttons (issue 50).
+        Sticky like Search's search bar, so Undo stays in view when the tap came from far down the card.
+      */}
+      <div data-slot="title-bar" className="sticky top-0 z-10 -mx-4 bg-background px-4 pb-3">
+        <div className="flex h-8 items-center justify-between gap-2">
+          <button type="button" onClick={back} className="-ml-2 flex h-11 shrink-0 items-center gap-1 px-2 text-accent">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M15 5l-7 7 7 7" />
+            </svg>
+            Back
+          </button>
+          {!seenOpen && toast && <UndoPill message={toast.message} onUndo={() => void undo()} />}
+        </div>
+        {!seenOpen && notice && (
+          <div className="mt-3 flex justify-end">
+            <NoticePill message={notice.message} onDismiss={() => setNotice(null)} />
+          </div>
+        )}
       </div>
 
       <StatusLine state={state} />
@@ -268,31 +279,6 @@ export function TitleScreen({ card }: { card: Card }) {
           onCancel={() => setSeenOpen(false)}
           onSave={saveSeen}
         />
-      )}
-
-      {!seenOpen && (toast || notice) && (
-        <div
-          role="status"
-          className="pointer-events-none fixed inset-x-4 z-40 flex flex-col items-center gap-2"
-          style={{ bottom: "calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + var(--deck-actions-height) + 0.5rem)" }}
-        >
-          {notice && (
-            <div data-toast="notice" className={PILL}>
-              <span className="text-sm">{notice.message}</span>
-              <button type="button" aria-label="Dismiss" onClick={() => setNotice(null)} className="h-9 rounded-full px-3 text-sm text-muted">
-                OK
-              </button>
-            </div>
-          )}
-          {toast && (
-            <div data-toast="undo" className={PILL}>
-              <span className="text-sm">{toast.message}</span>
-              <button type="button" onClick={() => void undo()} className="h-9 rounded-full px-4 text-sm font-semibold text-accent">
-                Undo
-              </button>
-            </div>
-          )}
-        </div>
       )}
     </Screen>
   );
