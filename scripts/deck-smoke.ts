@@ -80,7 +80,8 @@ async function run(label: string, request: DeckRequest): Promise<DeckPage> {
   );
   const rated = page.cards.filter((c) => c.imdb.kind === "rated").length;
   console.log(
-    `  IMDb rated on ${rated}/${page.cards.length}; first: ` +
+    `  IMDb rated on ${rated}/${page.cards.length}; on my services ${page.cards.filter((c) => c.streaming.onMyServices).length}/${page.cards.length}; ` +
+      `movies ${page.cards.filter((c) => c.mediaType === "movie").length}; first: ` +
       page.cards
         .slice(0, 4)
         .map((c) => `${c.title} (${c.year}) [${c.mediaType}:${c.tmdbId}, ${c.source}]`)

@@ -325,7 +325,7 @@ describe("getDeck: failures", () => {
   test("every list failing throws instead of returning a cursor that cannot move", async () => {
     const w = world({ failingLists: new Set(["popular:movie", "popular:tv"]) });
     const { service } = fakeService(w);
-    expect(service.getDeck(USER, { mode: "popular" })).rejects.toThrow(/every TMDB list lookup failed/);
+    await expect(service.getDeck(USER, { mode: "popular" })).rejects.toThrow(/every TMDB list lookup failed/);
   });
 
   test("bad mode, filters, or era is a typed error, with no calls", async () => {
