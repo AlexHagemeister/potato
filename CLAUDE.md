@@ -4,6 +4,16 @@ Potato is a web app for deciding what to watch, one card at a time. Read [VISION
 
 This file holds stable rules. It changes rarely. Add to the Notes section at the bottom only for a lasting quirk a future agent would otherwise rediscover the hard way.
 
+## Starting a session
+
+Before any work, orient from the record:
+
+1. Read VISION.md.
+2. Read the founding record: `gh pr view 1`.
+3. Read recent history: `git log --oneline -20`, plus the PR bodies of merges that touch your area.
+4. Check open work: `gh pr list`, and `gh issue list --label needs-alex --state all`. Alex answers needs-alex issues in their threads. An answer there is a ruling, so act on new ones first.
+5. Check the `v1` milestone for anything Alex has added.
+
 ## Roles
 
 - **Alex** owns VISION.md and every product call. He does not read code or review PRs. He judges the app by using it on his iPhone.
