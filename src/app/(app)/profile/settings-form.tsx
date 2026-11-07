@@ -83,6 +83,9 @@ export function SettingsForm({ initialCountry, initialProviderIds, countries, in
               </option>
             ))}
           </select>
+          <svg aria-hidden width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="-ml-1 shrink-0 text-muted">
+            <path d="m7 10 5 5 5-5" />
+          </svg>
         </label>
       </section>
 
