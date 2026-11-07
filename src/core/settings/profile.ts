@@ -5,7 +5,8 @@ import { logoUrl } from "../tmdb/images";
 import { getTmdbClient, getWatchRegionsFromEnv } from "../tmdb/default-client";
 import type { ProviderListEntry } from "../tmdb/types";
 import type { WatchRegion } from "../tmdb/regions";
-import { getUserSettings, parseCountry, setCountry, type UserSettings } from "./settings";
+import { parseCountry, setCountry } from "./settings";
+import { getUserSettings } from "./user-settings";
 
 /** A streaming service as the Profile tab lists it. Data from JustWatch, via TMDB. */
 export interface StreamingService {
@@ -15,7 +16,7 @@ export interface StreamingService {
 }
 
 export interface ProfileSettings {
-  settings: UserSettings;
+  settings: { country: string; providerIds: number[] };
   countries: WatchRegion[];
   services: StreamingService[];
 }
@@ -41,9 +42,9 @@ export async function listStreamingServices(country: unknown): Promise<Streaming
 
 /** Everything the Profile tab needs on first render. */
 export async function getProfileSettings(userId: string): Promise<ProfileSettings> {
-  const settings = await getUserSettings(userId);
-  const [regions, services] = await Promise.all([getWatchRegionsFromEnv(), listStreamingServices(settings.country)]);
-  return { settings, countries: countriesFor(settings.country, regions), services };
+  const { country, providerIds } = await getUserSettings(userId);
+  const [regions, services] = await Promise.all([getWatchRegionsFromEnv(), listStreamingServices(country)]);
+  return { settings: { country, providerIds }, countries: countriesFor(country, regions), services };
 }
 
 /** Saves a new country and returns that country's streaming services. */

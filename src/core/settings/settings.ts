@@ -1,19 +1,13 @@
-// Read and update a user's settings: country and streaming services.
-// Minimal on purpose. The core/library slice owns the fuller settings API and
-// may replace this file when it lands.
+// Update a user's settings: country and streaming services. Reads go through
+// getUserSettings in ./user-settings. Minimal on purpose: the core/library
+// slice owns the fuller settings API and may replace this file when it lands.
+//
+// Provider IDs are TMDB's, and they are the same in every country (Netflix is
+// 8 in the US and in the UK).
 
-import { eq, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { getDb } from "@/db/client";
 import { userSettings } from "@/db/schema";
-
-export interface UserSettings {
-  /** ISO 3166-1 alpha-2 ("US"). */
-  country: string;
-  /** TMDB watch provider IDs. They are the same in every country (Netflix is 8 everywhere). */
-  providerIds: number[];
-}
-
-export const DEFAULT_COUNTRY = "US";
 
 /** The most services one user can save. A guard against junk input, far above any real use. */
 export const MAX_PROVIDER_IDS = 200;
@@ -45,25 +39,6 @@ export function normalizeProviderIds(input: unknown): number[] {
   }
   if (ids.length > MAX_PROVIDER_IDS) throw new SettingsInputError("Too many provider IDs");
   return ids;
-}
-
-/** The user's settings. Creates the row with the defaults when it is missing. */
-export async function getUserSettings(userId: string): Promise<UserSettings> {
-  const db = getDb();
-  const read = () =>
-    db
-      .select({ country: userSettings.country, providerIds: userSettings.providerIds })
-      .from(userSettings)
-      .where(eq(userSettings.userId, userId))
-      .limit(1);
-  let rows = await read();
-  if (rows.length === 0) {
-    await db.insert(userSettings).values({ userId }).onConflictDoNothing();
-    rows = await read();
-  }
-  const row = rows[0];
-  if (!row) throw new Error(`No settings row for user ${userId}`);
-  return { country: row.country, providerIds: row.providerIds };
 }
 
 /**
