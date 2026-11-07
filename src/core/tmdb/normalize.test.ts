@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { normalizeDetailsCore, normalizeProviders, normalizeSummary, pickTrailer, yearOf } from "./normalize";
+import { normalizeDetailsCore, normalizeProviders, normalizeRegions, normalizeSummary, pickTrailer, yearOf } from "./normalize";
 import { breakingBadDetails, matrixDetails, matrixProviders } from "./test-fixtures";
 
 describe("normalizeDetailsCore", () => {
@@ -133,4 +133,28 @@ test("yearOf", () => {
   expect(yearOf("1999-03-31")).toBe(1999);
   expect(yearOf("")).toBeNull();
   expect(yearOf(undefined)).toBeNull();
+});
+
+describe("normalizeRegions", () => {
+  test("keeps valid codes, falls back to the code for a blank name, sorts by name", () => {
+    const raw = {
+      results: [
+        { iso_3166_1: "US", english_name: "United States" },
+        { iso_3166_1: "AD", english_name: "Andorra" },
+        { iso_3166_1: "us", english_name: "lowercase" },
+        { iso_3166_1: "GB", english_name: "  " },
+        { english_name: "No code" },
+      ],
+    };
+    expect(normalizeRegions(raw)).toEqual([
+      { code: "AD", name: "Andorra" },
+      { code: "GB", name: "GB" },
+      { code: "US", name: "United States" },
+    ]);
+  });
+
+  test("handles an empty or odd payload", () => {
+    expect(normalizeRegions(null)).toEqual([]);
+    expect(normalizeRegions({})).toEqual([]);
+  });
 });

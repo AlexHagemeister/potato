@@ -11,6 +11,7 @@ import type {
   TitleDetails,
   TitleSummary,
   WatchProvider,
+  WatchRegion,
 } from "./types";
 
 // Raw shapes, only the fields we read. Every field is optional because TMDB
@@ -191,4 +192,16 @@ export function normalizeProviders(raw: RawWatchProviders | undefined): Provider
 /** One entry from /watch/providers/{movie|tv}, with its priority in `country`. */
 export function normalizeListProvider(raw: RawProvider, country: string): WatchProvider | null {
   return normalizeProvider(raw, country);
+}
+
+/** TMDB's watch-provider countries: valid two-letter codes, one per code, sorted by English name. */
+export function normalizeRegions(raw: unknown): WatchRegion[] {
+  const results = (raw as { results?: { iso_3166_1?: unknown; english_name?: unknown }[] } | null)?.results ?? [];
+  const byCode = new Map<string, WatchRegion>();
+  for (const r of results) {
+    if (typeof r.iso_3166_1 !== "string" || !/^[A-Z]{2}$/.test(r.iso_3166_1)) continue;
+    const name = typeof r.english_name === "string" && r.english_name.trim() ? r.english_name.trim() : r.iso_3166_1;
+    byCode.set(r.iso_3166_1, { code: r.iso_3166_1, name });
+  }
+  return [...byCode.values()].sort((a, b) => a.name.localeCompare(b.name, "en"));
 }

@@ -19,6 +19,8 @@ export const TMDB_TTL_MS = {
   discover: 12 * HOUR_MS,
   /** The provider list for a country. */
   providerList: 12 * HOUR_MS,
+  /** The countries TMDB has streaming data for. */
+  watchRegions: 12 * HOUR_MS,
   /** Genre lists. These almost never change. */
   genres: 7 * DAY_MS,
   search: 1 * HOUR_MS,
