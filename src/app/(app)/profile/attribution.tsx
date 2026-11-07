@@ -1,8 +1,9 @@
 // Data credits (CLAUDE.md rule 7), kept to what the terms require and no
 // more. TMDB: an approved logo, less prominent than the app's own mark, plus
 // its notice, in a Credits section. JustWatch: TMDB requires crediting
-// JustWatch as the source of the watch-provider data. IMDb: its non-commercial
-// dataset terms require a fixed statement wherever the ratings are used.
+// JustWatch as the source of the watch-provider data. IMDb: its terms for the
+// non-commercial datasets require a fixed statement acknowledging the source.
+// They name no placement, so it sits here with the other credits.
 
 // TMDB's "blue short" logo from https://www.themoviedb.org/about/logos-attribution,
 // copied unmodified into public/ so the credit can't break if TMDB moves it.
