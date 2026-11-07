@@ -132,6 +132,10 @@ export function ListsScreen({
 }) {
   const [lists, setLists] = useState(() => toLists(fromServer));
   const [filters, setFilters] = useState(filtersFromServer);
+  const filtersRef = useRef(filters);
+  useEffect(() => {
+    filtersRef.current = filters;
+  }, [filters]);
   const [filtering, setFiltering] = useState(false);
   // A navigation back to this tab brings new server data: start from it.
   const [synced, setSynced] = useState(fromServer);
@@ -215,10 +219,14 @@ export function ListsScreen({
    */
   async function reload() {
     const seq = ++loadSeq.current;
-    const using = filters;
+    // The latest filters, not this closure's: a write can come back stale after the filters changed.
+    const using = filtersRef.current;
     const shown = lists;
     const result = await call(() => loadListsAction(using), FILTER_FAILED);
-    if (seq !== loadSeq.current || !result.ok) return;
+    if (seq !== loadSeq.current) return;
+    // This load replaced any filter load still running.
+    setFiltering(false);
+    if (!result.ok) return;
     const fresh = toLists(result.value);
     const jobs: Refill["jobs"] = {};
     for (const { status } of TABS) {
