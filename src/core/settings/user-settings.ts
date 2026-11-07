@@ -7,6 +7,7 @@ import { getDb } from "@/db/client";
 import { userSettings } from "@/db/schema";
 import { FOREIGN_KEY_VIOLATION, pgErrorCode } from "../pg-error";
 import { fail, ok, validateUserId, type Result } from "../result";
+import { isDiscoveryMode, normalizeDeckChoice, type DeckChoice } from "../filters";
 import { getTmdb } from "../tmdb/client";
 import type { WatchRegion } from "../tmdb/types";
 
@@ -135,6 +136,65 @@ export async function updateUserSettings(
       .returning();
     if (!row) throw new Error("updateUserSettings: no row returned");
     return ok(toSettings(row));
+  } catch (error) {
+    if (pgErrorCode(error) === FOREIGN_KEY_VIOLATION) return fail({ code: "unknown_user" });
+    throw error;
+  }
+}
+
+// ---- Discover's mode and filters ----
+// VISION, Your account and settings: "Everything you do is saved to your
+// profile and follows you across devices." The deck choice lives on the
+// settings row, so the app on any device, and the future AI connection, read
+// the same one.
+
+/**
+ * Checks a deck choice before it is saved. The shape must be right (an
+ * object with a known mode and a filters object). Filter values the control
+ * can't produce (an unknown genre, say) are dropped by core's normalizer, so
+ * the saved value is always one the app can show.
+ */
+export function validateDeckChoice(input: unknown): Result<DeckChoice> {
+  const bad = (message: string) => fail<DeckChoice>({ code: "invalid_settings", message });
+  if (typeof input !== "object" || input === null) return bad("deck choice must be an object");
+  const raw = input as Record<string, unknown>;
+  if (!isDiscoveryMode(raw.mode)) return bad(`unknown mode ${JSON.stringify(raw.mode)}`);
+  if (typeof raw.filters !== "object" || raw.filters === null || Array.isArray(raw.filters)) return bad("filters must be an object");
+  return ok(normalizeDeckChoice(raw));
+}
+
+/** The user's saved deck choice, or the default (Blend, no filters) when none is saved. Creates the settings row if missing. */
+export async function getDeckChoice(userId: string): Promise<Result<DeckChoice>> {
+  const u = validateUserId(userId);
+  if (!u.ok) return u;
+  const read = () =>
+    getDb().select({ deckChoice: userSettings.deckChoice }).from(userSettings).where(eq(userSettings.userId, u.value)).limit(1);
+  let [row] = await read();
+  if (!row) {
+    // Same get-or-create as getUserSettings.
+    const created = await getUserSettings(u.value);
+    if (!created.ok) return created;
+    [row] = await read();
+  }
+  // Normalized on read: a value saved by an older build still reads as a choice the app can show.
+  return ok(normalizeDeckChoice(row?.deckChoice));
+}
+
+/** Saves the user's deck choice and returns it as saved (normalized). */
+export async function saveDeckChoice(userId: string, choice: unknown, options: { now?: Date } = {}): Promise<Result<DeckChoice>> {
+  const u = validateUserId(userId);
+  if (!u.ok) return u;
+  const valid = validateDeckChoice(choice);
+  if (!valid.ok) return valid;
+  const now = options.now ?? new Date();
+  try {
+    const [row] = await getDb()
+      .insert(userSettings)
+      .values({ userId: u.value, deckChoice: valid.value, updatedAt: now })
+      .onConflictDoUpdate({ target: userSettings.userId, set: { deckChoice: valid.value, updatedAt: now } })
+      .returning({ deckChoice: userSettings.deckChoice });
+    if (!row) throw new Error("saveDeckChoice: no row returned");
+    return ok(normalizeDeckChoice(row.deckChoice));
   } catch (error) {
     if (pgErrorCode(error) === FOREIGN_KEY_VIOLATION) return fail({ code: "unknown_user" });
     throw error;

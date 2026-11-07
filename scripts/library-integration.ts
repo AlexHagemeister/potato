@@ -567,6 +567,29 @@ try {
     assert.deepEqual(after.providerIds, before.providerIds);
   });
 
+  await check("deck choice: default until saved, saved normalized, survives other settings writes, bad input changes nothing", async () => {
+    const D = `itest-deck-choice-${runId}`;
+    await db.insert(users).values({ id: D, name: "Integration Deck Choice", email: `${D}@example.invalid` });
+    try {
+      // No settings row yet: the read creates it and gives the default.
+      assert.deepEqual(unwrap(await lib.getDeckChoice(D)), { mode: "blend", filters: { type: "all", genres: [], era: "any", onMyServices: false } });
+      const choice = { mode: "top_rated", filters: { type: "tv", genres: ["scifi", "nosuchgenre"], era: "recent", onMyServices: true } };
+      const saved = unwrap(await lib.saveDeckChoice(D, choice));
+      assert.deepEqual(saved, { mode: "top_rated", filters: { type: "tv", genres: ["scifi"], era: "recent", onMyServices: true } });
+      assert.deepEqual(unwrap(await lib.getDeckChoice(D)), saved);
+      // A settings change keeps the choice, and the choice keeps the settings.
+      unwrap(await lib.updateUserSettings(D, { providerIds: [8] }));
+      assert.deepEqual(unwrap(await lib.getDeckChoice(D)), saved);
+      assert.deepEqual(unwrap(await lib.getUserSettings(D)).providerIds, [8]);
+      const bad = await lib.saveDeckChoice(D, { mode: "box_office", filters: {} });
+      assert.equal(!bad.ok && bad.error.code, "invalid_settings");
+      assert.deepEqual(unwrap(await lib.getDeckChoice(D)), saved);
+      assert.deepEqual(await lib.saveDeckChoice(GHOST, saved), { ok: false, error: { code: "unknown_user" } });
+    } finally {
+      await db.delete(users).where(inArray(users.id, [D]));
+    }
+  });
+
   console.log("Lists tab rows");
 
   await check("getListRows: each list's rows, newest change first, with metadata or null fallbacks", async () => {

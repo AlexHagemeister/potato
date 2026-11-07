@@ -1,5 +1,43 @@
 import { describe, expect, test } from "bun:test";
-import { MAX_PROVIDER_IDS, updateUserSettings, validateSettingsPatch } from "./user-settings";
+import {
+  getDeckChoice,
+  MAX_PROVIDER_IDS,
+  saveDeckChoice,
+  updateUserSettings,
+  validateDeckChoice,
+  validateSettingsPatch,
+} from "./user-settings";
+import type { FilterChoice } from "../filters";
+
+describe("deck choice (saved to the profile)", () => {
+  const filters: FilterChoice = { type: "tv", genres: ["scifi"], era: "recent", onMyServices: true };
+
+  test("validateDeckChoice accepts a full choice and normalizes its filters", () => {
+    expect(validateDeckChoice({ mode: "top_rated", filters })).toEqual({ ok: true, value: { mode: "top_rated", filters } });
+    // A genre the control can't produce, or one that doesn't exist for series, drops out.
+    expect(validateDeckChoice({ mode: "blend", filters: { ...filters, genres: ["scifi", "horror", "nope"] } })).toEqual({
+      ok: true,
+      value: { mode: "blend", filters },
+    });
+  });
+
+  // Each case wrapped in an array: test.each spreads a bare array case into arguments.
+  test.each([[null], ["blend"], [[]], [{ filters }], [{ mode: "box_office", filters }], [{ mode: "blend" }], [{ mode: "blend", filters: [] }]])(
+    "validateDeckChoice rejects %p",
+    (input: unknown) => {
+      expect(validateDeckChoice(input)).toMatchObject({ ok: false, error: { code: "invalid_settings" } });
+    },
+  );
+
+  test("saveDeckChoice refuses a bad user or a bad choice before any write", async () => {
+    expect(await saveDeckChoice("", { mode: "blend", filters })).toEqual({ ok: false, error: { code: "invalid_user" } });
+    expect(await saveDeckChoice("user-1", { mode: "box_office", filters })).toMatchObject({ ok: false, error: { code: "invalid_settings" } });
+  });
+
+  test("getDeckChoice refuses a bad user before any read", async () => {
+    expect(await getDeckChoice("")).toEqual({ ok: false, error: { code: "invalid_user" } });
+  });
+});
 
 describe("validateSettingsPatch", () => {
   test("uppercases and trims the country", () => {

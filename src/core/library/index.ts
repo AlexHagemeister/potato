@@ -13,9 +13,12 @@ export {
 } from "./actions";
 export { getList, getRatedCount, getTitleState, getTopRatedSeen, getUserTitleStates } from "./queries";
 export {
+  getDeckChoice,
   getUserSettings,
   MAX_PROVIDER_IDS,
+  saveDeckChoice,
   updateUserSettings,
+  validateDeckChoice,
   validateSettingsPatch,
   type UserSettings,
   type UserSettingsPatch,

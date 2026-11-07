@@ -10,7 +10,7 @@ import { RatingSheet } from "../_components/rating-sheet";
 import { FilterControl } from "../_components/filter-control";
 import { ModePicker } from "./mode-picker";
 import type { DeckPageCard } from "@/core/deck-service/types";
-import { DEFAULT_FILTER_CHOICE, describeFilterChoice, isDefaultFilterChoice } from "@/core/filters";
+import { DEFAULT_FILTER_CHOICE, describeFilterChoice, isDefaultFilterChoice, type DeckChoice } from "@/core/filters";
 import {
   chooseDeck,
   dismissNotice,
@@ -175,24 +175,35 @@ function Toasts({ toast, notice }: { toast: Toast | null; notice: Notice | null 
  * holds the mode picker and the filters, and a change to either refetches the
  * queue the same way (the store's chooseDeck). `hasServices` says whether the
  * user picked any streaming services, which "On my services" needs.
+ * `savedChoice` is the mode and filters saved to the profile.
  */
-export function Deck({ userId, settingsKey, hasServices }: { userId: string; settingsKey: string; hasServices: boolean }) {
+export function Deck({
+  userId,
+  settingsKey,
+  hasServices,
+  savedChoice,
+}: {
+  userId: string;
+  settingsKey: string;
+  hasServices: boolean;
+  savedChoice: DeckChoice;
+}) {
   const state = useDeck();
   const view = viewOf(state);
   const card = view.kind === "card" ? view.card : null;
-  const { choice } = state;
+  // Until the store starts for this user (the first render), the controls show the saved choice, so they never flash the default.
+  const ready = state.userId === userId;
+  const choice = ready ? state.choice : savedChoice;
   const applied = describeFilterChoice(choice.filters);
   const filterNote: FilterNote =
     choice.filters.onMyServices && !hasServices ? "no_services" : isDefaultFilterChoice(choice.filters) ? "none" : "filtered";
-  // The store loads this user's saved choice when the deck starts. Until then the controls stay hidden, so they never flash the default.
-  const ready = state.userId === userId;
   // The card the Seen it sheet is open for. The sheet keeps it even if a
   // failed Pass puts another card on top meanwhile. The sheet covers the
   // screen, so nothing else can be sorted while it is open.
   const [seenCard, setSeenCard] = useState<DeckPageCard | null>(null);
   const top = useRef<HTMLDivElement>(null);
 
-  useEffect(() => startDeck(userId, settingsKey), [userId, settingsKey]);
+  useEffect(() => startDeck(userId, settingsKey, savedChoice), [userId, settingsKey, savedChoice]);
 
   // Each new card starts at its top, even if the last one was scrolled to the trailer.
   const key = card ? titleKey(card) : view.kind;

@@ -7,8 +7,11 @@
 // A change to the user's country or services (the settings key) refreshes the
 // queued cards, since their streaming data is stale. So does a change to the
 // mode or filters (the choice), since they are the wrong cards. Core's
-// deckInputChange is the one rule for both. The choice is saved on this
-// device (localStorage), so it survives a reload and a relaunch.
+// deckInputChange is the one rule for both. The choice is saved to the
+// profile (core's saveDeckChoice), so it follows the user across devices: the
+// deck applies a change at once and saves it behind, and rolls it back with
+// an error notice if the save fails. The page hands in the saved choice when
+// the deck starts.
 //
 // The paging rules (dedupe, when to ask for more, stale cursors, refresh) are
 // core's (src/core/deck-queue). This file only sequences fetches and server
@@ -42,7 +45,14 @@ import {
 } from "@/core/filters";
 import type { TitleId } from "@/core/types";
 import type { DeckResponse } from "@/app/api/deck/route";
-import { markSeenAction, sortCardAction, undoSortAction, type DeckActionResult, type SortKind } from "./actions";
+import {
+  markSeenAction,
+  saveDeckChoiceAction,
+  sortCardAction,
+  undoSortAction,
+  type DeckActionResult,
+  type SortKind,
+} from "./actions";
 
 /** How long the Undo toast stays up. An error notice stays until dismissed or the next sort. */
 const TOAST_MS = 4500;
@@ -163,10 +173,16 @@ export function useDeck(): DeckState {
  * the tab). Binds the store to the signed-in user, refreshes the queued cards
  * if the country or services changed, re-checks a locked or no_seeds deck
  * (ratings made elsewhere may unlock it), and fills the queue.
+ *
+ * `savedChoice` is the mode and filters saved to the profile. The deck takes
+ * it when it starts for a user (the app opens or reloads). Later visits keep
+ * the deck's own choice, which is never older than the profile's: a page
+ * rendered while a save is on its way could carry the old one. A choice
+ * changed on another device shows after a reload.
  */
-export function startDeck(userId: string, settingsKey: string) {
+export function startDeck(userId: string, settingsKey: string, savedChoice: DeckChoice) {
   if (state.userId !== userId) {
-    reset(userId, settingsKey);
+    reset(userId, settingsKey, savedChoice);
   } else if (!rebase(settingsKey, state.choice) && state.gate) {
     fetchEpoch++;
     set({ gate: null, queue: restartCursor(state.queue) });
@@ -175,16 +191,44 @@ export function startDeck(userId: string, settingsKey: string) {
   void fill();
 }
 
+/** The choice the profile is known to hold. A failed save rolls back to it. */
+let profileChoice: DeckChoice = DEFAULT_DECK_CHOICE;
+
 /**
  * A new mode or new filters from the Discover controls. The queue refreshes
- * (a locked "for you" is left for the new mode), and the choice is saved on
- * this device.
+ * at once (a locked "for you" is left for the new mode), and the choice is
+ * saved to the profile behind it.
  */
 export function chooseDeck(next: DeckChoice) {
   if (!state.userId || state.settingsKey === null) return;
   const choice = normalizeDeckChoice(next);
-  saveChoice(state.userId, choice);
-  if (rebase(state.settingsKey, choice)) void fill();
+  if (!rebase(state.settingsKey, choice)) return;
+  void fill();
+  void saveChoice(choice);
+}
+
+/**
+ * Saves a choice to the profile. Saves run in order (server actions from one
+ * page run one at a time). If one fails while its choice is still the one
+ * shown, the deck goes back to the profile's choice and says so. If a newer
+ * choice replaced it meanwhile, that choice's own save decides.
+ */
+async function saveChoice(choice: DeckChoice) {
+  const gen = generation;
+  let result: { ok: true } | { ok: false; error: string };
+  try {
+    result = await saveDeckChoiceAction(choice);
+  } catch {
+    result = { ok: false, error: "Couldn't save your mode and filters. Check your connection." };
+  }
+  if (gen !== generation) return;
+  if (result.ok) {
+    profileChoice = choice;
+    return;
+  }
+  if (deckChoiceKey(state.choice) !== deckChoiceKey(choice)) return;
+  showNotice(result.error);
+  if (state.settingsKey !== null && rebase(state.settingsKey, profileChoice)) void fill();
 }
 
 /**
@@ -203,36 +247,16 @@ function rebase(settingsKey: string, choice: DeckChoice): boolean {
   return true;
 }
 
-function reset(userId: string, settingsKey: string) {
+function reset(userId: string, settingsKey: string, savedChoice: DeckChoice) {
   generation++;
   fetchEpoch++;
   lastSort = null;
   clearTimeout(toastTimer);
   saving.clear();
   preloaded.clear();
-  state = { ...initialState(userId, settingsKey, loadChoice(userId)), fetching: filling };
+  profileChoice = normalizeDeckChoice(savedChoice);
+  state = { ...initialState(userId, settingsKey, profileChoice), fetching: filling };
   for (const l of listeners) l();
-}
-
-/** Where this device keeps a user's Discover choice. */
-const choiceStorageKey = (userId: string) => `potato:deck-choice:${userId}`;
-
-function loadChoice(userId: string): DeckChoice {
-  try {
-    const saved = window.localStorage.getItem(choiceStorageKey(userId));
-    return saved ? normalizeDeckChoice(JSON.parse(saved)) : DEFAULT_DECK_CHOICE;
-  } catch {
-    // Storage blocked (private mode) or a corrupt value: start from the default.
-    return DEFAULT_DECK_CHOICE;
-  }
-}
-
-function saveChoice(userId: string, choice: DeckChoice) {
-  try {
-    window.localStorage.setItem(choiceStorageKey(userId), JSON.stringify(choice));
-  } catch {
-    // Storage blocked: the choice still holds until the app reloads.
-  }
 }
 
 /**
