@@ -39,6 +39,10 @@ export async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>)
   const url = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL is not set");
   const pool = new Pool({ connectionString: url, max: 1 });
+  // A connection that drops outside a query is reported here. Without a
+  // listener it would be an uncaught exception. The in-flight query still
+  // fails and the transaction rolls back.
+  pool.on("error", (err: Error) => console.error("postgres pool error:", err));
   try {
     const client = await pool.connect();
     try {

@@ -4,7 +4,7 @@ import { inArray } from "drizzle-orm";
 import { getDb, withTransaction, type Db } from "@/db/client";
 import { imdbRatings } from "@/db/schema";
 import type { ImdbRating } from "../types";
-import type { RatingsLoadTarget } from "./loader";
+import { checkAgainstCurrent, type RatingsLoadTarget, type ReplaceGuard } from "./loader";
 import type { RatingsStore } from "./ratings";
 import type { ImdbRatingRow } from "./tsv";
 
@@ -37,15 +37,16 @@ const LOAD_LOCK_KEY = "potato:imdb_ratings_load";
  *   1. an advisory lock, so two overlapping runs take turns;
  *   2. a temp staging table that is dropped at commit (no migration needed);
  *   3. the batches, inserted with unnest arrays;
- *   4. delete rows that left the dataset, upsert the rest (unchanged rows are
+ *   4. check the row count against the stored count (the shrink guard);
+ *   5. delete rows that left the dataset, upsert the rest (unchanged rows are
  *      not rewritten);
- *   5. commit.
+ *   6. commit.
  * Readers see the old table until the commit. A throw anywhere (including
  * the loader's row-count guard while batches are still streaming) rolls back.
  */
 export function createPostgresRatingsLoadTarget(): RatingsLoadTarget {
   return {
-    replaceAll: (batches: AsyncIterable<ImdbRatingRow[]>) =>
+    replaceAll: (batches: AsyncIterable<ImdbRatingRow[]>, guard: ReplaceGuard) =>
       withTransaction(async (client) => {
         await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [LOAD_LOCK_KEY]);
         await client.query(
@@ -66,6 +67,10 @@ export function createPostgresRatingsLoadTarget(): RatingsLoadTarget {
           );
           written += result.rowCount ?? 0;
         }
+
+        // Under the advisory lock, so no other load changes the count between this check and the swap.
+        const current = await client.query<{ n: number }>("SELECT count(*)::int AS n FROM imdb_ratings");
+        checkAgainstCurrent(written, current.rows[0].n, guard);
 
         await client.query(
           `DELETE FROM imdb_ratings r

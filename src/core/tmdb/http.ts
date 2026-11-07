@@ -1,8 +1,14 @@
 // The one place that sends HTTP requests to TMDB. It retries HTTP 429 and
-// 5xx responses with bounded backoff, honoring Retry-After (TMDB publishes no
+// 5xx responses and timeouts with bounded backoff, honoring Retry-After (TMDB publishes no
 // fixed rate limit, so the module reacts to 429 instead of pacing itself).
 
-import { TMDB_API_BASE, TMDB_BASE_BACKOFF_MS, TMDB_MAX_BACKOFF_MS, TMDB_MAX_RETRIES } from "./constants";
+import {
+  TMDB_API_BASE,
+  TMDB_BASE_BACKOFF_MS,
+  TMDB_MAX_BACKOFF_MS,
+  TMDB_MAX_RETRIES,
+  TMDB_REQUEST_TIMEOUT_MS,
+} from "./constants";
 
 export type FetchFn = (input: string, init?: RequestInit) => Promise<Response>;
 export type SleepFn = (ms: number) => Promise<void>;
@@ -25,6 +31,8 @@ export interface TmdbHttpOptions {
   /** Current time in ms, for HTTP-date Retry-After values. */
   now: () => number;
   maxRetries?: number;
+  /** Per-attempt timeout. Defaults to TMDB_REQUEST_TIMEOUT_MS. */
+  timeoutMs?: number;
 }
 
 export type Params = Record<string, string | number | boolean | undefined>;
@@ -46,12 +54,26 @@ export function buildPath(path: string, params: Params = {}): string {
  */
 export async function tmdbGet(opts: TmdbHttpOptions, pathWithQuery: string): Promise<unknown | null> {
   const maxRetries = opts.maxRetries ?? TMDB_MAX_RETRIES;
+  const timeoutMs = opts.timeoutMs ?? TMDB_REQUEST_TIMEOUT_MS;
   for (let attempt = 0; ; attempt++) {
-    const res = await opts.fetch(`${TMDB_API_BASE}${pathWithQuery}`, {
-      headers: { Authorization: `Bearer ${opts.token}`, Accept: "application/json" },
-    });
+    let res: Response;
+    let body: unknown;
+    try {
+      res = await opts.fetch(`${TMDB_API_BASE}${pathWithQuery}`, {
+        headers: { Authorization: `Bearer ${opts.token}`, Accept: "application/json" },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (res.ok) body = await res.json();
+    } catch (err) {
+      if (!isTimeout(err)) throw err;
+      if (attempt >= maxRetries) {
+        throw new TmdbError(`TMDB timed out after ${timeoutMs} ms for ${pathWithQuery.split("?")[0]}`, 0, pathWithQuery);
+      }
+      await opts.sleep(retryDelayMs(null, attempt, opts.now()));
+      continue;
+    }
 
-    if (res.ok) return res.json();
+    if (res.ok) return body;
     if (res.status === 404) {
       await res.body?.cancel();
       return null;
@@ -70,6 +92,11 @@ export async function tmdbGet(opts: TmdbHttpOptions, pathWithQuery: string): Pro
     await res.body?.cancel();
     await opts.sleep(retryDelayMs(res.headers.get("retry-after"), attempt, opts.now()));
   }
+}
+
+/** True for the abort that AbortSignal.timeout raises. */
+function isTimeout(err: unknown): boolean {
+  return err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
 }
 
 /**

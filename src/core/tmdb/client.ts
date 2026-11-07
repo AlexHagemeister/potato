@@ -26,6 +26,7 @@ import {
   type RawWatchProviders,
 } from "./normalize";
 import type {
+  CountryProviders,
   DiscoverFilters,
   Genre,
   ProviderListEntry,
@@ -57,6 +58,18 @@ export type TmdbClient = ReturnType<typeof createTmdbClient>;
 /** TMDB serves at most 500 pages of any list. */
 const MAX_PAGE = 500;
 
+/**
+ * The ways of watching that count as "on my streaming services": by
+ * subscription, free, or free with ads. Rent and buy do not count.
+ */
+export const STREAMING_MONETIZATION = ["flatrate", "free", "ads"] as const;
+
+/** IDs of the services that stream a title in one country, in TMDB's display order, without duplicates. */
+function streamingProviderIds(country: CountryProviders | undefined): number[] {
+  if (!country) return [];
+  return [...new Set(STREAMING_MONETIZATION.flatMap((kind) => country[kind].map((p) => p.id)))];
+}
+
 export function createTmdbClient(options: TmdbClientOptions) {
   const now = options.now ?? (() => new Date());
   const http = {
@@ -70,15 +83,21 @@ export function createTmdbClient(options: TmdbClientOptions) {
 
   const cacheKey = (kind: string, pathWithQuery: string) => `tmdb:v${TMDB_CACHE_VERSION}:${kind}:${pathWithQuery}`;
 
-  /** The fresh cached value, or undefined. A failing cache is treated as a miss, so TMDB still answers. */
-  async function readCache<T>(key: string): Promise<T | undefined> {
+  /** The cached entry, fresh or expired, or undefined. A failing cache is treated as a miss, so TMDB still answers. */
+  async function readCacheEntry<T>(key: string): Promise<{ data: T; fresh: boolean } | undefined> {
     try {
       const entry = await cache.get(key);
-      if (entry && entry.expiresAt.getTime() > now().getTime()) return entry.data as T;
+      if (entry) return { data: entry.data as T, fresh: entry.expiresAt.getTime() > now().getTime() };
     } catch (err) {
       console.warn(`tmdb cache read failed for ${key}:`, err);
     }
     return undefined;
+  }
+
+  /** The fresh cached value, or undefined. */
+  async function readCache<T>(key: string): Promise<T | undefined> {
+    const entry = await readCacheEntry<T>(key);
+    return entry?.fresh ? entry.data : undefined;
   }
 
   async function writeCache(key: string, data: unknown, ttlMs: number): Promise<void> {
@@ -112,18 +131,24 @@ export function createTmdbClient(options: TmdbClientOptions) {
   /**
    * Details and providers come from one request (append_to_response) but are
    * cached apart: details for 7 days, providers for 12 hours. When only the
-   * providers have gone stale, only they are refetched.
+   * providers have gone stale, only they are refetched. If that refresh
+   * fails, the card still shows: with the expired providers if there are
+   * any, or with none.
    */
   async function loadDetails(id: TitleId, needProviders: boolean): Promise<{ core: DetailsCore; providers?: ProvidersByCountry } | null> {
     const [core, providers] = await Promise.all([
       readCache<DetailsCore>(detailsKey(id)),
-      needProviders ? readCache<ProvidersByCountry>(providersKey(id)) : Promise.resolve(undefined),
+      needProviders ? readCacheEntry<ProvidersByCountry>(providersKey(id)) : Promise.resolve(undefined),
     ]);
 
     if (core !== undefined) {
-      if (!needProviders || providers !== undefined) return { core, providers };
-      const fresh = await getTitleProviders(id);
-      return fresh === null ? null : { core, providers: fresh };
+      if (!needProviders || providers?.fresh) return { core, providers: providers?.data };
+      try {
+        return { core, providers: (await getTitleProviders(id)) ?? providers?.data ?? {} };
+      } catch (err) {
+        console.warn(`tmdb providers refresh failed for ${formatTitleKey(id)}, serving stale:`, err);
+        return { core, providers: providers?.data ?? {} };
+      }
     }
 
     const raw = (await tmdbGet(
@@ -265,31 +290,44 @@ export function createTmdbClient(options: TmdbClientOptions) {
    * IMDb IDs for many titles, keyed by formatTitleKey. Discover and search
    * results carry no IMDb ID, so this reads each title's details (cached for
    * 7 days, and needed anyway when the card shows). Null when TMDB has no
-   * mapping or no such title.
+   * mapping or no such title. A title whose lookup fails also gets null, so
+   * one bad title does not sink the batch.
    */
   async function resolveImdbIds(ids: readonly TitleId[]): Promise<Map<string, string | null>> {
     const unique = [...new Map(ids.map((id) => [formatTitleKey(id), id])).values()];
     const out = new Map<string, string | null>();
     await mapWithConcurrency(unique, TMDB_FANOUT_CONCURRENCY, async (id) => {
-      const loaded = await loadDetails(id, false);
-      out.set(formatTitleKey(id), loaded?.core.imdbId ?? null);
+      try {
+        const loaded = await loadDetails(id, false);
+        out.set(formatTitleKey(id), loaded?.core.imdbId ?? null);
+      } catch (err) {
+        console.warn(`tmdb imdb id lookup failed for ${formatTitleKey(id)}:`, err);
+        out.set(formatTitleKey(id), null);
+      }
     });
     return out;
   }
 
   /**
    * Returns copies of the candidates with providerIds set to the services
-   * that stream each title by subscription in `country`, the field the deck's
-   * "on my services" filter reads. A title TMDB does not know keeps
-   * providerIds undefined (unknown). A title with no listing in the country
-   * gets [] (known, streaming nowhere).
+   * that stream each title in `country` (subscription, free, or with ads;
+   * not rent or buy), the field the deck's "on my services" filter reads.
+   * A title TMDB does not know, or whose lookup fails, keeps providerIds
+   * undefined (unknown). A title with no listing in the country gets []
+   * (known, streaming nowhere).
    */
   async function attachProviderIds<T extends Candidate>(candidates: readonly T[], country: string): Promise<T[]> {
     const region = checkCountry(country);
     return mapWithConcurrency(candidates, TMDB_FANOUT_CONCURRENCY, async (c) => {
-      const providers = await getTitleProviders(c);
+      let providers: ProvidersByCountry | null;
+      try {
+        providers = await getTitleProviders(c);
+      } catch (err) {
+        console.warn(`tmdb providers lookup failed for ${formatTitleKey(c)}:`, err);
+        return { ...c };
+      }
       if (providers === null) return { ...c };
-      return { ...c, providerIds: (providers[region]?.flatrate ?? []).map((p) => p.id) };
+      return { ...c, providerIds: streamingProviderIds(providers[region]) };
     });
   }
 
@@ -351,7 +389,7 @@ function filterParams(filters: DiscoverFilters): Params {
     if (!filters.watchRegion) throw new Error("discover: watchRegion is required with providerIds");
     params.with_watch_providers = uniqueSorted(filters.providerIds).join("|");
     params.watch_region = checkCountry(filters.watchRegion);
-    params.with_watch_monetization_types = "flatrate";
+    params.with_watch_monetization_types = STREAMING_MONETIZATION.join("|");
   } else if (filters.watchRegion) {
     params.watch_region = checkCountry(filters.watchRegion);
   }

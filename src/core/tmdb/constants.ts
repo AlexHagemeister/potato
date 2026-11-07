@@ -27,8 +27,10 @@ export const TMDB_TTL_MS = {
 /** Bumped when a cached value's shape changes, so old entries are ignored rather than misread. */
 export const TMDB_CACHE_VERSION = 1;
 
-/** Retries after an HTTP 429 or 5xx response, before giving up. */
+/** Retries after an HTTP 429 or 5xx response or a timeout, before giving up. */
 export const TMDB_MAX_RETRIES = 3;
+/** One attempt (response and body) gives up after this long and counts as retryable. */
+export const TMDB_REQUEST_TIMEOUT_MS = 8000;
 /** First backoff when the response carries no Retry-After header. Doubles each retry. */
 export const TMDB_BASE_BACKOFF_MS = 1000;
 /** No single wait is longer than this, whatever Retry-After says. */
