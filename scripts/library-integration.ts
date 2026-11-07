@@ -1,0 +1,592 @@
+// Integration checks for the library core against the real database schema.
+//
+// Runs only against potato_dev, never production:
+//   bun run test:db
+// It reads the URL from .env.development.local alone (Bun's automatic .env
+// loading is off, since .env.local points at production), refuses any URL
+// whose database is not potato_dev, and checks current_database() over the
+// same connection before writing anything. It creates two throwaway users and
+// deletes them at the end (their rows cascade).
+//
+// Not a *.test.ts file, so CI's `bun test` (which has no database) skips it.
+
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { parseEnv } from "node:util";
+import { inArray, sql } from "drizzle-orm";
+
+const REQUIRED_DATABASE = "potato_dev";
+const env = parseEnv(readFileSync(".env.development.local", "utf8"));
+const url = env.DATABASE_URL;
+if (!url) throw new Error(".env.development.local has no DATABASE_URL");
+const database = decodeURIComponent(new URL(url).pathname.replace(/^\//, ""));
+if (database !== REQUIRED_DATABASE) {
+  console.error(`Refusing to run: expected database "${REQUIRED_DATABASE}", found "${database}".`);
+  process.exit(1);
+}
+process.env.DATABASE_URL = url;
+
+const { getDb } = await import("../src/db/client");
+const { users } = await import("../src/db/schema");
+const lib = await import("../src/core/library");
+const { SKIP_DAYS } = await import("../src/core/deck/constants");
+type TitleRecord = import("../src/core/library").TitleRecord;
+type TitleId = import("../src/core/types").TitleId;
+
+const db = getDb();
+const [{ current_database: live }] = (await db.execute(sql`select current_database()`)).rows as [{ current_database: string }];
+if (live !== REQUIRED_DATABASE) {
+  console.error(`Refusing to run: connected to "${live}", not "${REQUIRED_DATABASE}".`);
+  process.exit(1);
+}
+console.log(`Connected to ${live}.`);
+
+const runId = randomUUID().slice(0, 8);
+const A = `itest-a-${runId}`;
+const B = `itest-b-${runId}`;
+const GHOST = `itest-ghost-${runId}`; // never inserted
+await db.insert(users).values([
+  { id: A, name: "Integration A", email: `${A}@example.invalid` },
+  { id: B, name: "Integration B", email: `${B}@example.invalid` },
+]);
+
+let t = Date.UTC(2026, 10, 1, 12, 0, 0, 0);
+/** A strictly increasing clock, so every write has a distinct, known time. */
+const tick = () => new Date((t += 1_000));
+
+let titleSeq = 1000;
+const fresh = (mediaType: "movie" | "tv" = "movie"): TitleId => ({ mediaType, tmdbId: ++titleSeq });
+
+function unwrap<T>(r: { ok: true; value: T } | { ok: false; error: unknown }): T {
+  if (!r.ok) throw new Error(`expected ok, got ${JSON.stringify(r.error)}`);
+  return r.value;
+}
+const state = async (user: string, ref: TitleId) => unwrap(await lib.getTitleState(user, ref));
+async function rowCount(user: string, ref: TitleId): Promise<number> {
+  const res = await db.execute(
+    sql`select count(*)::int as n from title_status where user_id = ${user} and media_type = ${ref.mediaType} and tmdb_id = ${ref.tmdbId}`,
+  );
+  return (res.rows[0] as { n: number }).n;
+}
+
+/** An assert.rejects check that the database refused with this SQLSTATE and constraint, not some other error. */
+function sqlState(code: string, constraint: string) {
+  return (error: unknown) => {
+    for (let e: unknown = error, depth = 0; e && depth < 5; e = (e as { cause?: unknown }).cause, depth++) {
+      const { code: c, constraint: k } = e as { code?: unknown; constraint?: unknown };
+      if (c === code && k === constraint) return true;
+    }
+    throw new Error(`expected ${code} on ${constraint}, got: ${error instanceof Error ? error.message : String(error)}`);
+  };
+}
+
+const results: { name: string; error?: unknown }[] = [];
+async function check(name: string, fn: () => Promise<void>) {
+  try {
+    await fn();
+    results.push({ name });
+    console.log(`  pass  ${name}`);
+  } catch (error) {
+    results.push({ name, error });
+    console.log(`  FAIL  ${name}\n        ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** Runs an action, then undoes it, and checks the row is exactly as before (or gone, if there was none). */
+async function actThenUndo(
+  ref: TitleId,
+  act: () => Promise<{ ok: true; value: { previous: TitleRecord | null; current: TitleRecord | null } } | { ok: false; error: unknown }>,
+) {
+  const before = await state(A, ref);
+  const outcome = unwrap(await act());
+  assert.deepEqual(outcome.previous, before, "previous is the row as it was");
+  assert.deepEqual(await state(A, ref), outcome.current, "current is the row as it is now");
+  // The undo value crosses JSON, as it would through the API.
+  const undo = unwrap(await lib.restoreTitleState(A, ref, JSON.parse(JSON.stringify(outcome))));
+  assert.deepEqual(undo.previous, outcome.current, "undo reports the state it replaced");
+  assert.deepEqual(await state(A, ref), before, "undo restores the row exactly, timestamps included");
+  return outcome;
+}
+
+try {
+  console.log("Card actions");
+
+  await check("each card action on a new title creates one row; undo deletes it", async () => {
+    for (const act of ["pass", "watchlist", "skip", "seen"] as const) {
+      const ref = fresh();
+      const now = tick();
+      const outcome = await actThenUndo(ref, () =>
+        act === "pass"
+          ? lib.passTitle(A, ref, { now })
+          : act === "watchlist"
+            ? lib.watchlistTitle(A, ref, { now })
+            : act === "skip"
+              ? lib.skipTitle(A, ref, { now })
+              : lib.markSeen(A, ref, { rating: 4.5, review: "Good." }, { now }),
+      );
+      assert.equal(outcome.previous, null);
+      assert.equal(outcome.current?.createdAt.getTime(), now.getTime());
+      assert.equal(await rowCount(A, ref), 0, `${act} undo leaves no row`);
+    }
+  });
+
+  await check("skip sets skipUntil to exactly SKIP_DAYS after now", async () => {
+    const ref = fresh();
+    const now = tick();
+    const { current } = unwrap(await lib.skipTitle(A, ref, { now }));
+    assert.equal(current?.skipUntil?.getTime(), now.getTime() + SKIP_DAYS * 86_400_000);
+    assert.equal(current?.rating, null);
+  });
+
+  await check("every transition between statuses keeps one row and undoes exactly", async () => {
+    const actions = {
+      passed: (ref: TitleId, now: Date) => lib.passTitle(A, ref, { now }),
+      watchlist: (ref: TitleId, now: Date) => lib.watchlistTitle(A, ref, { now }),
+      skipped: (ref: TitleId, now: Date) => lib.skipTitle(A, ref, { now }),
+      seen: (ref: TitleId, now: Date) => lib.markSeen(A, ref, { rating: 3, review: "Fine." }, { now }),
+    };
+    const statuses = Object.keys(actions) as (keyof typeof actions)[];
+    for (const from of statuses) {
+      for (const to of statuses) {
+        const ref = fresh();
+        const first = unwrap(await actions[from](ref, tick()));
+        const outcome = await actThenUndo(ref, () => actions[to](ref, tick()));
+        assert.equal(outcome.current?.status, to, `${from} -> ${to}`);
+        assert.equal(await rowCount(A, ref), 1, `${from} -> ${to} keeps one row`);
+        // created_at keeps the first action's time. Columns the new status does not use are cleared.
+        assert.equal(outcome.current?.createdAt.getTime(), first.current?.createdAt.getTime());
+        if (to !== "seen") assert.equal(outcome.current?.rating, null);
+        if (to !== "seen") assert.equal(outcome.current?.review, null);
+        if (to !== "skipped") assert.equal(outcome.current?.skipUntil, null);
+      }
+    }
+  });
+
+  await check("markSeen leaving out the review keeps the old one; null or blank clears it; a new one replaces it", async () => {
+    const ref = fresh();
+    unwrap(await lib.markSeen(A, ref, { rating: 2, review: "Old." }, { now: tick() }));
+    const kept = await actThenUndo(ref, () => lib.markSeen(A, ref, { rating: 2.5 }, { now: tick() }));
+    assert.equal(kept.current?.review, "Old.");
+    assert.equal(kept.current?.rating, 2.5);
+    const replaced = await actThenUndo(ref, () => lib.markSeen(A, ref, { rating: 3, review: "New." }, { now: tick() }));
+    assert.equal(replaced.current?.review, "New.");
+    for (const review of [null, "", "   "]) {
+      const cleared = await actThenUndo(ref, () => lib.markSeen(A, ref, { rating: 3, review }, { now: tick() }));
+      assert.equal(cleared.current?.review, null, `review ${JSON.stringify(review)} clears`);
+    }
+  });
+
+  await check("markSeen with no review on a title that was not seen writes no review", async () => {
+    const ref = fresh();
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+    const { current } = unwrap(await lib.markSeen(A, ref, { rating: 4 }, { now: tick() }));
+    assert.equal(current?.review, null);
+  });
+
+  await check("a review with a NUL character is invalid_review, not a database error", async () => {
+    const ref = fresh();
+    const r = await lib.markSeen(A, ref, { rating: 4, review: "bad\u0000byte" });
+    assert.equal(!r.ok && r.error.code, "invalid_review");
+    assert.equal(await rowCount(A, ref), 0);
+  });
+
+  console.log("Rating bounds");
+
+  await check("every half step from 0.5 to 5 stores exactly", async () => {
+    const ref = fresh();
+    for (let r = 0.5; r <= 5; r += 0.5) {
+      unwrap(await lib.markSeen(A, ref, { rating: r }, { now: tick() }));
+      assert.equal((await state(A, ref))?.rating, r);
+    }
+  });
+
+  await check("off-scale ratings return invalid_rating and change nothing", async () => {
+    const ref = fresh();
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+    const before = await state(A, ref);
+    for (const rating of [0, 0.25, 5.5, 3.3, -1, Number.NaN]) {
+      const r = await lib.markSeen(A, ref, { rating });
+      assert.equal(!r.ok && r.error.code, "invalid_rating", `rating ${rating}`);
+    }
+    assert.deepEqual(await state(A, ref), before);
+  });
+
+  await check("the database refuses an off-scale rating written around the core", async () => {
+    const ref = fresh();
+    await assert.rejects(
+      db.execute(sql`insert into title_status (user_id, media_type, tmdb_id, status, rating)
+        values (${A}, ${ref.mediaType}, ${ref.tmdbId}, 'seen', 5.5)`),
+      sqlState("23514", "title_status_rating_scale_check"),
+    );
+    await assert.rejects(
+      db.execute(sql`insert into title_status (user_id, media_type, tmdb_id, status, rating)
+        values (${A}, ${ref.mediaType}, ${ref.tmdbId}, 'seen', 3.3)`),
+      sqlState("23514", "title_status_rating_scale_check"),
+    );
+    assert.equal(await rowCount(A, ref), 0);
+  });
+
+  console.log("One row per title");
+
+  await check("the primary key refuses a second row for the same title", async () => {
+    const ref = fresh();
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+    await assert.rejects(
+      db.execute(sql`insert into title_status (user_id, media_type, tmdb_id, status)
+        values (${A}, ${ref.mediaType}, ${ref.tmdbId}, 'passed')`),
+      sqlState("23505", "title_status_pkey"),
+    );
+    assert.equal(await rowCount(A, ref), 1);
+  });
+
+  await check("movie and tv with the same TMDB ID are different titles", async () => {
+    const id = ++titleSeq;
+    unwrap(await lib.watchlistTitle(A, { mediaType: "movie", tmdbId: id }, { now: tick() }));
+    unwrap(await lib.passTitle(A, { mediaType: "tv", tmdbId: id }, { now: tick() }));
+    assert.equal((await state(A, { mediaType: "movie", tmdbId: id }))?.status, "watchlist");
+    assert.equal((await state(A, { mediaType: "tv", tmdbId: id }))?.status, "passed");
+  });
+
+  await check("one user's actions never touch another user's row", async () => {
+    const ref = fresh();
+    unwrap(await lib.watchlistTitle(B, ref, { now: tick() }));
+    const bBefore = await state(B, ref);
+    unwrap(await lib.markSeen(A, ref, { rating: 1 }, { now: tick() }));
+    unwrap(await lib.removeTitle(A, ref));
+    assert.deepEqual(await state(B, ref), bBefore);
+  });
+
+  console.log("Edits and moves");
+
+  await check("updateRatingReview: rating only keeps the review; null clears it; undo restores", async () => {
+    const ref = fresh();
+    unwrap(await lib.markSeen(A, ref, { rating: 3, review: "First take." }, { now: tick() }));
+    const r1 = await actThenUndo(ref, () => lib.updateRatingReview(A, ref, { rating: 4 }, { now: tick() }));
+    assert.equal(r1.current?.rating, 4);
+    assert.equal(r1.current?.review, "First take.");
+    const r2 = await actThenUndo(ref, () => lib.updateRatingReview(A, ref, { review: null }, { now: tick() }));
+    assert.equal(r2.current?.review, null);
+    assert.equal(r2.current?.rating, 3);
+    const r3 = await actThenUndo(ref, () => lib.updateRatingReview(A, ref, { review: "Better." }, { now: tick() }));
+    assert.equal(r3.current?.review, "Better.");
+  });
+
+  await check("updateRatingReview refuses a title that is not seen, or not there", async () => {
+    const ref = fresh();
+    const missing = await lib.updateRatingReview(A, ref, { rating: 4 });
+    assert.deepEqual(missing, { ok: false, error: { code: "not_found" } });
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+    const before = await state(A, ref);
+    const wrong = await lib.updateRatingReview(A, ref, { rating: 4 });
+    assert.deepEqual(wrong, { ok: false, error: { code: "wrong_state", status: "watchlist", expected: ["seen"] } });
+    assert.deepEqual(await state(A, ref), before);
+    const bad = await lib.updateRatingReview(A, ref, { rating: 6 });
+    assert.equal(!bad.ok && bad.error.code, "invalid_rating");
+  });
+
+  await check("moveTitle Watchlist to Seen asks for a rating; undo restores", async () => {
+    const ref = fresh();
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+    const noRating = await lib.moveTitle(A, ref, { from: "watchlist", to: "seen" } as never);
+    assert.equal(!noRating.ok && noRating.error.code, "invalid_rating");
+    const out = await actThenUndo(ref, () =>
+      lib.moveTitle(A, ref, { from: "watchlist", to: "seen", rating: 5, review: "Worth it." }, { now: tick() }),
+    );
+    assert.equal(out.current?.status, "seen");
+    assert.equal(out.current?.rating, 5);
+    assert.equal(out.current?.review, "Worth it.");
+  });
+
+  await check("moveTitle Passed to Watchlist; undo restores", async () => {
+    const ref = fresh();
+    unwrap(await lib.passTitle(A, ref, { now: tick() }));
+    const out = await actThenUndo(ref, () => lib.moveTitle(A, ref, { from: "passed", to: "watchlist" }, { now: tick() }));
+    assert.equal(out.current?.status, "watchlist");
+  });
+
+  await check("moveTitle refuses a stale from-list, a missing title, and an unlisted move", async () => {
+    const ref = fresh();
+    assert.deepEqual(await lib.moveTitle(A, ref, { from: "passed", to: "watchlist" }), { ok: false, error: { code: "not_found" } });
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+    const before = await state(A, ref);
+    assert.deepEqual(await lib.moveTitle(A, ref, { from: "passed", to: "watchlist" }), {
+      ok: false,
+      error: { code: "wrong_state", status: "watchlist", expected: ["passed"] },
+    });
+    const unlisted = await lib.moveTitle(A, ref, { from: "watchlist", to: "passed" } as never);
+    assert.equal(!unlisted.ok && unlisted.error.code, "invalid_move");
+    assert.deepEqual(await state(A, ref), before);
+  });
+
+  console.log("Remove and restore");
+
+  await check("removeTitle deletes the row, the deck sees it gone, and undo brings it back exactly", async () => {
+    const ref = fresh();
+    unwrap(await lib.markSeen(A, ref, { rating: 3.5, review: "Keep." }, { now: tick() }));
+    const out = await actThenUndo(ref, async () => {
+      const r = await lib.removeTitle(A, ref);
+      const states = unwrap(await lib.getUserTitleStates(A));
+      assert.equal(states.some((s) => s.mediaType === ref.mediaType && s.tmdbId === ref.tmdbId), false);
+      return r;
+    });
+    assert.equal(out.current, null);
+    assert.equal(out.previous?.review, "Keep.");
+  });
+
+  await check("removing a title with no row is not an error", async () => {
+    assert.deepEqual(unwrap(await lib.removeTitle(A, fresh())), { previous: null, current: null });
+  });
+
+  await check("undo of an undo redoes the action", async () => {
+    const ref = fresh();
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+    const act = unwrap(await lib.passTitle(A, ref, { now: tick() }));
+    const undo = unwrap(await lib.restoreTitleState(A, ref, act));
+    unwrap(await lib.restoreTitleState(A, ref, undo));
+    assert.deepEqual(await state(A, ref), act.current);
+    // Redo of a remove's undo, too.
+    const removed = unwrap(await lib.removeTitle(A, ref));
+    const putBack = unwrap(await lib.restoreTitleState(A, ref, removed));
+    unwrap(await lib.restoreTitleState(A, ref, putBack));
+    assert.equal(await state(A, ref), null);
+  });
+
+  await check("restore refuses a state for another title and a malformed state, changing nothing", async () => {
+    const ref = fresh();
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+    const act = unwrap(await lib.passTitle(A, ref, { now: tick() }));
+    const before = await state(A, ref);
+    const other = { previous: { ...act.previous!, tmdbId: ref.tmdbId + 1 }, current: act.current };
+    assert.equal((await lib.restoreTitleState(A, ref, other)).ok, false);
+    const malformed = { previous: { ...act.previous!, status: "seen" as const, rating: 9 }, current: act.current };
+    assert.equal((await lib.restoreTitleState(A, ref, malformed)).ok, false);
+    const noCurrent = { previous: act.previous } as never;
+    assert.equal((await lib.restoreTitleState(A, ref, noCurrent)).ok, false);
+    assert.deepEqual(await state(A, ref), before);
+  });
+
+  console.log("Stale undo (compare-and-set)");
+
+  await check("undo works with the default clock (no now passed), as the app will call it", async () => {
+    const ref = fresh();
+    await actThenUndo(ref, () => lib.watchlistTitle(A, ref));
+    unwrap(await lib.watchlistTitle(A, ref));
+    await actThenUndo(ref, () => lib.moveTitle(A, ref, { from: "watchlist", to: "seen", rating: 3 }));
+    unwrap(await lib.markSeen(A, ref, { rating: 3 }));
+    await actThenUndo(ref, () => lib.updateRatingReview(A, ref, { review: "Fine." }));
+    await actThenUndo(ref, () => lib.removeTitle(A, ref));
+  });
+
+  await check("a stale undo of a change refuses to overwrite a later edit", async () => {
+    const ref = fresh();
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+    const seen = unwrap(await lib.markSeen(A, ref, { rating: 4 }, { now: tick() })); // undo entry held on the phone
+    unwrap(await lib.updateRatingReview(A, ref, { rating: 5, review: "Rewatched." }, { now: tick() })); // elsewhere
+    const after = await state(A, ref);
+    const r = await lib.restoreTitleState(A, ref, JSON.parse(JSON.stringify(seen)));
+    assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "seen", expected: ["seen"] } });
+    assert.deepEqual(await state(A, ref), after, "the later rating and review survive");
+  });
+
+  await check("a stale undo of a first action refuses to delete a row edited since", async () => {
+    const ref = fresh();
+    const first = unwrap(await lib.markSeen(A, ref, { rating: 3 }, { now: tick() })); // previous: null
+    unwrap(await lib.updateRatingReview(A, ref, { review: "Added later." }, { now: tick() }));
+    const after = await state(A, ref);
+    const r = await lib.restoreTitleState(A, ref, first);
+    assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "seen", expected: ["seen"] } });
+    assert.deepEqual(await state(A, ref), after);
+  });
+
+  await check("a stale undo of a status change refuses a row that moved to another list", async () => {
+    const ref = fresh();
+    unwrap(await lib.passTitle(A, ref, { now: tick() }));
+    const toWatchlist = unwrap(await lib.moveTitle(A, ref, { from: "passed", to: "watchlist" }, { now: tick() }));
+    unwrap(await lib.skipTitle(A, ref, { now: tick() }));
+    const after = await state(A, ref);
+    const r = await lib.restoreTitleState(A, ref, toWatchlist);
+    assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "skipped", expected: ["watchlist"] } });
+    assert.deepEqual(await state(A, ref), after);
+  });
+
+  await check("a stale undo of a remove refuses to overwrite a row added back since", async () => {
+    const ref = fresh();
+    unwrap(await lib.markSeen(A, ref, { rating: 2, review: "Meh." }, { now: tick() }));
+    const removed = unwrap(await lib.removeTitle(A, ref));
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+    const after = await state(A, ref);
+    const r = await lib.restoreTitleState(A, ref, removed);
+    assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "watchlist", expected: [] } });
+    assert.deepEqual(await state(A, ref), after);
+  });
+
+  await check("a stale undo whose row was removed since returns not_found and creates nothing", async () => {
+    const ref = fresh();
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+    const passed = unwrap(await lib.passTitle(A, ref, { now: tick() }));
+    unwrap(await lib.removeTitle(A, ref));
+    assert.deepEqual(await lib.restoreTitleState(A, ref, passed), { ok: false, error: { code: "not_found" } });
+    assert.equal(await rowCount(A, ref), 0);
+  });
+
+  console.log("Queries");
+
+  await check("getUserTitleStates returns only the deck's fields, with skipUntil on skipped rows", async () => {
+    const states = unwrap(await lib.getUserTitleStates(B));
+    assert.ok(states.length >= 1);
+    for (const s of states) {
+      const keys = Object.keys(s).sort();
+      assert.deepEqual(keys, s.status === "skipped" ? ["mediaType", "skipUntil", "status", "tmdbId"] : ["mediaType", "status", "tmdbId"]);
+    }
+    const ref = fresh();
+    unwrap(await lib.skipTitle(B, ref, { now: tick() }));
+    const skipped = unwrap(await lib.getUserTitleStates(B)).find((s) => s.tmdbId === ref.tmdbId);
+    assert.ok(skipped?.status === "skipped" && skipped.skipUntil instanceof Date);
+  });
+
+  await check("getRatedCount counts seen rows only", async () => {
+    const before = unwrap(await lib.getRatedCount(B));
+    unwrap(await lib.markSeen(B, fresh(), { rating: 4 }, { now: tick() }));
+    unwrap(await lib.watchlistTitle(B, fresh(), { now: tick() }));
+    assert.equal(unwrap(await lib.getRatedCount(B)), before + 1);
+  });
+
+  await check("getTitleState is null for an untouched title", async () => {
+    assert.equal(await state(A, fresh()), null);
+  });
+
+  await check("getList pages a list in order with no repeats, and carries timestamps, rating, review", async () => {
+    const C = `itest-c-${runId}`;
+    await db.insert(users).values({ id: C, name: "Integration C", email: `${C}@example.invalid` });
+    try {
+      const refs = [fresh(), fresh(), fresh(), fresh(), fresh()];
+      for (const [i, ref] of refs.entries()) unwrap(await lib.markSeen(C, ref, { rating: (i % 3) + 1, review: `R${i}` }, { now: tick() }));
+      unwrap(await lib.watchlistTitle(C, fresh(), { now: tick() }));
+      const got: number[] = [];
+      let cursor: string | null = null;
+      do {
+        const page: Awaited<ReturnType<typeof lib.getList>> = await lib.getList(C, "seen", { limit: 2, cursor });
+        const p = unwrap(page);
+        got.push(...p.entries.map((e) => e.tmdbId));
+        for (const e of p.entries) assert.ok(e.createdAt instanceof Date && e.rating !== null && e.review?.startsWith("R"));
+        cursor = p.nextCursor;
+      } while (cursor);
+      assert.deepEqual(got, refs.map((r) => r.tmdbId).reverse(), "newest change first");
+      const byRating = unwrap(await lib.getList(C, "seen", { sort: "rating_desc" })).entries.map((e) => e.rating);
+      assert.deepEqual(byRating, [3, 2, 2, 1, 1]);
+      assert.equal(unwrap(await lib.getList(C, "watchlist")).entries.length, 1);
+      assert.equal(unwrap(await lib.getList(C, "passed")).entries.length, 0);
+    } finally {
+      await db.delete(users).where(inArray(users.id, [C]));
+    }
+  });
+
+  await check("getList filters with the deck's matchesFilters through a details lookup", async () => {
+    const D = `itest-d-${runId}`;
+    await db.insert(users).values({ id: D, name: "Integration D", email: `${D}@example.invalid` });
+    try {
+      const sciFiOnNetflix = fresh("tv");
+      const sciFiElsewhere = fresh("tv");
+      const drama = fresh("movie");
+      for (const ref of [sciFiOnNetflix, sciFiElsewhere, drama]) unwrap(await lib.watchlistTitle(D, ref, { now: tick() }));
+      unwrap(await lib.updateUserSettings(D, { providerIds: [8] }));
+      const meta = new Map([
+        [sciFiOnNetflix.tmdbId, { genreIds: [10765], year: 2023, providerIds: [8] }],
+        [sciFiElsewhere.tmdbId, { genreIds: [10765], year: 2023, providerIds: [337] }],
+        [drama.tmdbId, { genreIds: [18], year: 2001, providerIds: [8] }],
+      ]);
+      let lookups = 0;
+      const lookupDetails = async (refs: readonly TitleId[]) => {
+        lookups++;
+        return new Map(
+          refs.map((r) => [
+            `${r.mediaType}:${r.tmdbId}`,
+            { ...r, title: "x", popularity: 1, tmdbVoteAverage: 7, tmdbVoteCount: 10, ...meta.get(r.tmdbId)! },
+          ]),
+        );
+      };
+      const needs = await lib.getList(D, "watchlist", { filters: { genreIds: [10765] } });
+      assert.deepEqual(needs, { ok: false, error: { code: "details_lookup_required" } });
+      const page = unwrap(
+        await lib.getList(D, "watchlist", { filters: { genreIds: [10765], era: { fromYear: 2020 }, onMyServices: true }, lookupDetails }),
+      );
+      assert.deepEqual(page.entries.map((e) => e.tmdbId), [sciFiOnNetflix.tmdbId]);
+      assert.equal(page.entries[0]?.details?.year, 2023);
+      assert.equal(lookups, 1, "one batched lookup");
+      const tvOnly = unwrap(await lib.getList(D, "watchlist", { filters: { mediaTypes: ["tv"] } }));
+      assert.equal(tvOnly.entries.length, 2, "media type needs no lookup");
+    } finally {
+      await db.delete(users).where(inArray(users.id, [D]));
+    }
+  });
+
+  console.log("Settings");
+
+  await check("getUserSettings creates the default row, update changes only the named fields", async () => {
+    const s0 = unwrap(await lib.getUserSettings(A));
+    assert.equal(s0.country, "US");
+    assert.deepEqual(s0.providerIds, []);
+    const s1 = unwrap(await lib.updateUserSettings(A, { country: "gb" }));
+    assert.equal(s1.country, "GB");
+    assert.deepEqual(s1.providerIds, []);
+    const s2 = unwrap(await lib.updateUserSettings(A, { providerIds: [8, 337, 8] }));
+    assert.equal(s2.country, "GB");
+    assert.deepEqual(s2.providerIds, [8, 337]);
+    assert.deepEqual(unwrap(await lib.getUserSettings(A)).providerIds, [8, 337]);
+    const bad = await lib.updateUserSettings(A, { country: "Great Britain" });
+    assert.equal(!bad.ok && bad.error.code, "invalid_settings");
+  });
+
+  console.log("Unknown users and bad input");
+
+  await check("writes for a user id with no users row return unknown_user", async () => {
+    assert.deepEqual(await lib.watchlistTitle(GHOST, fresh()), { ok: false, error: { code: "unknown_user" } });
+    assert.deepEqual(await lib.getUserSettings(GHOST), { ok: false, error: { code: "unknown_user" } });
+    assert.deepEqual(await lib.updateUserSettings(GHOST, { country: "US" }), { ok: false, error: { code: "unknown_user" } });
+  });
+
+  await check("a bad title or user id is a typed error before any query", async () => {
+    const r1 = await lib.passTitle(A, { mediaType: "film", tmdbId: 1 } as never);
+    assert.equal(!r1.ok && r1.error.code, "invalid_title");
+    const r2 = await lib.passTitle("", fresh());
+    assert.equal(!r2.ok && r2.error.code, "invalid_user");
+    const r3 = await lib.passTitle(A, { mediaType: "movie", tmdbId: 3_000_000_000 });
+    assert.equal(!r3.ok && r3.error.code, "invalid_title");
+    const r4 = await lib.getTitleState(A, { mediaType: "tv", tmdbId: 2_147_483_648 });
+    assert.equal(!r4.ok && r4.error.code, "invalid_title");
+  });
+
+  await check("malformed list options and filters are invalid_list_query, not a throw", async () => {
+    const bad: unknown[] = [
+      "not an object",
+      { filters: "x" },
+      { filters: { mediaTypes: "movie" } },
+      { filters: { genreIds: ["18"] } },
+      { filters: { era: 2020 } },
+      { filters: { era: { fromYear: "2020" } } },
+      { filters: { onMyServices: "yes" } },
+      { lookupDetails: "not a function" },
+    ];
+    for (const options of bad) {
+      const r = await lib.getList(A, "watchlist", options as never);
+      assert.equal(!r.ok && r.error.code, "invalid_list_query", JSON.stringify(options));
+    }
+    assert.equal((await lib.getList(A, "watchlist", null)).ok, true);
+  });
+
+  await check("a country that only becomes two ASCII letters when uppercased is invalid_settings", async () => {
+    for (const country of ["ß", "ıt"]) {
+      const r = await lib.updateUserSettings(A, { country });
+      assert.equal(!r.ok && r.error.code, "invalid_settings", country);
+    }
+  });
+} finally {
+  await db.delete(users).where(inArray(users.id, [A, B]));
+  const left = await db.execute(sql`select count(*)::int as n from title_status where user_id in (${A}, ${B})`);
+  console.log(`Cleaned up test users (title_status rows left: ${(left.rows[0] as { n: number }).n}).`);
+}
+
+const failed = results.filter((r) => r.error);
+console.log(`\n${results.length - failed.length} passed, ${failed.length} failed.`);
+process.exit(failed.length ? 1 : 0);
