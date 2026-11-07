@@ -166,6 +166,12 @@ export const userSettings = pgTable(
       .array()
       .notNull()
       .default(sql`'{}'::integer[]`),
+    // Discover's mode and filters (core's DeckChoice), so they follow the user
+    // across devices. Core normalizes it on every read: '{}' reads as the
+    // default (Blend, no filters).
+    deckChoice: jsonb("deck_choice")
+      .notNull()
+      .default(sql`'{}'::jsonb`),
     updatedAt: updatedAt(),
   },
   (t) => [check("user_settings_country_check", sql`${t.country} ~ '^[A-Z]{2}$'`)],

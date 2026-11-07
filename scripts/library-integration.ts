@@ -504,8 +504,10 @@ try {
         [drama.tmdbId, { genreIds: [18], year: 2001, providerIds: [8] }],
       ]);
       let lookups = 0;
-      const lookupDetails = async (refs: readonly TitleId[]) => {
+      const countries: (string | undefined)[] = [];
+      const lookupDetails = async (refs: readonly TitleId[], context?: { country?: string }) => {
         lookups++;
+        countries.push(context?.country);
         return new Map(
           refs.map((r) => [
             `${r.mediaType}:${r.tmdbId}`,
@@ -521,8 +523,16 @@ try {
       assert.deepEqual(page.entries.map((e) => e.tmdbId), [sciFiOnNetflix.tmdbId]);
       assert.equal(page.entries[0]?.details?.year, 2023);
       assert.equal(lookups, 1, "one batched lookup");
+      assert.deepEqual(countries, ["US"], "on my services passes the user's country to the lookup");
+      const genreOnly = unwrap(await lib.getList(D, "watchlist", { filters: { genreIds: [10765] }, lookupDetails }));
+      assert.equal(genreOnly.entries.length, 2);
+      assert.deepEqual(countries, ["US", undefined], "no country without on my services");
       const tvOnly = unwrap(await lib.getList(D, "watchlist", { filters: { mediaTypes: ["tv"] } }));
       assert.equal(tvOnly.entries.length, 2, "media type needs no lookup");
+      unwrap(await lib.updateUserSettings(D, { providerIds: [] }));
+      const noServices = unwrap(await lib.getList(D, "watchlist", { filters: { onMyServices: true }, lookupDetails }));
+      assert.deepEqual(noServices, { status: "watchlist", entries: [], nextCursor: null });
+      assert.equal(lookups, 2, "no services: nothing can match, so no lookup");
     } finally {
       await db.delete(users).where(inArray(users.id, [D]));
     }
@@ -555,6 +565,29 @@ try {
     const after = unwrap(await lib.getUserSettings(A));
     assert.equal(after.country, before.country);
     assert.deepEqual(after.providerIds, before.providerIds);
+  });
+
+  await check("deck choice: default until saved, saved normalized, survives other settings writes, bad input changes nothing", async () => {
+    const D = `itest-deck-choice-${runId}`;
+    await db.insert(users).values({ id: D, name: "Integration Deck Choice", email: `${D}@example.invalid` });
+    try {
+      // No settings row yet: the read creates it and gives the default.
+      assert.deepEqual(unwrap(await lib.getDeckChoice(D)), { mode: "blend", filters: { type: "all", genres: [], era: "any", onMyServices: false } });
+      const choice = { mode: "top_rated", filters: { type: "tv", genres: ["scifi", "nosuchgenre"], era: "recent", onMyServices: true } };
+      const saved = unwrap(await lib.saveDeckChoice(D, choice));
+      assert.deepEqual(saved, { mode: "top_rated", filters: { type: "tv", genres: ["scifi"], era: "recent", onMyServices: true } });
+      assert.deepEqual(unwrap(await lib.getDeckChoice(D)), saved);
+      // A settings change keeps the choice, and the choice keeps the settings.
+      unwrap(await lib.updateUserSettings(D, { providerIds: [8] }));
+      assert.deepEqual(unwrap(await lib.getDeckChoice(D)), saved);
+      assert.deepEqual(unwrap(await lib.getUserSettings(D)).providerIds, [8]);
+      const bad = await lib.saveDeckChoice(D, { mode: "box_office", filters: {} });
+      assert.equal(!bad.ok && bad.error.code, "invalid_settings");
+      assert.deepEqual(unwrap(await lib.getDeckChoice(D)), saved);
+      assert.deepEqual(await lib.saveDeckChoice(GHOST, saved), { ok: false, error: { code: "unknown_user" } });
+    } finally {
+      await db.delete(users).where(inArray(users.id, [D]));
+    }
   });
 
   console.log("Lists tab rows");

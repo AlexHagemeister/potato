@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { TitleRecord } from "../library/types";
 import type { DetailsCore } from "../tmdb";
-import { toListRow } from "./lists";
+import type { Candidate } from "../types";
+import { createTitleInfoLookup, toListRow } from "./lists";
 
 const record: TitleRecord = {
   mediaType: "movie",
@@ -45,5 +46,50 @@ describe("toListRow", () => {
 
   test("a title with no poster gets a null poster URL", () => {
     expect(toListRow(record, { ...info, posterPath: null }).posterUrl).toBeNull();
+  });
+});
+
+describe("createTitleInfoLookup", () => {
+  const matrix = { ...info, tmdbId: 603 } as DetailsCore;
+  const lost = { ...info, mediaType: "tv", tmdbId: 1399, title: "Lost" } as DetailsCore;
+
+  function fakeTmdb() {
+    const calls: { lookup: number; attach: { ids: string[]; country: string }[] } = { lookup: 0, attach: [] };
+    const tmdb = {
+      lookupTitles: async () => {
+        calls.lookup++;
+        return new Map([
+          ["movie:603", matrix],
+          ["tv:1399", lost],
+        ]);
+      },
+      attachProviderIds: async <T extends Candidate>(cs: readonly T[], country: string): Promise<T[]> => {
+        calls.attach.push({ ids: cs.map((c) => `${c.mediaType}:${c.tmdbId}`), country });
+        // The real client leaves providerIds undefined when it can't tell.
+        return cs.map((c) => (c.tmdbId === 603 ? { ...c, providerIds: [8] } : { ...c }));
+      },
+    };
+    return { tmdb, calls };
+  }
+
+  const refs = [
+    { mediaType: "movie" as const, tmdbId: 603 },
+    { mediaType: "tv" as const, tmdbId: 1399 },
+  ];
+
+  test("without a country it reads display metadata only, with no streaming lookup", async () => {
+    const { tmdb, calls } = fakeTmdb();
+    const found = await createTitleInfoLookup(tmdb)(refs);
+    expect(calls).toEqual({ lookup: 1, attach: [] });
+    expect(found.get("movie:603")?.providerIds).toBeUndefined();
+  });
+
+  test("with a country it adds where each title streams there, keyed by the pair", async () => {
+    const { tmdb, calls } = fakeTmdb();
+    const found = await createTitleInfoLookup(tmdb)(refs, { country: "GB" });
+    expect(calls.attach).toEqual([{ ids: ["movie:603", "tv:1399"], country: "GB" }]);
+    expect(found.get("movie:603")?.providerIds).toEqual([8]);
+    expect(found.get("tv:1399")?.title).toBe("Lost");
+    expect(found.get("tv:1399")?.providerIds).toBeUndefined();
   });
 });

@@ -1,0 +1,1 @@
+ALTER TABLE "user_settings" ADD COLUMN "deck_choice" jsonb DEFAULT '{}'::jsonb NOT NULL;

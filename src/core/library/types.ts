@@ -93,7 +93,20 @@ export const MAX_LIST_LIMIT = 200;
  * metadata. The app layer passes the TMDB module's lookup in, so this module
  * never imports the TMDB module (CLAUDE.md rule 4 keeps one owner per service).
  */
-export type TitleDetailsLookup = (refs: readonly TitleId[]) => Promise<ReadonlyMap<string, Candidate>>;
+export type TitleDetailsLookup = (
+  refs: readonly TitleId[],
+  context?: DetailsLookupContext,
+) => Promise<ReadonlyMap<string, Candidate>>;
+
+/** What a details lookup needs beyond the titles. */
+export interface DetailsLookupContext {
+  /**
+   * Set when a filter reads streaming availability ("on my services"): the
+   * user's country. The lookup must then fill each candidate's providerIds for
+   * this country, or leave them undefined (unknown) when it cannot.
+   */
+  country?: string;
+}
 
 export interface ListOptions {
   /** The same filters the deck uses (VISION: "The filters that shape the deck also work on each list"). */

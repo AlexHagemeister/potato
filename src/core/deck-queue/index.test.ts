@@ -5,6 +5,7 @@ import type { MediaType } from "../types";
 import {
   addPage,
   afterRefusal,
+  deckInputChange,
   deckSettingsKey,
   emptyQueue,
   forgetTitle,
@@ -193,6 +194,24 @@ describe("deckSettingsKey", () => {
     expect(a).toBe(deckSettingsKey({ country: "us", providerIds: [8, 9, 15] }));
     expect(a).not.toBe(deckSettingsKey({ country: "GB", providerIds: [8, 9, 15] }));
     expect(a).not.toBe(deckSettingsKey({ country: "US", providerIds: [8, 9] }));
+  });
+});
+
+describe("deckInputChange", () => {
+  const base = { settingsKey: "US:8,9,15", choiceKey: "" };
+
+  test("nothing changed: no refresh", () => {
+    expect(deckInputChange(base, { ...base })).toEqual({ refresh: false });
+  });
+
+  test("a new mode or new filters refresh the queue and keep Undo", () => {
+    expect(deckInputChange(base, { ...base, choiceKey: "mode=popular" })).toEqual({ refresh: true, dropUndo: false });
+    expect(deckInputChange(base, { ...base, choiceKey: "genre=scifi&type=tv" })).toEqual({ refresh: true, dropUndo: false });
+  });
+
+  test("new settings refresh the queue and end Undo, with or without a new choice", () => {
+    expect(deckInputChange(base, { ...base, settingsKey: "GB:8" })).toEqual({ refresh: true, dropUndo: true });
+    expect(deckInputChange(base, { settingsKey: "GB:8", choiceKey: "mode=popular" })).toEqual({ refresh: true, dropUndo: true });
   });
 });
 

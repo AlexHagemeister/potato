@@ -13,6 +13,7 @@ import {
   markSeen,
   passTitle,
   restoreTitleState,
+  saveDeckChoice,
   skipTitle,
   watchlistTitle,
   type ActionOutcome,
@@ -84,4 +85,21 @@ export async function markSeenAction(ref: TitleId, rating: number, review: strin
 /** Undo: puts the title back the way it was before the sort, if nothing changed it since. */
 export async function undoSortAction(ref: TitleId, outcome: UndoInput): Promise<DeckActionResult> {
   return run(true, (userId) => restoreTitleState(userId, ref, outcome));
+}
+
+/** Saves the Discover mode and filters to the profile, so they follow the user across devices. Core validates the choice. */
+export async function saveDeckChoiceAction(choice: unknown): Promise<{ ok: true } | { ok: false; error: string }> {
+  const failed = { ok: false as const, error: "Couldn't save your mode and filters. Try again." };
+  const user = await getCurrentUserForRequest();
+  if (!user) return { ok: false, error: SIGNED_OUT };
+  try {
+    const result = await saveDeckChoice(user.id, choice);
+    if (result.ok) return { ok: true };
+    if (result.error.code === "unknown_user" || result.error.code === "invalid_user") return { ok: false, error: SIGNED_OUT };
+    console.error("deck choice rejected:", result.error);
+    return failed;
+  } catch (err) {
+    console.error("deck choice save failed:", err);
+    return failed;
+  }
 }
