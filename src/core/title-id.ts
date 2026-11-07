@@ -13,8 +13,8 @@ export const MAX_TMDB_ID = 2_147_483_647;
 
 /**
  * Why a value is not a valid title identity, or null when it is. The one
- * statement of the identity rules: formatTitleKey, parseTitleKey, and the
- * library's typed check all use it.
+ * statement of the identity rules: formatTitleKey, tryFormatTitleKey,
+ * parseTitleKey, and the library's typed check all use it.
  */
 export function titleIdError(id: unknown): string | null {
   if (typeof id !== "object" || id === null) return "title must be an object";
@@ -32,6 +32,16 @@ export function formatTitleKey(id: TitleId): string {
   const error = titleIdError(id);
   if (error) throw new Error(`formatTitleKey: ${error}`);
   return `${id.mediaType}:${id.tmdbId}`;
+}
+
+/**
+ * formatTitleKey without the throw: the key, or null when the value is not a
+ * valid title identity. For code that skips malformed rows instead of failing.
+ */
+export function tryFormatTitleKey(id: unknown): string | null {
+  if (titleIdError(id) !== null) return null;
+  const { mediaType, tmdbId } = id as TitleId;
+  return `${mediaType}:${tmdbId}`;
 }
 
 /** Inverse of formatTitleKey. Returns null for anything that is not a valid key. */

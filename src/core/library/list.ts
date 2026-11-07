@@ -6,7 +6,7 @@
 // need TMDB metadata, which the database does not hold, and filtering after a
 // database page would leave pages short. Loading the whole list avoids both.
 
-import { matchesFilters } from "../deck/build-deck";
+import { createFilterMatcher } from "../deck/build-deck";
 import { formatTitleKey } from "../title-id";
 import { LIST_STATUSES, type Candidate, type DeckFilters, type ListStatus } from "../types";
 import { fail, ok, type Result } from "../result";
@@ -126,7 +126,7 @@ export function filtersNeedDetails(filters: DeckFilters): boolean {
 /**
  * Keeps the rows that pass the filters. With metadata-dependent filters, a row
  * whose details are unknown fails them, the same way the deck treats unknown
- * metadata (matchesFilters).
+ * metadata (createFilterMatcher).
  */
 export function applyListFilters(
   rows: readonly TitleRecord[],
@@ -139,10 +139,11 @@ export function applyListFilters(
     return types?.length ? rows.filter((r) => types.includes(r.mediaType)) : [...rows];
   }
   if (!details) throw new Error("applyListFilters: these filters need details");
+  const matches = createFilterMatcher(filters, userProviderIds);
   return rows.filter((r) => {
     const d = details.get(formatTitleKey(r));
     // Judge the row's own identity, never a lookup that answered for another title.
-    return d !== undefined && matchesFilters({ ...d, mediaType: r.mediaType, tmdbId: r.tmdbId }, filters, userProviderIds);
+    return d !== undefined && matches({ ...d, mediaType: r.mediaType, tmdbId: r.tmdbId });
   });
 }
 
