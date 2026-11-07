@@ -38,14 +38,14 @@ export type CoreError =
   | { code: "details_lookup_required" }
   /** A settings value is invalid. */
   | { code: "invalid_settings"; message: string }
+  /** A deck request's mode, filters, or cursor is invalid, or the cursor belongs to another user, mode, filters, country, or services. */
+  | { code: "invalid_deck_query"; message: string }
+  /** TMDB has no title with this (media type, TMDB ID). */
+  | { code: "unknown_title" }
   /** The country is well formed, but TMDB has no streaming data for it. */
   | { code: "unknown_country"; country: string }
   /** The change saves more streaming services than one user may keep. */
-  | { code: "too_many_services"; max: number }
-  /** A deck request's mode, filters, or cursor is invalid, or the cursor belongs to another mode or filters. */
-  | { code: "invalid_deck_query"; message: string }
-  /** TMDB has no title with this (media type, TMDB ID). */
-  | { code: "unknown_title" };
+  | { code: "too_many_services"; max: number };
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: CoreError };
 
