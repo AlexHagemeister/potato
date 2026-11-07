@@ -147,10 +147,12 @@ try {
   });
 
   await check("every transition between statuses keeps one row and undoes exactly", async () => {
+    // seenShown: the card showed the title as Seen, so leaving Seen is a knowing move (issue 74). Undo must
+    // then bring the rating and review back exactly.
     const actions = {
-      passed: (ref: TitleId, now: Date) => lib.passTitle(A, ref, { now }),
-      watchlist: (ref: TitleId, now: Date) => lib.watchlistTitle(A, ref, { now }),
-      skipped: (ref: TitleId, now: Date) => lib.skipTitle(A, ref, { now }),
+      passed: (ref: TitleId, now: Date, seenShown: boolean) => lib.passTitle(A, ref, { now, seenShown }),
+      watchlist: (ref: TitleId, now: Date, seenShown: boolean) => lib.watchlistTitle(A, ref, { now, seenShown }),
+      skipped: (ref: TitleId, now: Date, seenShown: boolean) => lib.skipTitle(A, ref, { now, seenShown }),
       seen: (ref: TitleId, now: Date) => lib.markSeen(A, ref, { rating: 3, review: "Fine." }, { now }),
     };
     const statuses = Object.keys(actions) as (keyof typeof actions)[];
@@ -159,8 +161,8 @@ try {
         // Seen it on a Seen title refuses (issue 65), checked below.
         if (from === "seen" && to === "seen") continue;
         const ref = fresh();
-        const first = unwrap(await actions[from](ref, tick()));
-        const outcome = await actThenUndo(ref, () => actions[to](ref, tick()));
+        const first = unwrap(await actions[from](ref, tick(), false));
+        const outcome = await actThenUndo(ref, () => actions[to](ref, tick(), from === "seen"));
         assert.equal(outcome.current?.status, to, `${from} -> ${to}`);
         assert.equal(await rowCount(A, ref), 1, `${from} -> ${to} keeps one row`);
         // created_at keeps the first action's time. Columns the new status does not use are cleared.
@@ -207,6 +209,101 @@ try {
         assert.equal((await state(A, ref))?.review, "Elsewhere.");
       }
     }
+  });
+
+  const NOT_SEEN = ["watchlist", "passed", "skipped"];
+  const sorts = {
+    pass: (ref: TitleId, opts: object) => lib.passTitle(A, ref, { now: tick(), ...opts }),
+    skip: (ref: TitleId, opts: object) => lib.skipTitle(A, ref, { now: tick(), ...opts }),
+    watchlist: (ref: TitleId, opts: object) => lib.watchlistTitle(A, ref, { now: tick(), ...opts }),
+  };
+  /** Puts a fresh title on `startOn` (or no list), then marks it Seen "elsewhere", as another device would. */
+  async function seenElsewhere(startOn: "none" | "watchlist" | "passed" | "skipped"): Promise<TitleId> {
+    const ref = fresh();
+    if (startOn !== "none") unwrap(await sorts[startOn === "passed" ? "pass" : startOn === "skipped" ? "skip" : "watchlist"](ref, {}));
+    unwrap(
+      startOn === "watchlist"
+        ? await lib.moveTitle(A, ref, { from: "watchlist", to: "seen", rating: 5, review: "Elsewhere." }, { now: tick() })
+        : await lib.markSeen(A, ref, { rating: 5, review: "Elsewhere." }, { now: tick() }),
+    );
+    return ref;
+  }
+
+  await check("two devices: a stale card's Pass, Skip, or Watchlist never erases a rating and review written elsewhere (issue 74)", async () => {
+    // The phone's card shows the title on no list or another list. Another device marks it Seen with a review.
+    // The phone's stale card then gets Pass, Skip, or Watchlist, with seenShown left out or false.
+    for (const startOn of ["none", "watchlist", "passed", "skipped"] as const) {
+      for (const kind of Object.keys(sorts) as (keyof typeof sorts)[]) {
+        for (const opts of [{}, { seenShown: false }]) {
+          const ref = await seenElsewhere(startOn);
+          const elsewhere = await state(A, ref);
+          const label = `${startOn}, ${kind}, ${JSON.stringify(opts)}`;
+          const r = await sorts[kind](ref, opts);
+          assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "seen", expected: NOT_SEEN } }, label);
+          assert.deepEqual(await state(A, ref), elsewhere, `${label}: the row written elsewhere survives exactly`);
+          assert.equal((await state(A, ref))?.review, "Elsewhere.", label);
+        }
+      }
+    }
+  });
+
+  await check("only seenShown exactly true moves a Seen title; anything else a caller sends keeps the guard", async () => {
+    for (const seenShown of ["true", 1, null, {}]) {
+      const ref = await seenElsewhere("none");
+      const elsewhere = await state(A, ref);
+      const r = await sorts.pass(ref, { seenShown });
+      assert.equal(!r.ok && r.error.code, "wrong_state", JSON.stringify(seenShown));
+      assert.deepEqual(await state(A, ref), elsewhere);
+    }
+  });
+
+  await check("a card that shows the title as Seen still moves it off Seen (issue 43 unchanged), and undo restores the rating and review", async () => {
+    for (const kind of Object.keys(sorts) as (keyof typeof sorts)[]) {
+      const ref = await seenElsewhere("none");
+      const out = await actThenUndo(ref, () => sorts[kind](ref, { seenShown: true }));
+      assert.equal(out.previous?.review, "Elsewhere.", kind);
+      assert.equal(out.previous?.rating, 5, kind);
+      assert.equal(out.current?.rating, null, kind);
+      assert.equal((await state(A, ref))?.review, "Elsewhere.", `${kind}: undo brought the review back`);
+    }
+  });
+
+  await check("seenShown never lets Seen it replace a Seen row", async () => {
+    const ref = await seenElsewhere("none");
+    const elsewhere = await state(A, ref);
+    const r = await lib.markSeen(A, ref, { rating: 1, review: "Over it." }, { now: tick(), seenShown: true } as object);
+    assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "seen", expected: NOT_SEEN } });
+    assert.deepEqual(await state(A, ref), elsewhere);
+  });
+
+  await check("Pass, Skip, and Watchlist still move a title that is not Seen, stale or not, and undo restores it", async () => {
+    // A stale card that showed another list (or none) still re-sorts the title (PR 48, judgment call 5).
+    for (const startOn of ["none", "watchlist", "passed", "skipped"] as const) {
+      for (const kind of Object.keys(sorts) as (keyof typeof sorts)[]) {
+        const ref = fresh();
+        if (startOn !== "none") unwrap(await sorts[startOn === "passed" ? "pass" : startOn === "skipped" ? "skip" : "watchlist"](ref, {}));
+        const out = await actThenUndo(ref, () => sorts[kind](ref, {}));
+        assert.equal(out.current?.status, kind === "pass" ? "passed" : kind === "skip" ? "skipped" : "watchlist");
+      }
+    }
+  });
+
+  await check("two devices at the same instant: a refusal always says Seen, never not_found, and the Seen row survives", async () => {
+    // The phone's card shows no list. Another device marks the title Seen while the phone's Pass is in flight.
+    // Whichever lands first, the review survives, and a refused Pass reports where the title really is.
+    let refused = 0;
+    for (let i = 0; i < 30; i++) {
+      const ref = fresh();
+      const [, pass] = await Promise.all([lib.markSeen(A, ref, { rating: 5, review: "Elsewhere." }, { now: tick() }), sorts.pass(ref, {})]);
+      const row = await state(A, ref);
+      assert.equal(row?.status, "seen", `round ${i}`);
+      assert.equal(row?.review, "Elsewhere.", `round ${i}`);
+      if (!pass.ok) {
+        refused++;
+        assert.deepEqual(pass.error, { code: "wrong_state", status: "seen", expected: NOT_SEEN }, `round ${i}`);
+      }
+    }
+    console.log(`        (${refused} of 30 Passes landed after the Seen write and were refused)`);
   });
 
   await check("markSeen still moves a title from no list or any other list, and undo restores the exact row", async () => {

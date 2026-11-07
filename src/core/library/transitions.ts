@@ -4,7 +4,7 @@
 
 import { skipUntilFrom } from "../deck/constants";
 import type { TitleStatus } from "../types";
-import { fail, ok, type Result } from "../result";
+import { fail, ok, type CoreError, type Result } from "../result";
 import { validateRating, validateReview } from "./validate";
 import type { MoveRequest } from "./types";
 
@@ -16,15 +16,41 @@ export interface StatusColumns {
   skipUntil: Date | null;
 }
 
+/** Every status, in a fixed order. The Record type makes the compiler flag a status added to the schema. */
+const EVERY_STATUS = Object.keys({ watchlist: 0, passed: 0, skipped: 0, seen: 0 } satisfies Record<TitleStatus, 0>) as TitleStatus[];
+const NOT_SEEN = EVERY_STATUS.filter((s) => s !== "seen");
+
 /**
- * Where a title can be when Seen it is tapped on a card: on no list, or on
- * one of these. A title already Seen is changed only by a rating and review
- * edit (updateRatingReview), which shows the current review first. So a card
- * that went stale while the title was rated on another device can never
- * replace or clear a review the user was not shown (issue 65, VISION
- * invariant 6).
+ * The one rule for which row a card button may replace (issues 65 and 74,
+ * VISION invariant 6). Returns the statuses the title's row may have now for
+ * the write to go ahead. A title on no list can always be written. The
+ * write's SQL guard and its refusal's `expected` are both built from this.
+ *
+ * A Seen row holds a rating, and maybe a review, that the card may never have
+ * shown: another device or the AI connection can write them while the card
+ * sits open. So:
+ * - Seen it never replaces a Seen row. Changing a Seen title's rating or
+ *   review is updateRatingReview's job, and its callers show the current
+ *   review first.
+ * - Pass, Skip, and Watchlist replace a Seen row only when the caller showed
+ *   the title as Seen (`seenShown`). The user then moves it off the Seen list
+ *   knowingly (what that should ask first is issue 43). Without it, the card
+ *   is stale and the write refuses. Leaving it out is the safe default, so a
+ *   caller that never read the row (the AI connection) can't erase a review.
  */
-export const CARD_SEEN_FROM: readonly TitleStatus[] = ["watchlist", "passed", "skipped"];
+export function cardWriteFrom(intent: TitleStatus, seenShown: boolean): readonly TitleStatus[] {
+  return intent !== "seen" && seenShown ? EVERY_STATUS : NOT_SEEN;
+}
+
+/**
+ * The refusal when a card write's guard holds. Every allowed set holds every
+ * status but Seen, so the guard can only refuse a Seen row. The error says so
+ * directly, rather than reading the statement's snapshot, which can miss a
+ * Seen row committed at the same instant.
+ */
+export function cardWriteRefused(allowed: readonly TitleStatus[]): CoreError {
+  return { code: "wrong_state", status: "seen", expected: [...allowed] };
+}
 
 /** The four card buttons, as row writes. */
 export type CardIntent =

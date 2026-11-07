@@ -61,6 +61,17 @@ export interface ActionOptions {
   now?: Date;
 }
 
+/** Options for Pass, Skip, and Watchlist. */
+export interface SortOptions extends ActionOptions {
+  /**
+   * True when the caller showed the user this title as Seen, with its rating
+   * and review, before the tap. Only then may the write move a Seen title off
+   * the Seen list (cardWriteFrom, issue 74). Left out, a Seen title refuses
+   * with wrong_state, so a stale card never erases a review written elsewhere.
+   */
+  seenShown?: boolean;
+}
+
 /** The two list moves VISION names (Your lists). */
 export type MoveRequest =
   | { from: "watchlist"; to: "seen"; rating: number; review?: string | null }
