@@ -300,7 +300,7 @@ try {
       assert.equal(row?.review, "Elsewhere.", `round ${i}`);
       if (!pass.ok) {
         refused++;
-        assert.deepEqual(pass.error, { code: "wrong_state", status: "seen", expected: NOT_SEEN }, `round ${i}`);
+        assert.deepEqual(pass.error, { code: "wrong_state", status: "seen", expected: NOT_SEEN }, `round ${i}: ${JSON.stringify(pass.error)}`);
       }
     }
     console.log(`        (${refused} of 30 Passes landed after the Seen write and were refused)`);
