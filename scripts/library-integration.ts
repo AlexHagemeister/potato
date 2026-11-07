@@ -57,6 +57,11 @@ const tick = () => new Date((t += 1_000));
 
 let titleSeq = 1000;
 const fresh = (mediaType: "movie" | "tv" = "movie"): TitleId => ({ mediaType, tmdbId: ++titleSeq });
+// Stands in for TMDB's country list, so country changes need no TMDB token or network.
+const watchRegions = async () => [
+  { code: "GB", name: "United Kingdom" },
+  { code: "US", name: "United States" },
+];
 
 function unwrap<T>(r: { ok: true; value: T } | { ok: false; error: unknown }): T {
   if (!r.ok) throw new Error(`expected ok, got ${JSON.stringify(r.error)}`);
@@ -527,7 +532,7 @@ try {
     const s0 = unwrap(await lib.getUserSettings(A));
     assert.equal(s0.country, "US");
     assert.deepEqual(s0.providerIds, []);
-    const s1 = unwrap(await lib.updateUserSettings(A, { country: "gb" }));
+    const s1 = unwrap(await lib.updateUserSettings(A, { country: "gb" }, { watchRegions }));
     assert.equal(s1.country, "GB");
     assert.deepEqual(s1.providerIds, []);
     const s2 = unwrap(await lib.updateUserSettings(A, { providerIds: [8, 337, 8] }));
@@ -538,12 +543,24 @@ try {
     assert.equal(!bad.ok && bad.error.code, "invalid_settings");
   });
 
+  await check("a country TMDB has no data for and too many services are refused, and nothing changes", async () => {
+    const before = unwrap(await lib.getUserSettings(A));
+    const zz = await lib.updateUserSettings(A, { country: "ZZ" }, { watchRegions });
+    assert.deepEqual(zz, { ok: false, error: { code: "unknown_country", country: "ZZ" } });
+    const many = Array.from({ length: lib.MAX_PROVIDER_IDS + 1 }, (_, i) => i + 1);
+    const tooMany = await lib.updateUserSettings(A, { providerIds: many });
+    assert.deepEqual(tooMany, { ok: false, error: { code: "too_many_services", max: lib.MAX_PROVIDER_IDS } });
+    const after = unwrap(await lib.getUserSettings(A));
+    assert.equal(after.country, before.country);
+    assert.deepEqual(after.providerIds, before.providerIds);
+  });
+
   console.log("Unknown users and bad input");
 
   await check("writes for a user id with no users row return unknown_user", async () => {
     assert.deepEqual(await lib.watchlistTitle(GHOST, fresh()), { ok: false, error: { code: "unknown_user" } });
     assert.deepEqual(await lib.getUserSettings(GHOST), { ok: false, error: { code: "unknown_user" } });
-    assert.deepEqual(await lib.updateUserSettings(GHOST, { country: "US" }), { ok: false, error: { code: "unknown_user" } });
+    assert.deepEqual(await lib.updateUserSettings(GHOST, { country: "US" }, { watchRegions }), { ok: false, error: { code: "unknown_user" } });
   });
 
   await check("a bad title or user id is a typed error before any query", async () => {

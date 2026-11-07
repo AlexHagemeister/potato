@@ -14,6 +14,7 @@ export {
 export { getList, getRatedCount, getTitleState, getUserTitleStates } from "./queries";
 export {
   getUserSettings,
+  MAX_PROVIDER_IDS,
   updateUserSettings,
   validateSettingsPatch,
   type UserSettings,

@@ -7,9 +7,19 @@ import { getDb } from "@/db/client";
 import { userSettings } from "@/db/schema";
 import { FOREIGN_KEY_VIOLATION, pgErrorCode } from "../pg-error";
 import { fail, ok, validateUserId, type Result } from "../result";
+import { getTmdb } from "../tmdb/client";
+import type { WatchRegion } from "../tmdb/types";
 
 /** Largest value a Postgres integer holds. */
 const PG_INT_MAX = 2_147_483_647;
+
+/** The most streaming services one user can save. A guard against junk input, far above real use. */
+export const MAX_PROVIDER_IDS = 200;
+
+/** The countries a user can pick: those TMDB has streaming data for. */
+export type WatchRegionSource = () => Promise<readonly WatchRegion[]>;
+
+const tmdbWatchRegions: WatchRegionSource = () => getTmdb().getWatchRegions();
 
 export interface UserSettings {
   /** ISO 3166-1 alpha-2, uppercase. */
@@ -36,7 +46,9 @@ export async function ensureUserSettings(userId: string): Promise<void> {
  * Checks and normalizes a settings change. The country is trimmed and
  * uppercased, and must then be two letters (ISO 3166-1 alpha-2), as
  * user_settings_country_check requires. Provider IDs must be positive whole
- * numbers. Duplicates are dropped, keeping the first.
+ * numbers. Duplicates are dropped, keeping the first, and at most
+ * MAX_PROVIDER_IDS remain (too_many_services). Whether TMDB knows the country
+ * needs a lookup, so updateUserSettings checks that.
  */
 export function validateSettingsPatch(patch: unknown): Result<UserSettingsPatch> {
   const bad = (message: string) => fail<UserSettingsPatch>({ code: "invalid_settings", message });
@@ -60,6 +72,7 @@ export function validateSettingsPatch(patch: unknown): Result<UserSettingsPatch>
       }
     }
     out.providerIds = [...new Set(p.providerIds as number[])];
+    if (out.providerIds.length > MAX_PROVIDER_IDS) return fail({ code: "too_many_services", max: MAX_PROVIDER_IDS });
   }
   if (out.country === undefined && out.providerIds === undefined) return bad("the change names no field");
   return ok(out);
@@ -92,16 +105,27 @@ export async function getUserSettings(userId: string): Promise<Result<UserSettin
   return ok(toSettings(row));
 }
 
-/** Changes the fields the patch names and keeps the rest. Creates the row if it is missing. */
+/**
+ * Changes the fields the patch names and keeps the rest. Creates the row if it
+ * is missing. A new country must be one TMDB has streaming data for
+ * (unknown_country). That check reads TMDB's country list (cached), so a TMDB
+ * outage throws rather than saving an unchecked country. `watchRegions`
+ * replaces the TMDB lookup in tests.
+ */
 export async function updateUserSettings(
   userId: string,
   patch: UserSettingsPatch,
-  options: { now?: Date } = {},
+  options: { now?: Date; watchRegions?: WatchRegionSource } = {},
 ): Promise<Result<UserSettings>> {
   const u = validateUserId(userId);
   if (!u.ok) return u;
   const valid = validateSettingsPatch(patch);
   if (!valid.ok) return valid;
+  const country = valid.value.country;
+  if (country !== undefined) {
+    const regions = await (options.watchRegions ?? tmdbWatchRegions)();
+    if (!regions.some((r) => r.code === country)) return fail({ code: "unknown_country", country });
+  }
   const now = options.now ?? new Date();
   try {
     const [row] = await getDb()

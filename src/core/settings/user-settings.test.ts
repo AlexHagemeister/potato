@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { validateSettingsPatch } from "./user-settings";
+import { MAX_PROVIDER_IDS, updateUserSettings, validateSettingsPatch } from "./user-settings";
 
 describe("validateSettingsPatch", () => {
   test("uppercases and trims the country", () => {
@@ -27,5 +27,24 @@ describe("validateSettingsPatch", () => {
     expect(validateSettingsPatch({ providerIds: 8 }).ok).toBe(false);
     expect(validateSettingsPatch({}).ok).toBe(false);
     expect(validateSettingsPatch(null).ok).toBe(false);
+  });
+});
+
+describe("settings limits", () => {
+  test("caps saved services at MAX_PROVIDER_IDS, after dropping duplicates", () => {
+    const max = Array.from({ length: MAX_PROVIDER_IDS }, (_, i) => i + 1);
+    expect(validateSettingsPatch({ providerIds: [...max, 1] }).ok).toBe(true);
+    expect(validateSettingsPatch({ providerIds: [...max, MAX_PROVIDER_IDS + 1] })).toEqual({
+      ok: false,
+      error: { code: "too_many_services", max: MAX_PROVIDER_IDS },
+    });
+  });
+
+  test("a country TMDB has no streaming data for is unknown_country, checked before any write", async () => {
+    const watchRegions = async () => [{ code: "US", name: "United States" }];
+    expect(await updateUserSettings("user-1", { country: "zz" }, { watchRegions })).toEqual({
+      ok: false,
+      error: { code: "unknown_country", country: "ZZ" },
+    });
   });
 });
