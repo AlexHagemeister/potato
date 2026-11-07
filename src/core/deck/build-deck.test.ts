@@ -1,0 +1,425 @@
+import { describe, expect, test } from "bun:test";
+import type { Candidate, PoolName, UserTitleState } from "../types";
+import { buildDeck, type DeckInput, type DeckResult } from "./build-deck";
+import {
+  BLEND_WEIGHTS,
+  DEEP_CUTS_MIN_SCORE,
+  FOR_YOU_MIN_RATINGS,
+  SKIP_DAYS,
+  VOTE_THRESHOLDS,
+  skipUntilFrom,
+} from "./constants";
+
+const NOW = new Date("2026-11-06T12:00:00Z");
+
+/** A candidate with neutral defaults. It qualifies for popular and for_you only. */
+function cand(tmdbId: number, overrides: Partial<Candidate> = {}): Candidate {
+  return {
+    mediaType: "movie",
+    tmdbId,
+    title: `Title ${tmdbId}`,
+    year: 2020,
+    genreIds: [18],
+    popularity: 10,
+    tmdbVoteAverage: 6,
+    tmdbVoteCount: 50,
+    ...overrides,
+  };
+}
+
+/** Freezes the input and everything in it, so any in-place mutation throws. */
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object" && !(value instanceof Date) && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const v of Object.values(value)) deepFreeze(v);
+  }
+  return value;
+}
+
+function run(overrides: Partial<DeckInput> = {}): DeckResult {
+  return buildDeck(
+    deepFreeze({
+      states: [],
+      userProviderIds: [],
+      filters: {},
+      mode: "popular",
+      now: NOW,
+      ratedCount: 0,
+      pools: {},
+      ...overrides,
+    }),
+  );
+}
+
+/** Runs the engine and returns the dealt titles as "movie:603"-style keys. */
+function keys(overrides: Partial<DeckInput> = {}): string[] {
+  const result = run(overrides);
+  if (result.kind !== "cards") throw new Error(`expected cards, got ${result.kind}`);
+  return result.cards.map((c) => `${c.mediaType}:${c.tmdbId}`);
+}
+
+describe("list exclusion (VISION invariant 3)", () => {
+  const pool = [cand(1), cand(2), cand(3)];
+
+  for (const status of ["watchlist", "passed", "seen"] as const) {
+    test(`a title on ${status} never appears`, () => {
+      const states: UserTitleState[] = [{ mediaType: "movie", tmdbId: 2, status }];
+      expect(keys({ pools: { popular: pool }, states })).toEqual(["movie:1", "movie:3"]);
+    });
+  }
+
+  test("a listed title stays out of every mode", () => {
+    const states: UserTitleState[] = [{ mediaType: "movie", tmdbId: 1, status: "seen" }];
+    const all = { popular: pool, deep_cuts: pool, top_rated: pool, for_you: pool };
+    for (const mode of ["blend", "popular", "deep_cuts", "top_rated", "for_you"] as const) {
+      expect(keys({ pools: all, states, mode, ratedCount: FOR_YOU_MIN_RATINGS })).not.toContain("movie:1");
+    }
+  });
+
+  test("exclusion uses the (media type, TMDB ID) pair: a listed movie does not hide the series with the same ID", () => {
+    const states: UserTitleState[] = [{ mediaType: "movie", tmdbId: 603, status: "watchlist" }];
+    const pools = { popular: [cand(603), cand(603, { mediaType: "tv" })] };
+    expect(keys({ pools, states })).toEqual(["tv:603"]);
+  });
+});
+
+describe("skip expiry (Alex's ruling on issue 4)", () => {
+  const pools = { popular: [cand(1), cand(2)] };
+  const skippedAt = (skipUntil: Date): UserTitleState[] => [
+    { mediaType: "movie", tmdbId: 1, status: "skipped", skipUntil },
+  ];
+
+  test("a skipped title is hidden until its return time", () => {
+    const skipUntil = new Date(NOW.getTime() + 1);
+    expect(keys({ pools, states: skippedAt(skipUntil) })).toEqual(["movie:2"]);
+  });
+
+  test("a skipped title returns at exactly its return time", () => {
+    expect(keys({ pools, states: skippedAt(NOW) })).toEqual(["movie:1", "movie:2"]);
+  });
+
+  test("a skipped title stays back after its return time", () => {
+    const skipUntil = new Date(NOW.getTime() - 1);
+    expect(keys({ pools, states: skippedAt(skipUntil) })).toEqual(["movie:1", "movie:2"]);
+  });
+
+  test("skipUntilFrom is SKIP_DAYS of 24 hours after now, and the card returns then", () => {
+    expect(SKIP_DAYS).toBe(14);
+    const skipUntil = skipUntilFrom(NOW);
+    expect(skipUntil.getTime() - NOW.getTime()).toBe(14 * 24 * 60 * 60 * 1000);
+    const states = skippedAt(skipUntil);
+    expect(keys({ pools, states, now: new Date(skipUntil.getTime() - 1) })).toEqual(["movie:2"]);
+    expect(keys({ pools, states, now: skipUntil })).toEqual(["movie:1", "movie:2"]);
+  });
+});
+
+describe("filters", () => {
+  test("media type keeps only the chosen types", () => {
+    const pools = { popular: [cand(1), cand(2, { mediaType: "tv" })] };
+    expect(keys({ pools, filters: { mediaTypes: ["tv"] } })).toEqual(["tv:2"]);
+    expect(keys({ pools, filters: { mediaTypes: ["movie"] } })).toEqual(["movie:1"]);
+    expect(keys({ pools, filters: { mediaTypes: ["movie", "tv"] } })).toEqual(["movie:1", "tv:2"]);
+  });
+
+  test("genre matches a title in any chosen genre", () => {
+    const pools = {
+      popular: [cand(1, { genreIds: [878] }), cand(2, { genreIds: [18, 35] }), cand(3, { genreIds: [27] }), cand(4, { genreIds: [] })],
+    };
+    expect(keys({ pools, filters: { genreIds: [878] } })).toEqual(["movie:1"]);
+    expect(keys({ pools, filters: { genreIds: [878, 35] } })).toEqual(["movie:1", "movie:2"]);
+  });
+
+  test("era bounds are inclusive", () => {
+    const pools = { popular: [cand(1, { year: 1999 }), cand(2, { year: 2000 }), cand(3, { year: 2010 }), cand(4, { year: 2011 })] };
+    expect(keys({ pools, filters: { era: { fromYear: 2000, toYear: 2010 } } })).toEqual(["movie:2", "movie:3"]);
+    expect(keys({ pools, filters: { era: { fromYear: 2010 } } })).toEqual(["movie:3", "movie:4"]);
+    expect(keys({ pools, filters: { era: { toYear: 1999 } } })).toEqual(["movie:1"]);
+  });
+
+  test("an era filter excludes titles with no known year", () => {
+    const pools = { popular: [cand(1, { year: null }), cand(2, { year: 2020 })] };
+    expect(keys({ pools, filters: { era: { fromYear: 2000 } } })).toEqual(["movie:2"]);
+    expect(keys({ pools, filters: { era: {} } })).toEqual(["movie:1", "movie:2"]);
+  });
+
+  test("empty filter fields mean no filter", () => {
+    const pools = { popular: [cand(1), cand(2, { mediaType: "tv", year: null, genreIds: [] })] };
+    expect(keys({ pools, filters: { mediaTypes: [], genreIds: [], era: {}, onMyServices: false } })).toEqual([
+      "movie:1",
+      "tv:2",
+    ]);
+  });
+
+  test("filters combine: a modern sci-fi series on my services (the VISION test case)", () => {
+    const pools = {
+      popular: [
+        cand(1, { mediaType: "tv", genreIds: [10765], year: 2022, providerIds: [8] }),
+        cand(2, { mediaType: "movie", genreIds: [10765], year: 2022, providerIds: [8] }),
+        cand(3, { mediaType: "tv", genreIds: [18], year: 2022, providerIds: [8] }),
+        cand(4, { mediaType: "tv", genreIds: [10765], year: 1995, providerIds: [8] }),
+        cand(5, { mediaType: "tv", genreIds: [10765], year: 2022, providerIds: [337] }),
+      ],
+    };
+    const filters = { mediaTypes: ["tv" as const], genreIds: [10765], era: { fromYear: 2015 }, onMyServices: true };
+    expect(keys({ pools, filters, userProviderIds: [8, 9] })).toEqual(["tv:1"]);
+  });
+});
+
+describe("on my services", () => {
+  const pools = {
+    popular: [
+      cand(1, { providerIds: [8] }),
+      cand(2, { providerIds: [337, 9] }),
+      cand(3, { providerIds: [337] }),
+      cand(4, { providerIds: [] }),
+      cand(5),
+    ],
+  };
+
+  test("keeps titles on at least one of the user's services", () => {
+    expect(keys({ pools, userProviderIds: [8, 9], filters: { onMyServices: true } })).toEqual(["movie:1", "movie:2"]);
+  });
+
+  test("excludes titles with unknown availability and titles streaming nowhere", () => {
+    expect(keys({ pools, userProviderIds: [8, 9, 337], filters: { onMyServices: true } })).toEqual([
+      "movie:1",
+      "movie:2",
+      "movie:3",
+    ]);
+  });
+
+  test("a user with no services gets an empty deck", () => {
+    expect(keys({ pools, userProviderIds: [], filters: { onMyServices: true } })).toEqual([]);
+  });
+
+  test("off, availability does not matter", () => {
+    expect(keys({ pools, userProviderIds: [] })).toEqual(["movie:1", "movie:2", "movie:3", "movie:4", "movie:5"]);
+  });
+});
+
+describe("single modes", () => {
+  test("popular sorts by popularity, ties keep pool order", () => {
+    const pools = { popular: [cand(1, { popularity: 5 }), cand(2, { popularity: 50 }), cand(3, { popularity: 20 }), cand(4, { popularity: 20 })] };
+    expect(keys({ pools, mode: "popular" })).toEqual(["movie:2", "movie:3", "movie:4", "movie:1"]);
+  });
+
+  test("a single mode uses only its own pool", () => {
+    const pools = { popular: [cand(1)], for_you: [cand(2)] };
+    expect(keys({ pools, mode: "popular", ratedCount: FOR_YOU_MIN_RATINGS })).toEqual(["movie:1"]);
+  });
+
+  test("top rated sorts by IMDb rating, falling back to TMDB vote average without IMDb data", () => {
+    const imdbMin = VOTE_THRESHOLDS.imdb.topRatedMin;
+    const tmdbMin = VOTE_THRESHOLDS.tmdb.topRatedMin;
+    const pools = {
+      top_rated: [
+        cand(1, { imdb: { rating: 7.5, votes: imdbMin }, tmdbVoteAverage: 9.9, tmdbVoteCount: tmdbMin }),
+        cand(2, { imdb: { rating: 8.8, votes: imdbMin * 10 }, tmdbVoteCount: tmdbMin }),
+        cand(3, { tmdbVoteAverage: 8.0, tmdbVoteCount: tmdbMin }),
+      ],
+    };
+    expect(keys({ pools, mode: "top_rated" })).toEqual(["movie:2", "movie:3", "movie:1"]);
+  });
+
+  test("top rated breaks equal IMDb ratings by TMDB vote average", () => {
+    const imdb = { rating: 8.0, votes: VOTE_THRESHOLDS.imdb.topRatedMin };
+    const pools = {
+      top_rated: [cand(1, { imdb, tmdbVoteAverage: 7.0 }), cand(2, { imdb, tmdbVoteAverage: 7.8 })],
+    };
+    expect(keys({ pools, mode: "top_rated" })).toEqual(["movie:2", "movie:1"]);
+  });
+
+  test("top rated gates on votes from the same source as the rating", () => {
+    const { imdb, tmdb } = VOTE_THRESHOLDS;
+    const pools = {
+      top_rated: [
+        cand(1, { imdb: { rating: 9.5, votes: imdb.topRatedMin - 1 }, tmdbVoteCount: 100_000 }),
+        cand(2, { imdb: { rating: 8.0, votes: imdb.topRatedMin } }),
+        cand(3, { tmdbVoteAverage: 9.0, tmdbVoteCount: tmdb.topRatedMin - 1 }),
+        cand(4, { tmdbVoteAverage: 8.5, tmdbVoteCount: tmdb.topRatedMin }),
+      ],
+    };
+    expect(keys({ pools, mode: "top_rated" })).toEqual(["movie:4", "movie:2"]);
+  });
+
+  test("deep cuts keeps good titles in the low-vote band, best first", () => {
+    const { imdb, tmdb } = VOTE_THRESHOLDS;
+    const pools = {
+      deep_cuts: [
+        cand(1, { imdb: { rating: 7.2, votes: imdb.deepCutsMin } }), // at the band floor: in
+        cand(2, { imdb: { rating: 8.4, votes: imdb.topRatedMin - 1 } }), // just under the ceiling: in
+        cand(3, { imdb: { rating: 9.0, votes: imdb.topRatedMin } }), // at the ceiling: top rated, not a deep cut
+        cand(4, { imdb: { rating: 9.0, votes: imdb.deepCutsMin - 1 } }), // too few votes to trust
+        cand(5, { imdb: { rating: DEEP_CUTS_MIN_SCORE - 0.1, votes: 5_000 } }), // obscure but not good
+        cand(6, { imdb: { rating: DEEP_CUTS_MIN_SCORE, votes: 5_000 } }), // exactly at the quality floor: in
+        cand(7, { tmdbVoteAverage: 7.9, tmdbVoteCount: tmdb.deepCutsMin }), // no IMDb data: TMDB band
+        cand(8, { tmdbVoteAverage: 9.0, tmdbVoteCount: tmdb.topRatedMin }), // TMDB ceiling: out
+      ],
+    };
+    expect(keys({ pools, mode: "deep_cuts" })).toEqual(["movie:2", "movie:7", "movie:1", "movie:6"]);
+  });
+
+  test("for you keeps the order it was given", () => {
+    const pools = { for_you: [cand(3, { popularity: 1 }), cand(1, { popularity: 99 }), cand(2)] };
+    expect(keys({ pools, mode: "for_you", ratedCount: FOR_YOU_MIN_RATINGS })).toEqual(["movie:3", "movie:1", "movie:2"]);
+  });
+
+  test("a single pool with a duplicate deals the title once", () => {
+    const pools = { for_you: [cand(1), cand(2), cand(1)] };
+    expect(keys({ pools, mode: "for_you", ratedCount: FOR_YOU_MIN_RATINGS })).toEqual(["movie:1", "movie:2"]);
+  });
+});
+
+describe("for you lock", () => {
+  const pools = { for_you: [cand(1), cand(2)] };
+
+  test("locked one rating short of the threshold, even with a full pool", () => {
+    expect(run({ pools, mode: "for_you", ratedCount: FOR_YOU_MIN_RATINGS - 1 })).toEqual({
+      kind: "locked",
+      mode: "for_you",
+      ratedCount: FOR_YOU_MIN_RATINGS - 1,
+      required: FOR_YOU_MIN_RATINGS,
+      remaining: 1,
+    });
+  });
+
+  test("locked with no ratings at all", () => {
+    expect(run({ pools, mode: "for_you", ratedCount: 0 })).toMatchObject({ kind: "locked", remaining: FOR_YOU_MIN_RATINGS });
+  });
+
+  test("unlocked at the threshold", () => {
+    expect(keys({ pools, mode: "for_you", ratedCount: FOR_YOU_MIN_RATINGS })).toEqual(["movie:1", "movie:2"]);
+  });
+
+  test("unlocked with an empty pool is an empty deck, not a lock", () => {
+    expect(run({ pools: {}, mode: "for_you", ratedCount: FOR_YOU_MIN_RATINGS })).toEqual({ kind: "cards", cards: [] });
+  });
+});
+
+describe("blend (Alex's ruling on issue 5)", () => {
+  // Each pool's titles qualify for that pool's own mode.
+  const top = (id: number, rating: number) => cand(id, { imdb: { rating, votes: VOTE_THRESHOLDS.imdb.topRatedMin } });
+  const deep = (id: number, rating: number) => cand(id, { imdb: { rating, votes: VOTE_THRESHOLDS.imdb.deepCutsMin } });
+  const pools = {
+    popular: [cand(11, { popularity: 3 }), cand(12, { popularity: 2 }), cand(13, { popularity: 1 })],
+    deep_cuts: [deep(21, 8), deep(22, 7.5), deep(23, 7)],
+    top_rated: [top(31, 9), top(32, 8.5), top(33, 8)],
+    for_you: [cand(41), cand(42), cand(43)],
+  };
+
+  test("the weights are even", () => {
+    expect(Object.values(BLEND_WEIGHTS).every((w) => w === 1)).toBe(true);
+  });
+
+  test("before for you unlocks, popular, deep cuts, and top rated take equal turns", () => {
+    expect(keys({ pools, mode: "blend", ratedCount: FOR_YOU_MIN_RATINGS - 1 })).toEqual(
+      ["11", "21", "31", "12", "22", "32", "13", "23", "33"].map((id) => `movie:${id}`),
+    );
+  });
+
+  test("once unlocked, for you joins as an equal fourth", () => {
+    expect(keys({ pools, mode: "blend", ratedCount: FOR_YOU_MIN_RATINGS })).toEqual(
+      ["11", "21", "31", "41", "12", "22", "32", "42", "13", "23", "33", "43"].map((id) => `movie:${id}`),
+    );
+  });
+
+  test("blend never returns a lock", () => {
+    expect(run({ pools, mode: "blend", ratedCount: 0 }).kind).toBe("cards");
+  });
+
+  test("each pool is ordered by its own signal before interleaving", () => {
+    const shuffled = {
+      popular: [cand(13, { popularity: 1 }), cand(11, { popularity: 3 })],
+      deep_cuts: [deep(22, 7.5), deep(21, 8)],
+      top_rated: [top(32, 8.5), top(31, 9)],
+    };
+    expect(keys({ pools: shuffled, mode: "blend" })).toEqual(
+      ["11", "21", "31", "13", "22", "32"].map((id) => `movie:${id}`),
+    );
+  });
+
+  test("a duplicate across pools appears once, at its first turn, and does not cost the later pool its turn", () => {
+    const shared = cand(99, { popularity: 100, imdb: { rating: 9.9, votes: VOTE_THRESHOLDS.imdb.topRatedMin } });
+    const result = run({
+      mode: "blend",
+      pools: { popular: [shared, cand(11)], top_rated: [shared, top(31, 9)] },
+    });
+    if (result.kind !== "cards") throw new Error("expected cards");
+    expect(result.cards.map((c) => [c.tmdbId, c.source])).toEqual([
+      [99, "popular"],
+      [31, "top_rated"],
+      [11, "popular"],
+    ]);
+  });
+
+  test("dedupe uses the (media type, TMDB ID) pair: a movie and a series with the same ID both appear", () => {
+    const pools = { popular: [cand(603)], top_rated: [top(603, 9), { ...top(603, 9), mediaType: "tv" as const }] };
+    expect(keys({ pools, mode: "blend" })).toEqual(["movie:603", "tv:603"]);
+  });
+
+  test("an exhausted pool drops out and the others keep turning", () => {
+    const uneven = {
+      popular: [cand(11, { popularity: 3 }), cand(12, { popularity: 2 }), cand(13, { popularity: 1 })],
+      deep_cuts: [deep(21, 8)],
+      top_rated: [],
+    };
+    expect(keys({ pools: uneven, mode: "blend" })).toEqual(["movie:11", "movie:21", "movie:12", "movie:13"]);
+  });
+
+  test("filters and list exclusion apply inside the blend", () => {
+    const states: UserTitleState[] = [{ mediaType: "movie", tmdbId: 21, status: "passed" }];
+    const filtered = keys({ pools, mode: "blend", states, filters: { mediaTypes: ["movie"] } });
+    expect(filtered).not.toContain("movie:21");
+    expect(filtered.slice(0, 3)).toEqual(["movie:11", "movie:22", "movie:31"]);
+  });
+
+  test("source tags each card with its pool", () => {
+    const result = run({ pools, mode: "blend", ratedCount: FOR_YOU_MIN_RATINGS });
+    if (result.kind !== "cards") throw new Error("expected cards");
+    const sources: PoolName[] = result.cards.slice(0, 4).map((c) => c.source);
+    expect(sources).toEqual(["popular", "deep_cuts", "top_rated", "for_you"]);
+  });
+});
+
+describe("empty input", () => {
+  for (const mode of ["blend", "popular", "deep_cuts", "top_rated", "for_you"] as const) {
+    test(`${mode} with no pools gives an empty deck`, () => {
+      expect(run({ mode, pools: {}, ratedCount: FOR_YOU_MIN_RATINGS })).toEqual({ kind: "cards", cards: [] });
+    });
+    test(`${mode} with empty pools gives an empty deck`, () => {
+      const pools = { popular: [], deep_cuts: [], top_rated: [], for_you: [] };
+      expect(run({ mode, pools, ratedCount: FOR_YOU_MIN_RATINGS })).toEqual({ kind: "cards", cards: [] });
+    });
+  }
+
+  test("a deck where every title is already listed is empty", () => {
+    const states: UserTitleState[] = [
+      { mediaType: "movie", tmdbId: 1, status: "seen" },
+      { mediaType: "movie", tmdbId: 2, status: "watchlist" },
+    ];
+    expect(keys({ pools: { popular: [cand(1), cand(2)] }, states })).toEqual([]);
+  });
+});
+
+describe("purity", () => {
+  test("never mutates its input (all input is frozen) and gives the same output for the same input", () => {
+    const input: DeckInput = {
+      states: [{ mediaType: "movie", tmdbId: 2, status: "skipped", skipUntil: skipUntilFrom(NOW) }],
+      userProviderIds: [8],
+      filters: { genreIds: [18] },
+      mode: "blend",
+      now: NOW,
+      ratedCount: FOR_YOU_MIN_RATINGS,
+      pools: {
+        popular: [cand(3, { popularity: 1 }), cand(1, { popularity: 9 }), cand(2)],
+        top_rated: [cand(5, { imdb: { rating: 8, votes: 30_000 } }), cand(4, { imdb: { rating: 9, votes: 30_000 } })],
+        for_you: [cand(6), cand(1)],
+      },
+    };
+    const before = JSON.stringify(input);
+    const first = run(input);
+    const second = run(input);
+    expect(second).toEqual(first);
+    expect(JSON.stringify(input)).toBe(before);
+  });
+});
