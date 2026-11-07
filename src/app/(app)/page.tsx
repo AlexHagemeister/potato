@@ -9,6 +9,8 @@ import { SignedOutScreen } from "./_shell/signed-out";
 // cards in the browser (from /api/deck) and keeps them across tab switches, so
 // coming back to Discover shows the same card at once. The settings key tells
 // it when the country or services changed, so it refetches the queued cards.
+// Whether any services are picked tells the filters whether "On my services"
+// can match anything.
 export default async function DiscoverPage() {
   // Checked here too, not only in the shell layout, which a tab tap does not re-run.
   const user = await getCurrentUserForRequest();
