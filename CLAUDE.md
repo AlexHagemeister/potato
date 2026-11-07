@@ -46,6 +46,9 @@ Before any work, orient from the record:
 - **Phase 0 before any feature code:** the app skeleton, CI (typecheck, lint, tests, build), the Neon database, Google sign-in, and a green production deploy on Vercel.
 - **One slice, one branch, one PR.** The PR body says what changed and why, lists each judgment call with its reason and what would justify reversing it, and shows how the change was verified, with a screenshot at iPhone viewport for any UI change.
 - **Verify in the running app,** not only in tests: Playwright at an iPhone viewport (390 by 844), plus the Vercel preview deployment for the PR.
+- **Use the app, don't just look at it.** Once the UI exists, verify any PR that touches a flow by driving that flow end to end in a browser at 390 by 844: tap through each step and check the result after each tap. A screenshot alone does not count. The PR body names each flow walked and what was checked.
+- **Walk every flow at each phase boundary:** the end of phase 0, after each major feature, and before the milestone handoff. A fresh agent with no build context uses the app the way Alex would: sign in, sort a dozen cards with each button, undo, rate and review, search, filter, change settings, then reload and confirm everything persisted. Each break becomes a fix before more feature work, or a needs-alex issue if it is a product call.
+- **Behind sign-in, use a development-only test session.** Agents cannot sign in to Google as Alex. A test login exists only in development and is disabled in production builds.
 - **Review every PR with a fresh agent.** The agent that built the PR never reviews it. A subagent with no build context reviews it:
   1. It invokes the `code-review` skill at `high` effort on the PR number, with `--comment`, so findings land on the PR as comments.
   2. It reads VISION.md and comments on any invariant the PR fights.
