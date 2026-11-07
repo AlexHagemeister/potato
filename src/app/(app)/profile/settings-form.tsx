@@ -170,7 +170,6 @@ export function SettingsForm({ initialCountry, initialProviderIds, countries, in
             </ul>
           )}
         </div>
-        <p className="mt-2 px-1 text-xs text-muted">Streaming data from JustWatch.</p>
       </section>
     </>
   );
