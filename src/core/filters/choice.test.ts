@@ -5,6 +5,8 @@ import {
   DEFAULT_FILTER_CHOICE,
   ERA_CHOICES,
   GENRE_GROUPS,
+  MIN_RATING_CHOICES,
+  MIN_RATING_LABELS,
   describeFilterChoice,
   eraBounds,
   filterChoiceFromParams,
@@ -116,6 +118,23 @@ describe("toDeckFilters", () => {
     expect(toDeckFilters(choice({ genres: ["comedy"] }), NOW).genreIds).toEqual([35]);
   });
 
+  test("each minimum IMDb rating preset becomes its number, and Any adds no filter", () => {
+    expect(toDeckFilters(choice({ minRating: "any" }), NOW)).toEqual({});
+    expect(toDeckFilters(choice({ minRating: "7" }), NOW)).toEqual({ minImdbRating: 7 });
+    expect(toDeckFilters(choice({ minRating: "7.5" }), NOW)).toEqual({ minImdbRating: 7.5 });
+    expect(toDeckFilters(choice({ minRating: "8" }), NOW)).toEqual({ minImdbRating: 8 });
+    expect(MIN_RATING_CHOICES).toEqual(["any", "7", "7.5", "8"]);
+    for (const r of MIN_RATING_CHOICES) expect(MIN_RATING_LABELS[r]).toBeTruthy();
+  });
+
+  test("the VISION test case with a minimum: a good modern sci-fi series on my services", () => {
+    const filters = toDeckFilters(choice({ type: "tv", genres: ["scifi"], era: "last10", minRating: "7.5", onMyServices: true }), NOW);
+    const good = { genreIds: [10765], year: 2022, providerIds: [8] };
+    expect(matchesFilters(candidate({ ...good, imdb: { rating: 7.9, votes: 40_000 } }), filters, [8])).toBe(true);
+    expect(matchesFilters(candidate({ ...good, imdb: { rating: 7.1, votes: 40_000 } }), filters, [8])).toBe(false);
+    expect(matchesFilters(candidate({ ...good, tmdbVoteAverage: 9 }), filters, [8])).toBe(false);
+  });
+
   test("a genre that does not exist for the chosen type is dropped, never widened to no genre filter by accident", () => {
     // Horror has no series genre. Dropped, so the series filter stands alone.
     expect(toDeckFilters(choice({ type: "tv", genres: ["horror"] }), NOW)).toEqual({ mediaTypes: ["tv"] });
@@ -125,9 +144,17 @@ describe("toDeckFilters", () => {
 
 describe("normalizeFilterChoice", () => {
   test("junk falls back to the default", () => {
-    for (const junk of [undefined, null, "x", 3, [], { type: "film", era: "1980s", genres: "scifi", onMyServices: "yes" }]) {
+    for (const junk of [undefined, null, "x", 3, [], { type: "film", era: "1980s", genres: "scifi", minRating: 7.5, onMyServices: "yes" }]) {
       expect(normalizeFilterChoice(junk)).toEqual(choice({}));
     }
+  });
+
+  test("a choice saved before the minimum rating existed loads with no minimum", () => {
+    expect(normalizeFilterChoice({ type: "tv", genres: ["scifi"], era: "recent", onMyServices: true })).toEqual(
+      choice({ type: "tv", genres: ["scifi"], era: "recent", onMyServices: true }),
+    );
+    expect(normalizeFilterChoice({ minRating: "9" }).minRating).toBe("any");
+    expect(normalizeFilterChoice({ minRating: "7.5" }).minRating).toBe("7.5");
   });
 
   test("drops unknown and duplicate genres and keeps display order", () => {
@@ -143,16 +170,16 @@ describe("normalizeFilterChoice", () => {
 
 describe("query params", () => {
   test("round trip, with defaults left out", () => {
-    const c = choice({ type: "tv", genres: ["scifi", "drama"], era: "recent", onMyServices: true });
+    const c = choice({ type: "tv", genres: ["scifi", "drama"], era: "recent", minRating: "8", onMyServices: true });
     const params = filterChoiceToParams(c);
-    expect(params).toEqual({ type: "tv", genre: "drama,scifi", era: "recent", mine: "1" });
+    expect(params).toEqual({ type: "tv", genre: "drama,scifi", era: "recent", imdb: "8", mine: "1" });
     expect(filterChoiceFromParams(new URLSearchParams(params))).toEqual(normalizeFilterChoice(c));
     expect(filterChoiceFromParams(params)).toEqual(normalizeFilterChoice(c));
     expect(filterChoiceToParams(choice({}))).toEqual({});
   });
 
   test("Next.js array values use the first, and junk is ignored", () => {
-    expect(filterChoiceFromParams({ type: ["movie", "tv"], genre: "horror,,bogus", era: "soon", mine: "true" })).toEqual(
+    expect(filterChoiceFromParams({ type: ["movie", "tv"], genre: "horror,,bogus", era: "soon", imdb: "9.5", mine: "true" })).toEqual(
       choice({ type: "movie", genres: ["horror"] }),
     );
     expect(filterChoiceFromParams({})).toEqual(choice({}));
@@ -161,10 +188,11 @@ describe("query params", () => {
 
 describe("describeFilterChoice and isDefaultFilterChoice", () => {
   test("labels follow the control's order", () => {
-    expect(describeFilterChoice(choice({ type: "tv", genres: ["scifi"], era: "recent", onMyServices: true }))).toEqual([
+    expect(describeFilterChoice(choice({ type: "tv", genres: ["scifi"], era: "recent", minRating: "7.5", onMyServices: true }))).toEqual([
       "Series",
       "Sci-Fi",
       "Recent",
+      "IMDb 7.5+",
       "My services",
     ]);
     expect(describeFilterChoice(choice({}))).toEqual([]);
@@ -174,6 +202,7 @@ describe("describeFilterChoice and isDefaultFilterChoice", () => {
     expect(isDefaultFilterChoice(choice({}))).toBe(true);
     for (const era of ERA_CHOICES.filter((e) => e !== "any")) expect(isDefaultFilterChoice(choice({ era }))).toBe(false);
     expect(isDefaultFilterChoice(choice({ onMyServices: true }))).toBe(false);
+    for (const minRating of MIN_RATING_CHOICES.filter((r) => r !== "any")) expect(isDefaultFilterChoice(choice({ minRating }))).toBe(false);
     expect(isDefaultFilterChoice(choice({ type: "movie" }))).toBe(false);
   });
 });

@@ -79,6 +79,10 @@ describe("parseListQuery", () => {
     { filters: { era: { fromYear: "2020" } } },
     { filters: { era: { toYear: 1.5 } } },
     { filters: { onMyServices: "yes" } },
+    { filters: { minImdbRating: "7.5" } },
+    { filters: { minImdbRating: 11 } },
+    { filters: { minImdbRating: -0.5 } },
+    { filters: { minImdbRating: Number.NaN } },
     { lookupDetails: "not a function" },
   ])("malformed options %p are invalid_list_query, not a throw", (options) => {
     expect(parseListQuery("watchlist", options as never)).toMatchObject({ ok: false, error: { code: "invalid_list_query" } });
@@ -86,12 +90,21 @@ describe("parseListQuery", () => {
 
   test("well-formed filters pass through, with era bounds normalized", () => {
     const result = parseListQuery("watchlist", {
-      filters: { mediaTypes: ["tv"], genreIds: [18], era: { fromYear: 2000 }, onMyServices: false },
+      filters: { mediaTypes: ["tv"], genreIds: [18], era: { fromYear: 2000 }, onMyServices: false, minImdbRating: 7.5 },
     });
     expect(result).toMatchObject({
       ok: true,
-      value: { filters: { mediaTypes: ["tv"], genreIds: [18], era: { fromYear: 2000, toYear: null }, onMyServices: false } },
+      value: {
+        filters: { mediaTypes: ["tv"], genreIds: [18], era: { fromYear: 2000, toYear: null }, onMyServices: false, minImdbRating: 7.5 },
+      },
     });
+  });
+
+  test("a minimum IMDb rating of 0 means no minimum, so unrated titles are not hidden", () => {
+    const result = parseListQuery("watchlist", { filters: { minImdbRating: 0 } });
+    if (!result.ok) throw new Error("expected ok");
+    expect("minImdbRating" in result.value.filters).toBe(false);
+    expect(filtersNeedDetails(result.value.filters)).toBe(false);
   });
 });
 
@@ -119,6 +132,20 @@ describe("filters", () => {
     expect(filtersNeedDetails({ genreIds: [878] })).toBe(true);
     expect(filtersNeedDetails({ era: { fromYear: 2020 } })).toBe(true);
     expect(filtersNeedDetails({ onMyServices: true })).toBe(true);
+    // The IMDb rating needs the IMDb ID, which comes with the details.
+    expect(filtersNeedDetails({ minImdbRating: 7.5 })).toBe(true);
+  });
+
+  test("a minimum IMDb rating keeps rows rated at or above it, and drops rows with no IMDb rating", () => {
+    const rows = [rec(1), rec(2), rec(3), rec(4)];
+    const details = new Map([
+      ["movie:1", cand(1, { imdb: { rating: 8, votes: 1_000 } })],
+      ["movie:2", cand(2, { imdb: { rating: 7.4, votes: 1_000 } })],
+      ["movie:3", cand(3, { tmdbVoteAverage: 9 })],
+      // movie:4 has no details at all.
+    ]);
+    expect(ids(applyListFilters(rows, { minImdbRating: 7.5 }, details, []))).toEqual(["movie:1"]);
+    expect(ids(applyListFilters(rows, { minImdbRating: 7 }, details, []))).toEqual(["movie:1", "movie:2"]);
   });
 
   test("media type filters on the row itself", () => {

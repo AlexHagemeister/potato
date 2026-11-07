@@ -6,6 +6,8 @@ import {
   DEFAULT_FILTER_CHOICE,
   ERA_CHOICES,
   ERA_LABELS,
+  MIN_RATING_CHOICES,
+  MIN_RATING_LABELS,
   TYPE_CHOICES,
   TYPE_LABELS,
   describeFilterChoice,
@@ -122,22 +124,7 @@ function FilterSheet({
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-4 pb-[calc(env(safe-area-inset-bottom)+1.5rem)]">
         <Section label="Type">
-          <div role="radiogroup" aria-label="Type" className="grid grid-cols-3 gap-1 rounded-xl bg-surface p-1">
-            {TYPE_CHOICES.map((t) => (
-              <button
-                key={t}
-                type="button"
-                role="radio"
-                aria-checked={draft.type === t}
-                onClick={() => edit({ type: t })}
-                className={`h-11 rounded-lg text-sm font-semibold ${
-                  draft.type === t ? "bg-surface-raised text-foreground" : "text-muted"
-                }`}
-              >
-                {TYPE_LABELS[t]}
-              </button>
-            ))}
-          </div>
+          <Segmented label="Type" choices={TYPE_CHOICES} labels={TYPE_LABELS} value={draft.type} onChange={(type) => edit({ type })} />
         </Section>
 
         <Section label="Genre" note="Any of these">
@@ -158,6 +145,16 @@ function FilterSheet({
               </Chip>
             ))}
           </div>
+        </Section>
+
+        <Section label="IMDb rating" note="At least">
+          <Segmented
+            label="Minimum IMDb rating"
+            choices={MIN_RATING_CHOICES}
+            labels={MIN_RATING_LABELS}
+            value={draft.minRating}
+            onChange={(minRating) => edit({ minRating })}
+          />
         </Section>
 
         <Section label="Streaming">
@@ -196,6 +193,41 @@ function FilterSheet({
           )}
         </Section>
       </div>
+    </div>
+  );
+}
+
+/** Grid column classes by choice count, written out so Tailwind sees each class. */
+const SEGMENT_COLUMNS: Record<number, string> = { 2: "grid-cols-2", 3: "grid-cols-3", 4: "grid-cols-4", 5: "grid-cols-5" };
+
+/** A one-of-N control drawn as equal segments in one row (Type, minimum IMDb rating). */
+function Segmented<T extends string>({
+  label,
+  choices,
+  labels,
+  value,
+  onChange,
+}: {
+  label: string;
+  choices: readonly T[];
+  labels: Record<T, string>;
+  value: T;
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div role="radiogroup" aria-label={label} className={`grid ${SEGMENT_COLUMNS[choices.length] ?? "grid-flow-col auto-cols-fr"} gap-1 rounded-xl bg-surface p-1`}>
+      {choices.map((c) => (
+        <button
+          key={c}
+          type="button"
+          role="radio"
+          aria-checked={value === c}
+          onClick={() => onChange(c)}
+          className={`h-11 rounded-lg text-sm font-semibold ${value === c ? "bg-surface-raised text-foreground" : "text-muted"}`}
+        >
+          {labels[c]}
+        </button>
+      ))}
     </div>
   );
 }

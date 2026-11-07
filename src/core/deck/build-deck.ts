@@ -253,6 +253,12 @@ function passesFilters(c: Candidate, filters: DeckFilters, userProviders: Readon
     if (!Array.isArray(providers) || !providers.some((p) => userProviders.has(p))) return false;
   }
 
+  if (typeof filters.minImdbRating === "number") {
+    // IMDb's rating only (VISION invariant 5), never TMDB's. No rating, or a malformed one, cannot be shown as meeting it.
+    const rating: unknown = c.imdb?.rating;
+    if (typeof rating !== "number" || !Number.isFinite(rating) || rating < filters.minImdbRating) return false;
+  }
+
   return true;
 }
 

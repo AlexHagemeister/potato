@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { MemoryRatingsStore } from "../imdb/ratings";
 import type { TitleRecord } from "../library/types";
 import type { DetailsCore } from "../tmdb";
 import type { Candidate } from "../types";
@@ -91,5 +92,52 @@ describe("createTitleInfoLookup", () => {
     expect(found.get("movie:603")?.providerIds).toEqual([8]);
     expect(found.get("tv:1399")?.title).toBe("Lost");
     expect(found.get("tv:1399")?.providerIds).toBeUndefined();
+  });
+
+  describe("IMDb ratings (a minimum IMDb rating filter)", () => {
+    const rated = { ...matrix, imdbId: "tt0133093" } as DetailsCore;
+    const unmapped = { ...lost, imdbId: null } as DetailsCore;
+    const tmdbWith = (titles: DetailsCore[]) => ({
+      lookupTitles: async () => new Map(titles.map((t) => [`${t.mediaType}:${t.tmdbId}`, t])),
+      attachProviderIds: async <T extends Candidate>(cs: readonly T[]): Promise<T[]> => cs.map((c) => ({ ...c, providerIds: [8] })),
+    });
+    const ratings = () => new MemoryRatingsStore(new Map([["tt0133093", { rating: 8.7, votes: 2_000_000 }]]));
+
+    test("without the flag no rating is read", async () => {
+      let reads = 0;
+      const spy = () => ({ getMany: async () => (reads++, new Map()), hasAnyRatings: async () => true });
+      const found = await createTitleInfoLookup(tmdbWith([rated]), spy)(refs);
+      expect(reads).toBe(0);
+      expect(found.get("movie:603")?.imdb).toBeUndefined();
+    });
+
+    test("with the flag each title carries IMDb's rating, and a title IMDb has none for carries none", async () => {
+      const found = await createTitleInfoLookup(tmdbWith([rated, unmapped]), ratings)(refs, { imdbRatings: true });
+      expect(found.get("movie:603")?.imdb).toEqual({ rating: 8.7, votes: 2_000_000 });
+      expect(found.get("tv:1399")?.imdb).toBeUndefined();
+    });
+
+    test("combines with a country: both providers and ratings", async () => {
+      const found = await createTitleInfoLookup(tmdbWith([rated]), ratings)(refs, { country: "US", imdbRatings: true });
+      expect(found.get("movie:603")).toMatchObject({ providerIds: [8], imdb: { rating: 8.7 } });
+    });
+
+    test("rows stay keyed by the requested ref, even when TMDB's answer carries another key", async () => {
+      // A details entry whose own (media type, TMDB ID) differs from the ref that asked for it.
+      const odd = { ...rated, tmdbId: 9603 } as DetailsCore;
+      const tmdb = {
+        lookupTitles: async () => new Map([["movie:603", odd]]),
+        attachProviderIds: async <T extends Candidate>(cs: readonly T[]): Promise<T[]> => cs.map((c) => ({ ...c, providerIds: [8] })),
+      };
+      for (const context of [undefined, { country: "US" }, { imdbRatings: true }]) {
+        const found = await createTitleInfoLookup(tmdb, ratings)(refs, context);
+        expect([...found.keys()]).toEqual(["movie:603"]);
+      }
+    });
+
+    test("an empty ratings table throws, so the list shows a failure instead of emptying", async () => {
+      const lookup = createTitleInfoLookup(tmdbWith([rated]), () => new MemoryRatingsStore());
+      await expect(lookup(refs, { imdbRatings: true })).rejects.toThrow(/not loaded/);
+    });
   });
 });

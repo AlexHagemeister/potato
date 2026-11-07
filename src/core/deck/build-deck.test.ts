@@ -226,6 +226,59 @@ describe("on my services", () => {
   });
 });
 
+describe("minimum IMDb rating (issue 52)", () => {
+  const imdb = (rating: number, votes = 5_000) => ({ imdb: { rating, votes } });
+  const pools = {
+    popular: [
+      cand(1, imdb(8.1)),
+      cand(2, imdb(7.5)),
+      cand(3, imdb(7.4)),
+      // No IMDb rating: TMDB maps no IMDb ID, or IMDb's dataset has no row.
+      cand(4, { tmdbVoteAverage: 9.5 }),
+      cand(5, imdb(6, 100_000)),
+    ],
+  };
+
+  test("keeps titles rated at or above the minimum, the minimum itself included", () => {
+    expect(keys({ pools, filters: { minImdbRating: 7.5 } })).toEqual(["movie:1", "movie:2"]);
+    expect(keys({ pools, filters: { minImdbRating: 8 } })).toEqual(["movie:1"]);
+    expect(keys({ pools, filters: { minImdbRating: 7 } })).toEqual(["movie:1", "movie:2", "movie:3"]);
+  });
+
+  test("a title with no IMDb rating fails any minimum, however high its TMDB vote average", () => {
+    expect(keys({ pools, filters: { minImdbRating: 0 } })).toEqual(["movie:1", "movie:2", "movie:3", "movie:5"]);
+  });
+
+  test("judges IMDb's rating only, never TMDB's vote average", () => {
+    const split = { popular: [cand(1, { ...imdb(8), tmdbVoteAverage: 5 }), cand(2, { ...imdb(6), tmdbVoteAverage: 9 })] };
+    expect(keys({ pools: split, filters: { minImdbRating: 7.5 } })).toEqual(["movie:1"]);
+  });
+
+  test("a malformed IMDb rating fails the minimum, and the deck survives", () => {
+    const bad = { popular: [cand(1, imdb(Number.NaN)), cand(2, { imdb: { rating: "9" as unknown as number, votes: 10 } }), cand(3, imdb(9))] };
+    expect(keys({ pools: bad, filters: { minImdbRating: 7 } })).toEqual(["movie:3"]);
+  });
+
+  test("off, the IMDb rating does not matter", () => {
+    expect(keys({ pools })).toEqual(["movie:1", "movie:2", "movie:3", "movie:4", "movie:5"]);
+  });
+
+  test("combines with the other filters and applies inside every mode", () => {
+    const mixed = [cand(1, { ...imdb(8, 30_000), genreIds: [878] }), cand(2, { ...imdb(8, 30_000), genreIds: [18] }), cand(3, { ...imdb(7, 30_000), genreIds: [878] })];
+    const filters = { genreIds: [878], minImdbRating: 7.5 };
+    expect(keys({ pools: { popular: mixed }, filters })).toEqual(["movie:1"]);
+    expect(keys({ mode: "top_rated", pools: { top_rated: mixed }, filters })).toEqual(["movie:1"]);
+    expect(keys({ mode: "blend", pools: { popular: mixed, top_rated: mixed }, filters })).toEqual(["movie:1"]);
+  });
+
+  test("the Lists matcher applies the same rule", () => {
+    const match = createFilterMatcher({ minImdbRating: 7.5 }, []);
+    expect(match(cand(1, imdb(7.5)))).toBe(true);
+    expect(match(cand(2, imdb(7.4)))).toBe(false);
+    expect(match(cand(3))).toBe(false);
+  });
+});
+
 describe("single modes", () => {
   test("popular sorts by popularity, ties keep pool order", () => {
     const pools = { popular: [cand(1, { popularity: 5 }), cand(2, { popularity: 50 }), cand(3, { popularity: 20 }), cand(4, { popularity: 20 })] };
