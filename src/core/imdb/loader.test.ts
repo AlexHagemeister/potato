@@ -100,6 +100,24 @@ describe("loadImdbRatings", () => {
     await expect(loadImdbRatings({ target: new MemoryLoadTarget(), fetch })).rejects.toThrow("HTTP 503");
   });
 
+  test("a failed load cancels the download body", async () => {
+    // A body that delivers a bad header, then stays open like a slow download.
+    const bytes = await gzip("a\tb\tc\ntt1\t7.0\t150\n");
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, bytes.length - 8)); // all but the gzip trailer
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetch = async () => new Response(body);
+    await expect(loadImdbRatings({ target: new MemoryLoadTarget(), fetch, minExpectedRows: 0 })).rejects.toThrow("header");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(cancelled).toBe(true);
+  });
+
   test("a corrupt gzip body throws", async () => {
     const fetch = async () => new Response(new Uint8Array([1, 2, 3, 4, 5]));
     await expect(loadImdbRatings({ target: new MemoryLoadTarget(), fetch, minExpectedRows: 0 })).rejects.toThrow();
