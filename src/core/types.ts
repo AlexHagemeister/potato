@@ -18,14 +18,20 @@ export const LIST_STATUSES = ["watchlist", "passed", "seen"] as const satisfies 
 export type ListStatus = (typeof LIST_STATUSES)[number];
 
 /**
- * The part of a user's title_status row the deck needs. A skipped row always
- * carries the moment it returns to the deck, matching the schema check
- * (skip_until is not null exactly when status = 'skipped'). skipUntil may be
- * an ISO string, since rows can cross a JSON boundary (API, cache, MCP).
+ * The part of a user's title_status row the deck needs. A raw Drizzle select
+ * of title_status fits it as is, so DB callers pass rows without mapping them.
+ *
+ * skipUntil is the moment a skipped title returns to the deck. The schema
+ * check sets it exactly when status = 'skipped', and leaves it null on listed
+ * rows. The type does not encode that pairing (a raw row cannot carry it), so
+ * the deck checks at runtime: a skipped row whose skipUntil is missing or does
+ * not parse stays hidden. skipUntil may be an ISO string with an explicit
+ * offset, since rows can cross a JSON boundary (API, cache, MCP).
  */
-export type UserTitleState =
-  | (TitleId & { status: ListStatus })
-  | (TitleId & { status: "skipped"; skipUntil: Date | string });
+export interface UserTitleState extends TitleId {
+  status: TitleStatus;
+  skipUntil?: Date | string | null;
+}
 
 /** The discovery modes a deck can be ordered by (VISION: Shaping the deck). */
 export const DISCOVERY_MODES = ["blend", "popular", "deep_cuts", "top_rated", "for_you"] as const;

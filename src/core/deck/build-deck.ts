@@ -1,9 +1,22 @@
 // The deck engine (CLAUDE.md architecture rule 5). A pure function: the same
 // input always gives the same output. It reads no clock, no randomness, no
 // database, and never mutates its input.
+//
+// Bad input fails closed or throws. A malformed candidate is skipped, and a
+// malformed state row keeps its title hidden, so one bad row cannot sink the
+// deck. A bad argument (mode, now, ratedCount) is a caller bug, so it throws a
+// RangeError.
 
-import { formatTitleKey, type TitleId } from "../title-id";
-import { DISCOVERY_MODES, type Candidate, type DeckFilters, type DiscoveryMode, type PoolName, type UserTitleState } from "../types";
+import { tryFormatTitleKey } from "../title-id";
+import {
+  DISCOVERY_MODES,
+  LIST_STATUSES,
+  type Candidate,
+  type DeckFilters,
+  type DiscoveryMode,
+  type PoolName,
+  type UserTitleState,
+} from "../types";
 import {
   BLEND_ORDER,
   BLEND_WEIGHTS,
@@ -13,14 +26,15 @@ import {
 } from "./constants";
 
 export interface DeckInput {
-  /** The user's title_status rows. Rows for titles outside the pools are harmless. */
+  /** The user's title_status rows. Raw Drizzle rows fit as is. Rows for titles outside the pools are harmless. */
   states: readonly UserTitleState[];
   /** The user's streaming services (TMDB watch provider IDs). */
   userProviderIds: readonly number[];
   filters: DeckFilters;
   mode: DiscoveryMode;
+  /** Must be a valid Date. Every skip's return time is judged against it, so an invalid one throws. */
   now: Date;
-  /** How many titles the user has rated. Gates "for you". */
+  /** How many titles the user has rated. Gates "for you". A whole number, 0 or more. */
   ratedCount: number;
   /** Candidates per source. A missing pool counts as empty. "for_you" arrives already in taste order. */
   pools: Partial<Record<PoolName, readonly Candidate[]>>;
@@ -40,41 +54,57 @@ interface Quality {
   votes: number;
 }
 
-/** A candidate with its identity key and quality computed once, before filtering and sorting. */
+/**
+ * A candidate with its identity key and sort signals computed once, before
+ * filtering and sorting. Every number here is finite or -Infinity, never NaN
+ * (see `signal`), so the comparators below are total orders.
+ */
 interface Entry {
   card: DeckCard;
   key: string;
   q: Quality;
+  popularity: number;
+  tmdbAverage: number;
+  /** -1 for a title without IMDb data, so it sorts after any title with IMDb votes. */
+  imdbVotes: number;
+  tmdbVotes: number;
 }
 
 export function buildDeck(input: DeckInput): DeckResult {
-  // The mode can arrive from a URL or an API body, so check it before trusting the type.
+  // These can arrive from a URL, an API body, or a DB count, so check them before trusting the types.
   if (!(DISCOVERY_MODES as readonly string[]).includes(input.mode)) {
     throw new RangeError(`buildDeck: unknown discovery mode ${JSON.stringify(input.mode)}`);
   }
+  if (!(input.now instanceof Date) || Number.isNaN(input.now.getTime())) {
+    throw new RangeError(`buildDeck: now must be a valid Date, got ${String(input.now)}`);
+  }
+  const { ratedCount } = input;
+  if (typeof ratedCount !== "number" || !Number.isSafeInteger(ratedCount) || ratedCount < 0) {
+    throw new RangeError(`buildDeck: ratedCount must be a whole number, 0 or more, got ${String(ratedCount)}`);
+  }
 
-  const forYouUnlocked = input.ratedCount >= FOR_YOU_MIN_RATINGS;
+  const forYouUnlocked = ratedCount >= FOR_YOU_MIN_RATINGS;
 
   if (input.mode === "for_you" && !forYouUnlocked) {
     return {
       kind: "locked",
       mode: "for_you",
-      ratedCount: input.ratedCount,
+      ratedCount,
       required: FOR_YOU_MIN_RATINGS,
-      remaining: FOR_YOU_MIN_RATINGS - input.ratedCount,
+      remaining: FOR_YOU_MIN_RATINGS - ratedCount,
     };
   }
 
   const hidden = hiddenKeys(input.states, input.now);
-  const userProviders = new Set(input.userProviderIds);
+  const passes = createFilterMatcher(input.filters, input.userProviderIds);
 
   const ordered = (pool: PoolName): Entry[] => {
     const entries: Entry[] = [];
     for (const c of input.pools[pool] ?? []) {
-      const key = titleKeyOrNull(c);
+      const key = tryFormatTitleKey(c);
       // A malformed row (bad media type or ID) is skipped, not allowed to sink the whole deck.
-      if (key === null || hidden.has(key) || !passesFilters(c, input.filters, userProviders)) continue;
-      entries.push({ card: { ...c, source: pool }, key, q: quality(c) });
+      if (key === null || hidden.has(key) || !passes(c)) continue;
+      entries.push(toEntry(c, pool, key));
     }
     return orderPool(pool, entries);
   };
@@ -92,43 +122,59 @@ export function buildDeck(input: DeckInput): DeckResult {
   };
 }
 
+/** A filter check with the user's provider set built once, for checking many titles. */
+export type FilterMatcher = (c: Candidate) => boolean;
+
 /**
- * Whether a title passes the user's filters. The deck uses it, and the Lists
- * screens apply the same filters (VISION: "The filters that shape the deck also
- * work on each list").
+ * Builds the filter check once for many titles. The deck uses it, and the
+ * Lists screens apply the same filters (VISION: "The filters that shape the
+ * deck also work on each list"). Unknown or malformed metadata fails any
+ * filter that needs it.
  */
-export function matchesFilters(c: Candidate, filters: DeckFilters, userProviderIds: readonly number[]): boolean {
-  return passesFilters(c, filters, new Set(userProviderIds));
+export function createFilterMatcher(filters: DeckFilters, userProviderIds: readonly number[]): FilterMatcher {
+  const userProviders: ReadonlySet<number> = new Set(userProviderIds);
+  return (c) => passesFilters(c, filters, userProviders);
 }
 
-/** formatTitleKey, but null instead of a throw for a malformed row. */
-function titleKeyOrNull(id: TitleId): string | null {
-  try {
-    return formatTitleKey(id);
-  } catch {
-    return null;
-  }
+/** Whether one title passes the filters. To check many titles, build one matcher with createFilterMatcher. */
+export function matchesFilters(c: Candidate, filters: DeckFilters, userProviderIds: readonly number[]): boolean {
+  return createFilterMatcher(filters, userProviderIds)(c);
+}
+
+/**
+ * An ISO 8601 date-time with an explicit offset ("Z" or "+05:30"), as
+ * toISOString and Postgres row_to_json write them. A string without an offset
+ * parses in the host's local time zone, so it does not count as a time.
+ */
+const ISO_WITH_OFFSET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/** The moment a skipped title returns, in epoch ms, or NaN when the value names no unambiguous moment. */
+function returnTime(raw: unknown): number {
+  if (raw instanceof Date) return raw.getTime();
+  if (typeof raw === "string" && ISO_WITH_OFFSET.test(raw)) return Date.parse(raw);
+  return Number.NaN;
 }
 
 /**
  * Keys of titles the deck must not show: anything on a list, and skipped titles
- * before their return time. A skipped row whose return time does not parse
- * stays hidden: a skip that holds too long is cheaper than one that ends early.
+ * before their return time. A skipped row whose return time is missing or does
+ * not parse stays hidden, as does a row with an unknown status: a title that
+ * stays away too long is cheaper than one that comes back by mistake.
  */
 function hiddenKeys(states: readonly UserTitleState[], now: Date): Set<string> {
   const hidden = new Set<string>();
+  const listStatuses: readonly string[] = LIST_STATUSES;
   for (const state of states) {
-    const key = titleKeyOrNull(state);
+    const key = tryFormatTitleKey(state);
     if (key === null) continue; // Matches no valid candidate anyway.
-    if (state.status !== "skipped") {
-      hidden.add(key);
-      continue;
+    if (listStatuses.includes(state.status)) {
+      hidden.add(key); // VISION invariant 3: a listed title never returns.
+    } else if (state.status === "skipped") {
+      const returnsAt = returnTime(state.skipUntil);
+      if (Number.isNaN(returnsAt) || now.getTime() < returnsAt) hidden.add(key);
+    } else {
+      hidden.add(key); // Unknown status: fail closed.
     }
-    // Only a Date or a string can name a return time. Anything else (null from a
-    // JSON boundary, say) is bad data, since the schema guarantees one exists.
-    const raw: unknown = state.skipUntil;
-    const returnsAt = raw instanceof Date || typeof raw === "string" ? new Date(raw).getTime() : Number.NaN;
-    if (Number.isNaN(returnsAt) || now.getTime() < returnsAt) hidden.add(key);
   }
   return hidden;
 }
@@ -136,30 +182,58 @@ function hiddenKeys(states: readonly UserTitleState[], now: Date): Set<string> {
 function passesFilters(c: Candidate, filters: DeckFilters, userProviders: ReadonlySet<number>): boolean {
   if (filters.mediaTypes?.length && !filters.mediaTypes.includes(c.mediaType)) return false;
 
-  if (filters.genreIds?.length && !filters.genreIds.some((g) => c.genreIds.includes(g))) return false;
+  if (filters.genreIds?.length) {
+    const genres: unknown = c.genreIds;
+    if (!Array.isArray(genres) || !filters.genreIds.some((g) => genres.includes(g))) return false;
+  }
 
   const { fromYear, toYear } = filters.era ?? {};
   const hasFrom = typeof fromYear === "number";
   const hasTo = typeof toYear === "number";
   if (hasFrom || hasTo) {
-    if (c.year === null) return false;
+    // Null, missing, or NaN: the year is unknown, so it cannot be shown as inside the era.
+    if (typeof c.year !== "number" || !Number.isFinite(c.year)) return false;
     if (hasFrom && c.year < fromYear) return false;
     if (hasTo && c.year > toYear) return false;
   }
 
   if (filters.onMyServices) {
     // Unknown availability cannot be shown as "on my services".
-    if (!c.providerIds?.some((p) => userProviders.has(p))) return false;
+    const providers: unknown = c.providerIds;
+    if (!Array.isArray(providers) || !providers.some((p) => userProviders.has(p))) return false;
   }
 
   return true;
 }
 
-/** IMDb when the title has IMDb data (the score Alex trusts, VISION invariant 5), else TMDB. */
-function quality(c: Candidate): Quality {
-  return c.imdb
-    ? { source: "imdb", score: c.imdb.rating, votes: c.imdb.votes }
-    : { source: "tmdb", score: c.tmdbVoteAverage, votes: c.tmdbVoteCount };
+/** A sort signal as a number the comparators can trust: a finite value as is, anything else (NaN, Infinity, missing) sorts last. */
+function signal(n: unknown): number {
+  return typeof n === "number" && Number.isFinite(n) ? n : Number.NEGATIVE_INFINITY;
+}
+
+/**
+ * Computes each sort signal once. Quality is IMDb when the title has IMDb data
+ * (the score Alex trusts, VISION invariant 5), else TMDB. A bad score sorts
+ * last, and bad votes fail every vote threshold.
+ */
+function toEntry(c: Candidate, pool: PoolName, key: string): Entry {
+  const q: Quality = c.imdb
+    ? { source: "imdb", score: signal(c.imdb.rating), votes: signal(c.imdb.votes) }
+    : { source: "tmdb", score: signal(c.tmdbVoteAverage), votes: signal(c.tmdbVoteCount) };
+  return {
+    card: { ...c, source: pool },
+    key,
+    q,
+    popularity: signal(c.popularity),
+    tmdbAverage: signal(c.tmdbVoteAverage),
+    imdbVotes: c.imdb ? signal(c.imdb.votes) : -1,
+    tmdbVotes: signal(c.tmdbVoteCount),
+  };
+}
+
+/** Higher first. Plain comparisons, not subtraction: -Infinity minus -Infinity is NaN. */
+function desc(a: number, b: number): number {
+  return a > b ? -1 : a < b ? 1 : 0;
 }
 
 /**
@@ -170,7 +244,7 @@ function quality(c: Candidate): Quality {
 function orderPool(pool: PoolName, entries: Entry[]): Entry[] {
   switch (pool) {
     case "popular":
-      return entries.sort((a, b) => b.card.popularity - a.card.popularity);
+      return entries.sort((a, b) => desc(a.popularity, b.popularity));
 
     case "top_rated":
       return entries.filter(({ q }) => q.votes >= VOTE_THRESHOLDS[q.source].topRatedMin).sort(byQuality);
@@ -198,13 +272,11 @@ function orderPool(pool: PoolName, entries: Entry[]): Entry[] {
  * Each key compares like with like (IMDb votes only with IMDb votes).
  */
 function byQuality(a: Entry, b: Entry): number {
-  const imdbVotesA = a.card.imdb?.votes ?? -1;
-  const imdbVotesB = b.card.imdb?.votes ?? -1;
   return (
-    b.q.score - a.q.score ||
-    b.card.tmdbVoteAverage - a.card.tmdbVoteAverage ||
-    imdbVotesB - imdbVotesA ||
-    b.card.tmdbVoteCount - a.card.tmdbVoteCount ||
+    desc(a.q.score, b.q.score) ||
+    desc(a.tmdbAverage, b.tmdbAverage) ||
+    desc(a.imdbVotes, b.imdbVotes) ||
+    desc(a.tmdbVotes, b.tmdbVotes) ||
     (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
   );
 }

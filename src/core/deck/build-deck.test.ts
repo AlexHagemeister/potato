@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { TITLE_STATUSES } from "../../db/schema";
+import { TITLE_STATUSES, type titleStatus } from "../../db/schema";
 import { LIST_STATUSES, type Candidate, type PoolName, type UserTitleState } from "../types";
-import { buildDeck, interleave, matchesFilters, type DeckInput, type DeckResult } from "./build-deck";
+import { buildDeck, createFilterMatcher, interleave, matchesFilters, type DeckInput, type DeckResult } from "./build-deck";
 import {
   BLEND_WEIGHTS,
   DEEP_CUTS_MIN_SCORE,
@@ -57,6 +57,12 @@ function keys(overrides: Partial<DeckInput> = {}): string[] {
   const result = run(overrides);
   if (result.kind !== "cards") throw new Error(`expected cards, got ${result.kind}`);
   return result.cards.map((c) => `${c.mediaType}:${c.tmdbId}`);
+}
+
+/** Every ordering of a list. */
+function permutations<T>(items: T[]): T[][] {
+  if (items.length <= 1) return [items];
+  return items.flatMap((item, i) => permutations([...items.slice(0, i), ...items.slice(i + 1)]).map((rest) => [item, ...rest]));
 }
 
 describe("list exclusion (VISION invariant 3)", () => {
@@ -272,12 +278,6 @@ describe("single modes", () => {
     };
     expect(keys({ pools: noImdb, mode: "top_rated" })).toEqual(["movie:5", "movie:4", "movie:3"]);
   });
-
-  /** Every ordering of a list. */
-  function permutations<T>(items: T[]): T[][] {
-    if (items.length <= 1) return [items];
-    return items.flatMap((item, i) => permutations([...items.slice(0, i), ...items.slice(i + 1)]).map((rest) => [item, ...rest]));
-  }
 
   test("tied titles sort the same from every input order (the round-2 cycle)", () => {
     // Tied on score and TMDB average. The old tiebreak made A > B > C > A.
@@ -585,5 +585,149 @@ describe("purity", () => {
     const second = run(input);
     expect(second).toEqual(first);
     expect(JSON.stringify(input)).toBe(before);
+  });
+});
+
+describe("hardening: bad input fails closed or throws (issue 20)", () => {
+  const imdbMin = VOTE_THRESHOLDS.imdb.topRatedMin;
+
+  test("a NaN score sorts last and the order no longer depends on pool order (item 1, the PR 13 repro)", () => {
+    const votes = 30_000;
+    const titles = [cand(3, { imdb: { rating: 9, votes } }), cand(2, { imdb: { rating: Number.NaN, votes } }), cand(1, { imdb: { rating: 5, votes } })];
+    for (const order of permutations(titles)) {
+      expect(keys({ pools: { top_rated: order }, mode: "top_rated" })).toEqual(["movie:3", "movie:1", "movie:2"]);
+    }
+  });
+
+  test("NaN or infinite tiebreak signals sort last without breaking the total order (item 1)", () => {
+    const imdb = { rating: 8, votes: imdbMin };
+    const titles = [
+      cand(1, { imdb, tmdbVoteAverage: Number.NaN }),
+      cand(2, { imdb, tmdbVoteAverage: 7 }),
+      cand(3, { imdb: { rating: Number.POSITIVE_INFINITY, votes: imdbMin } }),
+    ];
+    for (const order of permutations(titles)) {
+      expect(keys({ pools: { top_rated: order }, mode: "top_rated" })).toEqual(["movie:2", "movie:1", "movie:3"]);
+    }
+  });
+
+  test("NaN votes fail every vote threshold, and a NaN score is never a deep cut (item 1)", () => {
+    const pools = {
+      top_rated: [cand(1, { imdb: { rating: 9, votes: Number.NaN } }), cand(2, { imdb: { rating: 9, votes: imdbMin } })],
+      deep_cuts: [
+        cand(3, { imdb: { rating: Number.NaN, votes: 5_000 } }),
+        cand(4, { imdb: { rating: 8, votes: Number.NaN } }),
+        cand(5, { imdb: { rating: 8, votes: 5_000 } }),
+      ],
+    };
+    expect(keys({ pools, mode: "top_rated" })).toEqual(["movie:2"]);
+    expect(keys({ pools, mode: "deep_cuts" })).toEqual(["movie:5"]);
+  });
+
+  test("a NaN popularity sorts last, from every input order (item 1)", () => {
+    const titles = [cand(1, { popularity: 5 }), cand(2, { popularity: Number.NaN }), cand(3, { popularity: 9 })];
+    for (const order of permutations(titles)) {
+      expect(keys({ pools: { popular: order } })).toEqual(["movie:3", "movie:1", "movie:2"]);
+    }
+  });
+
+  test("an invalid now throws a RangeError instead of letting every skipped title back in (item 2)", () => {
+    const states: UserTitleState[] = [{ mediaType: "movie", tmdbId: 1, status: "skipped", skipUntil: skipUntilFrom(NOW) }];
+    for (const now of [new Date(Number.NaN), NOW.toISOString(), NOW.getTime(), undefined, null]) {
+      expect(() => run({ pools: { popular: [cand(1)] }, states, now: now as unknown as Date })).toThrow(RangeError);
+      expect(() => run({ mode: "for_you", now: now as unknown as Date })).toThrow(/now must be a valid Date/);
+    }
+  });
+
+  test("a candidate with genreIds or year missing fails the filter that needs it, and the deck survives (item 3)", () => {
+    const noGenres = { ...cand(1), genreIds: undefined } as unknown as Candidate;
+    const noYear = { ...cand(2), year: undefined } as unknown as Candidate;
+    const nanYear = cand(3, { year: Number.NaN });
+    const badProviders = { ...cand(4), providerIds: "8" } as unknown as Candidate;
+    const pools = { popular: [noGenres, noYear, nanYear, badProviders, cand(5, { providerIds: [8] })] };
+
+    expect(keys({ pools, filters: { genreIds: [18] } })).toEqual(["movie:2", "movie:3", "movie:4", "movie:5"]);
+    expect(keys({ pools, filters: { era: { fromYear: 2000 } } })).toEqual(["movie:1", "movie:4", "movie:5"]);
+    expect(keys({ pools, filters: { era: { toYear: 2100 } } })).toEqual(["movie:1", "movie:4", "movie:5"]);
+    expect(keys({ pools, filters: { onMyServices: true }, userProviderIds: [8] })).toEqual(["movie:5"]);
+    // With no filter that needs the field, the missing field does not matter.
+    expect(keys({ pools })).toEqual(["movie:1", "movie:2", "movie:3", "movie:4", "movie:5"]);
+    // The Lists screens share the same rules.
+    expect(matchesFilters(noGenres, { genreIds: [18] }, [])).toBe(false);
+    expect(matchesFilters(noYear, { era: { fromYear: 2000 } }, [])).toBe(false);
+    expect(matchesFilters(badProviders, { onMyServices: true }, [8])).toBe(false);
+  });
+
+  test("a ratedCount that is not a whole number, 0 or more, throws a RangeError (item 4)", () => {
+    for (const ratedCount of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY, "3", undefined]) {
+      for (const mode of ["for_you", "blend", "popular"] as const) {
+        expect(() => run({ mode, ratedCount: ratedCount as unknown as number })).toThrow(RangeError);
+      }
+    }
+    expect(run({ mode: "for_you", ratedCount: 0 })).toMatchObject({ kind: "locked", remaining: FOR_YOU_MIN_RATINGS });
+  });
+
+  test("a skipUntil string without an explicit offset keeps the title hidden (item 5)", () => {
+    const pools = { popular: [cand(1), cand(2)] };
+    const skipped = (skipUntil: string): UserTitleState[] => [{ mediaType: "movie", tmdbId: 1, status: "skipped", skipUntil }];
+    // A day before NOW in every time zone, but with no offset it is ambiguous, so it does not count.
+    for (const skipUntil of ["2026-11-05T12:00:00", "2026-11-05T12:00", "2026-11-05", "2026-11-05 12:00:00+00"]) {
+      expect(keys({ pools, states: skipped(skipUntil) })).toEqual(["movie:2"]);
+    }
+    // Explicit offsets work, including Postgres row_to_json's microseconds.
+    expect(keys({ pools, states: skipped("2026-11-06T11:59:59.123456+00:00") })).toEqual(["movie:1", "movie:2"]);
+    expect(keys({ pools, states: skipped("2026-11-06T13:30:00+02:00") })).toEqual(["movie:1", "movie:2"]);
+    expect(keys({ pools, states: skipped("2026-11-06T12:00:00.5-01:00") })).toEqual(["movie:2"]);
+    expect(keys({ pools, states: skipped("2026-11-06T12:00:01Z") })).toEqual(["movie:2"]);
+  });
+
+  test("raw Drizzle title_status rows go straight in, with no mapping (item 6)", () => {
+    type TitleStatusRow = typeof titleStatus.$inferSelect;
+    const row = (o: Partial<TitleStatusRow>): TitleStatusRow => ({
+      userId: "user-1",
+      mediaType: "movie",
+      tmdbId: 1,
+      status: "watchlist",
+      rating: null,
+      review: null,
+      reviewVisibility: "private",
+      skipUntil: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+      ...o,
+    });
+    const rows: TitleStatusRow[] = [
+      row({ tmdbId: 1, status: "seen", rating: 4 }),
+      row({ tmdbId: 2, status: "skipped", skipUntil: new Date(NOW.getTime() + 1) }),
+      row({ tmdbId: 3, status: "skipped", skipUntil: new Date(NOW.getTime() - 1) }),
+      row({ tmdbId: 4, status: "skipped", skipUntil: null }), // breaks the schema check: stays hidden
+      row({ tmdbId: 5, status: "passed" }),
+    ];
+    // The assignment is the test: it compiles only if a raw row fits UserTitleState.
+    const states: readonly UserTitleState[] = rows;
+    const pools = { popular: [1, 2, 3, 4, 5, 6].map((id) => cand(id)) };
+    expect(keys({ pools, states })).toEqual(["movie:3", "movie:6"]);
+  });
+
+  test("listed statuses hide whatever skipUntil says, and an unknown status fails closed (item 7)", () => {
+    const past = new Date(NOW.getTime() - 1);
+    const states = [
+      ...LIST_STATUSES.map((status, i) => ({ mediaType: "movie", tmdbId: i + 1, status, skipUntil: past })),
+      { mediaType: "movie", tmdbId: 9, status: "bogus", skipUntil: past },
+    ] as unknown as UserTitleState[];
+    const pools = { popular: [1, 2, 3, 9, 10].map((id) => cand(id)) };
+    expect(keys({ pools, states })).toEqual(["movie:10"]);
+  });
+
+  test("createFilterMatcher builds the provider set once and agrees with matchesFilters (item 8)", () => {
+    const providerIds = [8];
+    const filters = { onMyServices: true };
+    const matches = createFilterMatcher(filters, providerIds);
+    const titles = [cand(1, { providerIds: [8] }), cand(2, { providerIds: [9] }), cand(3)];
+    expect(titles.map(matches)).toEqual([true, false, false]);
+    expect(titles.map((t) => matchesFilters(t, filters, providerIds))).toEqual([true, false, false]);
+    // The set is a snapshot taken when the matcher was built, not rebuilt per call.
+    providerIds.push(9);
+    expect(titles.map(matches)).toEqual([true, false, false]);
   });
 });
