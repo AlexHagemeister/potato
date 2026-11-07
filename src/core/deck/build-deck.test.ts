@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Candidate, PoolName, UserTitleState } from "../types";
-import { buildDeck, type DeckInput, type DeckResult } from "./build-deck";
+import { buildDeck, interleave, type DeckCard, type DeckInput, type DeckResult } from "./build-deck";
 import {
   BLEND_WEIGHTS,
   DEEP_CUTS_MIN_SCORE,
@@ -69,11 +69,26 @@ describe("list exclusion (VISION invariant 3)", () => {
   }
 
   test("a listed title stays out of every mode", () => {
-    const states: UserTitleState[] = [{ mediaType: "movie", tmdbId: 1, status: "seen" }];
-    const all = { popular: pool, deep_cuts: pool, top_rated: pool, for_you: pool };
-    for (const mode of ["blend", "popular", "deep_cuts", "top_rated", "for_you"] as const) {
-      expect(keys({ pools: all, states, mode, ratedCount: FOR_YOU_MIN_RATINGS })).not.toContain("movie:1");
+    // Each pool holds titles that qualify for its own mode, so an empty deck can't pass for exclusion.
+    const top = { imdb: { rating: 9, votes: VOTE_THRESHOLDS.imdb.topRatedMin } };
+    const deep = { imdb: { rating: 8, votes: VOTE_THRESHOLDS.imdb.deepCutsMin } };
+    const all = {
+      popular: [cand(1), cand(2)],
+      deep_cuts: [cand(3, deep), cand(4, deep)],
+      top_rated: [cand(5, top), cand(6, top)],
+      for_you: [cand(7), cand(8)],
+    };
+    const listedFirst: Record<PoolName, number> = { popular: 1, deep_cuts: 3, top_rated: 5, for_you: 7 };
+    const states: UserTitleState[] = Object.values(listedFirst).map((tmdbId): UserTitleState => ({ mediaType: "movie", tmdbId, status: "seen" }));
+    for (const mode of ["popular", "deep_cuts", "top_rated", "for_you"] as const) {
+      expect(keys({ pools: all, states, mode, ratedCount: FOR_YOU_MIN_RATINGS })).toEqual([`movie:${listedFirst[mode] + 1}`]);
     }
+    expect(keys({ pools: all, states, mode: "blend", ratedCount: FOR_YOU_MIN_RATINGS })).toEqual([
+      "movie:2",
+      "movie:4",
+      "movie:6",
+      "movie:8",
+    ]);
   });
 
   test("exclusion uses the (media type, TMDB ID) pair: a listed movie does not hide the series with the same ID", () => {
@@ -254,6 +269,7 @@ describe("single modes", () => {
         cand(6, { imdb: { rating: DEEP_CUTS_MIN_SCORE, votes: 5_000 } }), // exactly at the quality floor: in
         cand(7, { tmdbVoteAverage: 7.9, tmdbVoteCount: tmdb.deepCutsMin }), // no IMDb data: TMDB band
         cand(8, { tmdbVoteAverage: 9.0, tmdbVoteCount: tmdb.topRatedMin }), // TMDB ceiling: out
+        cand(9, { tmdbVoteAverage: 9.0, tmdbVoteCount: tmdb.deepCutsMin - 1 }), // under the TMDB floor: out
       ],
     };
     expect(keys({ pools, mode: "deep_cuts" })).toEqual(["movie:2", "movie:7", "movie:1", "movie:6"]);
@@ -378,6 +394,21 @@ describe("blend (Alex's ruling on issue 5)", () => {
     if (result.kind !== "cards") throw new Error("expected cards");
     const sources: PoolName[] = result.cards.slice(0, 4).map((c) => c.source);
     expect(sources).toEqual(["popular", "deep_cuts", "top_rated", "for_you"]);
+  });
+});
+
+describe("blend weights", () => {
+  const card = (tmdbId: number, source: PoolName): DeckCard => ({ ...cand(tmdbId), source });
+  const a = [card(1, "popular"), card(2, "popular"), card(3, "popular")];
+  const b = [card(11, "top_rated"), card(12, "top_rated"), card(13, "top_rated")];
+  const ids = (cards: DeckCard[]) => cards.map((c) => c.tmdbId);
+
+  test("a weight of 2 gives that pool two cards per round", () => {
+    expect(ids(interleave([a, b], [2, 1]))).toEqual([1, 2, 11, 3, 12, 13]);
+  });
+
+  test("a weight of 0 leaves that pool out", () => {
+    expect(ids(interleave([a, b], [0, 1]))).toEqual([11, 12, 13]);
   });
 });
 

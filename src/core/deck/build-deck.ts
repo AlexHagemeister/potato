@@ -153,9 +153,9 @@ function byQuality(a: Candidate, b: Candidate): number {
  * Weighted round robin across ordered lists. Each round, list i gives up to
  * weights[i] cards. A title already dealt is skipped without costing its list
  * the turn, so the first appearance wins. An exhausted list drops out and the
- * rest keep turning.
+ * rest keep turning. Exported for tests only.
  */
-function interleave(lists: DeckCard[][], weights: number[]): DeckCard[] {
+export function interleave(lists: DeckCard[][], weights: number[]): DeckCard[] {
   const out: DeckCard[] = [];
   const dealt = new Set<string>();
   const cursors = lists.map(() => 0);
