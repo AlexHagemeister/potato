@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { LIST_STATUSES, TITLE_STATUSES, type Candidate, type PoolName, type UserTitleState } from "../types";
+import { TITLE_STATUSES } from "../../db/schema";
+import { LIST_STATUSES, type Candidate, type PoolName, type UserTitleState } from "../types";
 import { buildDeck, interleave, matchesFilters, type DeckInput, type DeckResult } from "./build-deck";
 import {
   BLEND_WEIGHTS,
