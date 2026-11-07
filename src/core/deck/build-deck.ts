@@ -141,6 +141,23 @@ export function matchesFilters(c: Candidate, filters: DeckFilters, userProviderI
   return createFilterMatcher(filters, userProviderIds)(c);
 }
 
+/** Whether the deck may show a title now. */
+export type VisibilityCheck = (id: unknown) => boolean;
+
+/**
+ * The deck's hiding rule, built once for many titles: a title is visible
+ * unless it is on a list or skipped until later. buildDeck applies the same
+ * rule. The deck service uses it to drop hidden titles before it spends TMDB
+ * calls on their details. A malformed identity is never visible.
+ */
+export function createVisibilityCheck(states: readonly UserTitleState[], now: Date): VisibilityCheck {
+  const hidden = hiddenKeys(states, now);
+  return (id) => {
+    const key = tryFormatTitleKey(id);
+    return key !== null && !hidden.has(key);
+  };
+}
+
 /**
  * An ISO 8601 date-time with an explicit offset ("Z" or "+05:30"), as
  * toISOString and Postgres row_to_json write them. A string without an offset

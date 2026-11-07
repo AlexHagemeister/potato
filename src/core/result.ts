@@ -37,7 +37,11 @@ export type CoreError =
   /** A filter needs title metadata and no details lookup was passed. */
   | { code: "details_lookup_required" }
   /** A settings value is invalid. */
-  | { code: "invalid_settings"; message: string };
+  | { code: "invalid_settings"; message: string }
+  /** A deck request's mode, filters, or cursor is invalid, or the cursor belongs to another mode or filters. */
+  | { code: "invalid_deck_query"; message: string }
+  /** TMDB has no title with this (media type, TMDB ID). */
+  | { code: "unknown_title" };
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: CoreError };
 

@@ -1,0 +1,141 @@
+// Fakes for deck-service tests: a TMDB client and library that answer from
+// tables and record every call. No network, no database.
+
+import { MemoryRatingsStore } from "../imdb/ratings";
+import { ok, type Result } from "../result";
+import type { CountryProviders, TitleDetails, TitleSummary } from "../tmdb/types";
+import { formatTitleKey } from "../title-id";
+import type { ImdbRating, MediaType, TitleId, UserTitleState } from "../types";
+import { createDeckService, type DeckLibrary, type DeckTmdb } from "./service";
+import type { CardUserState, DeckStats } from "./types";
+
+export const NOW = new Date("2026-11-07T12:00:00Z");
+
+/** A list result. Popular by default, with TMDB numbers that pass every pool's own gate unless overridden. */
+export function summary(mediaType: MediaType, tmdbId: number, overrides: Partial<TitleSummary> = {}): TitleSummary {
+  return {
+    mediaType,
+    tmdbId,
+    title: `${mediaType} ${tmdbId}`,
+    year: 2020,
+    genreIds: [18],
+    popularity: 1000 - tmdbId,
+    tmdbVoteAverage: 7.5,
+    tmdbVoteCount: 500,
+    posterPath: `/p${tmdbId}.jpg`,
+    overview: `About ${mediaType} ${tmdbId}.`,
+    ...overrides,
+  };
+}
+
+export function emptyCountry(overrides: Partial<CountryProviders> = {}): CountryProviders {
+  return { link: null, flatrate: [], free: [], ads: [], rent: [], buy: [], ...overrides };
+}
+
+export function provider(id: number, name: string, displayPriority = id) {
+  return { id, name, logoPath: `/logo${id}.png`, displayPriority };
+}
+
+/** Details for a summary. IMDb ID tt<id> by default. */
+export function detailsFor(s: TitleSummary, overrides: Partial<TitleDetails> = {}): TitleDetails {
+  return {
+    ...s,
+    genres: s.genreIds.map((id) => ({ id, name: `Genre ${id}` })),
+    runtimeMinutes: s.mediaType === "movie" ? 120 : null,
+    numberOfSeasons: s.mediaType === "tv" ? 3 : null,
+    posterUrl: s.posterPath ? `https://image.tmdb.org/t/p/w500${s.posterPath}` : null,
+    imdbId: `tt${String(s.tmdbId).padStart(7, "0")}${s.mediaType === "tv" ? "9" : ""}`,
+    trailerYouTubeKey: `yt${s.tmdbId}`,
+    providersByCountry: {},
+    ...overrides,
+  };
+}
+
+export interface FakeWorld {
+  /** List pages by stream: "popular:movie", "top_rated:tv", "for_you:movie:603". Page n is index n - 1. */
+  lists: Record<string, TitleSummary[][]>;
+  /** Details by title key. A title missing here has details built from the first summary seen. */
+  details: Record<string, TitleDetails | null>;
+  /** List streams whose lookups throw. */
+  failingLists?: Set<string>;
+  /** Titles whose details lookups throw. */
+  failingDetails?: Set<string>;
+  ratings: Map<string, ImdbRating>;
+  ratingsThrow?: boolean;
+  states: UserTitleState[];
+  ratedCount: number;
+  settings: { country: string; providerIds: number[] };
+  rows: Record<string, CardUserState>;
+  seeds: TitleId[];
+}
+
+export function world(overrides: Partial<FakeWorld> = {}): FakeWorld {
+  return {
+    lists: {},
+    details: {},
+    ratings: new Map(),
+    states: [],
+    ratedCount: 0,
+    settings: { country: "US", providerIds: [] },
+    rows: {},
+    seeds: [],
+    ...overrides,
+  };
+}
+
+export interface Calls {
+  lists: { stream: string; page: number; filters: unknown }[];
+  details: string[];
+  seeds: { mediaTypes: readonly MediaType[]; limit: number }[];
+  stats: DeckStats[];
+}
+
+export function fakeService(w: FakeWorld) {
+  const calls: Calls = { lists: [], details: [], seeds: [], stats: [] };
+  const known = new Map<string, TitleSummary>();
+  for (const pages of Object.values(w.lists)) for (const page of pages) for (const s of page) known.set(formatTitleKey(s), s);
+
+  const page = (stream: string, n: number, filters: unknown) => {
+    calls.lists.push({ stream, page: n, filters });
+    if (w.failingLists?.has(stream)) return Promise.reject(new Error(`TMDB down for ${stream}`));
+    const pages = w.lists[stream] ?? [];
+    return Promise.resolve({ results: pages[n - 1] ?? [], page: n, totalPages: pages.length });
+  };
+
+  const tmdb: DeckTmdb = {
+    discover: (pool, filters, n = 1) => page(`${pool}:${filters.mediaType}`, n, filters),
+    recommendations: (seed, filters = {}, n = 1) => page(`for_you:${seed.mediaType}:${seed.tmdbId}`, n, filters),
+    getTitleDetails: async (mediaType, tmdbId) => {
+      const key = formatTitleKey({ mediaType, tmdbId });
+      calls.details.push(key);
+      if (w.failingDetails?.has(key)) throw new Error(`TMDB down for ${key}`);
+      if (key in w.details) return w.details[key];
+      const s = known.get(key);
+      return s ? detailsFor(s) : null;
+    },
+  };
+
+  const store = new MemoryRatingsStore(w.ratings);
+  const ratings = {
+    getMany: (ids: readonly string[]) => (w.ratingsThrow ? Promise.reject(new Error("db down")) : store.getMany(ids)),
+  };
+
+  const library: DeckLibrary = {
+    getUserTitleStates: async () => ok(w.states),
+    getRatedCount: async () => ok(w.ratedCount),
+    getUserSettings: async () => ok(w.settings),
+    getTitleState: async (_u, ref): Promise<Result<CardUserState | null>> => ok(w.rows[formatTitleKey(ref)] ?? null),
+    getTopRatedSeen: async (_u, mediaTypes, limit) => {
+      calls.seeds.push({ mediaTypes, limit });
+      return ok(w.seeds.filter((s) => mediaTypes.includes(s.mediaType)).slice(0, limit));
+    },
+  };
+
+  const service = createDeckService({ tmdb, ratings, library, now: () => NOW, onStats: (s) => calls.stats.push(s) });
+  return { service, calls };
+}
+
+/** n list results of one media type, IDs from `first`. */
+export function range(mediaType: MediaType, first: number, n: number, overrides: Partial<TitleSummary> = {}): TitleSummary[] {
+  return Array.from({ length: n }, (_, i) => summary(mediaType, first + i, overrides));
+}

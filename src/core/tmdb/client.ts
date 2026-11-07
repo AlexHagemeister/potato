@@ -65,7 +65,7 @@ const MAX_PAGE = 500;
 export const STREAMING_MONETIZATION = ["flatrate", "free", "ads"] as const;
 
 /** IDs of the services that stream a title in one country, in TMDB's display order, without duplicates. */
-function streamingProviderIds(country: CountryProviders | undefined): number[] {
+export function streamingProviderIds(country: CountryProviders | undefined): number[] {
   if (!country) return [];
   return [...new Set(STREAMING_MONETIZATION.flatMap((kind) => country[kind].map((p) => p.id)))];
 }
