@@ -426,6 +426,85 @@ describe("fan-out helpers", () => {
     expect(Object.fromEntries(map)).toEqual({ "movie:603": "tt0133093", "tv:1396": null });
   });
 
+  test("lookupTitles returns display details once per title, through the cache, without provider refreshes", async () => {
+    const { client, calls, advance } = setup({
+      "/movie/603": json(matrixDetails),
+      "/tv/1396": json(breakingBadDetails),
+      "/movie/404": notFound,
+    });
+    const ids = [
+      { mediaType: "movie" as const, tmdbId: 603 },
+      { mediaType: "tv" as const, tmdbId: 1396 },
+      { mediaType: "movie" as const, tmdbId: 603 },
+      { mediaType: "movie" as const, tmdbId: 404 },
+    ];
+    const map = await client.lookupTitles(ids);
+    expect([...map.keys()].sort()).toEqual(["movie:603", "tv:1396"]); // unknown titles are left out
+    expect(map.get("movie:603")?.title).toBe("The Matrix");
+    expect(map.get("movie:603")?.posterPath).toBe(matrixDetails.poster_path);
+    expect(map.get("tv:1396")?.mediaType).toBe("tv");
+    expect(calls).toHaveLength(3);
+    // Past the providers' TTL but inside the details' TTL: still no requests.
+    advance(TMDB_TTL_MS.titleProviders + HOUR);
+    await client.lookupTitles(ids.slice(0, 2));
+    expect(calls).toHaveLength(3);
+  });
+
+  test("lookupTitles reads a warm cache in one batch, and refetches only expired titles", async () => {
+    const store = new MemoryCacheStore();
+    const reads = { get: 0, getMany: 0 };
+    const counting: CacheStore = {
+      get: (key) => (reads.get++, store.get(key)),
+      getMany: (keys) => (reads.getMany++, store.getMany(keys)),
+      set: (key, data, expiresAt) => store.set(key, data, expiresAt),
+    };
+    const { client, calls, advance } = setup({ "/movie/603": json(matrixDetails), "/tv/1396": json(breakingBadDetails) }, counting);
+    const ids = [
+      { mediaType: "movie" as const, tmdbId: 603 },
+      { mediaType: "tv" as const, tmdbId: 1396 },
+    ];
+    await client.lookupTitles(ids); // cold: fills the cache
+    reads.get = 0;
+    reads.getMany = 0;
+    const warm = await client.lookupTitles(ids);
+    expect([...warm.keys()].sort()).toEqual(["movie:603", "tv:1396"]);
+    expect(reads).toEqual({ get: 0, getMany: 1 });
+    expect(calls).toHaveLength(2);
+    // Expired details are refetched through the usual path.
+    advance(TMDB_TTL_MS.details + HOUR);
+    const refreshed = await client.lookupTitles(ids);
+    expect(refreshed.get("movie:603")?.title).toBe("The Matrix");
+    expect(calls).toHaveLength(4);
+  });
+
+  test("lookupTitles falls back to one read per title when the batch read fails", async () => {
+    const store = new MemoryCacheStore();
+    const broken: CacheStore = {
+      get: (key) => store.get(key),
+      getMany: () => Promise.reject(new Error("db down")),
+      set: (key, data, expiresAt) => store.set(key, data, expiresAt),
+    };
+    const { client, calls } = setup({ "/movie/603": json(matrixDetails) }, broken);
+    await quietly(() => client.lookupTitles([{ mediaType: "movie", tmdbId: 603 }]));
+    const again = await quietly(() => client.lookupTitles([{ mediaType: "movie", tmdbId: 603 }]));
+    expect(again.get("movie:603")?.title).toBe("The Matrix");
+    expect(calls).toHaveLength(1); // the per-title read found the cached entry
+  });
+
+  test("lookupTitles: a title that fails is left out, the rest still resolve", async () => {
+    const { client } = setup({
+      "/movie/603": json(matrixDetails),
+      "/tv/1396": status(500),
+    });
+    const map = await quietly(() =>
+      client.lookupTitles([
+        { mediaType: "movie", tmdbId: 603 },
+        { mediaType: "tv", tmdbId: 1396 },
+      ]),
+    );
+    expect([...map.keys()]).toEqual(["movie:603"]);
+  });
+
   test("attachProviderIds counts free and ad-supported services, not rent or buy", async () => {
     const provider = (id: number) => ({ provider_id: id, provider_name: `p${id}`, logo_path: null, display_priority: id });
     const { client } = setup({

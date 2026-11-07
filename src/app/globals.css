@@ -75,3 +75,23 @@ img {
   -webkit-user-drag: none;
   -webkit-touch-callout: none;
 }
+
+/* A full-screen sheet slides up from the bottom, like an iOS modal. */
+@keyframes sheet-in {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+.sheet-in {
+  animation: sheet-in 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet-in {
+    animation: none;
+  }
+}

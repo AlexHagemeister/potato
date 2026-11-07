@@ -2,7 +2,7 @@
 // rule 4). Every response goes through the cache store. A title is always
 // addressed by (media type, TMDB ID) (rule 1).
 
-import type { CacheStore } from "../cache/cache-store";
+import type { CacheEntry, CacheStore } from "../cache/cache-store";
 import { PostgresCacheStore } from "../cache/postgres-cache-store";
 import { mapWithConcurrency } from "../concurrency";
 import { formatTitleKey } from "../title-id";
@@ -377,6 +377,45 @@ export function createTmdbClient(options: TmdbClientOptions) {
   }
 
   /**
+   * Display details (title, year, poster, genres) for many titles, keyed by
+   * formatTitleKey. For the Lists tab, which shows a row per title. It reads
+   * each title's details through the cache (7 days) and skips streaming
+   * availability, so a list never triggers provider refreshes. A title TMDB
+   * does not know, or whose lookup fails with nothing cached, is left out of
+   * the map, so one bad title does not sink the batch.
+   */
+  async function lookupTitles(ids: readonly TitleId[]): Promise<Map<string, DetailsCore>> {
+    const unique = [...new Map(ids.map((id) => [formatTitleKey(id), id])).values()];
+    const out = new Map<string, DetailsCore>();
+    // One cache read for the whole batch when the store supports it: a list
+    // of fifty titles is then one round trip, not fifty. Fresh hits are done.
+    let prefetched = new Map<string, CacheEntry>();
+    if (cache.getMany && unique.length > 0) {
+      try {
+        prefetched = await cache.getMany(unique.map(detailsKey));
+      } catch (err) {
+        console.warn("tmdb cache batch read failed, reading titles one by one:", err);
+      }
+    }
+    const misses = unique.filter((id) => {
+      const entry = prefetched.get(detailsKey(id));
+      if (!entry || entry.expiresAt.getTime() <= now().getTime()) return true;
+      out.set(formatTitleKey(id), entry.data as DetailsCore);
+      return false;
+    });
+    // Misses and expired entries take the usual path: refetch, or serve stale if TMDB fails.
+    await mapWithConcurrency(misses, TMDB_FANOUT_CONCURRENCY, async (id) => {
+      try {
+        const loaded = await loadDetails(id, false);
+        if (loaded) out.set(formatTitleKey(id), loaded.core);
+      } catch (err) {
+        console.warn(`tmdb details lookup failed for ${formatTitleKey(id)}:`, err);
+      }
+    });
+    return out;
+  }
+
+  /**
    * Returns copies of the candidates with providerIds set to the services
    * that stream each title in `country` (subscription, free, or with ads;
    * not rent or buy), the field the deck's "on my services" filter reads.
@@ -412,6 +451,7 @@ export function createTmdbClient(options: TmdbClientOptions) {
     getProviderList,
     getWatchRegions,
     resolveImdbIds,
+    lookupTitles,
     attachProviderIds,
   };
 }

@@ -4,4 +4,4 @@ export * from "./client";
 export * from "./images";
 export * from "./types";
 export { TmdbError } from "./http";
-export { pickTrailer } from "./normalize";
+export { pickTrailer, type DetailsCore } from "./normalize";

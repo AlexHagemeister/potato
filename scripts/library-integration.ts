@@ -30,6 +30,8 @@ process.env.DATABASE_URL = url;
 const { getDb } = await import("../src/db/client");
 const { users } = await import("../src/db/schema");
 const lib = await import("../src/core/library");
+const lists = await import("../src/core/lists");
+const { PostgresCacheStore } = await import("../src/core/cache");
 const { SKIP_DAYS } = await import("../src/core/deck/constants");
 type TitleRecord = import("../src/core/library").TitleRecord;
 type TitleId = import("../src/core/types").TitleId;
@@ -553,6 +555,95 @@ try {
     const after = unwrap(await lib.getUserSettings(A));
     assert.equal(after.country, before.country);
     assert.deepEqual(after.providerIds, before.providerIds);
+  });
+
+  console.log("Lists tab rows");
+
+  await check("getListRows: each list's rows, newest change first, with metadata or null fallbacks", async () => {
+    const W = `itest-lists-${runId}`;
+    await db.insert(users).values({ id: W, name: "Integration Lists", email: `${W}@example.invalid` });
+    try {
+      const known = fresh();
+      const unknown = fresh("tv");
+      const passed = fresh();
+      const seen = fresh();
+      unwrap(await lib.watchlistTitle(W, known, { now: tick() }));
+      unwrap(await lib.watchlistTitle(W, unknown, { now: tick() }));
+      unwrap(await lib.passTitle(W, passed, { now: tick() }));
+      unwrap(await lib.markSeen(W, seen, { rating: 3.5, review: "Fine." }, { now: tick() }));
+      const asked: string[][] = [];
+      const lookup = async (refs: readonly TitleId[]) => {
+        asked.push(refs.map((r) => `${r.mediaType}:${r.tmdbId}`));
+        const key = `${known.mediaType}:${known.tmdbId}`;
+        return new Map(
+          refs.some((r) => r.mediaType === known.mediaType && r.tmdbId === known.tmdbId)
+            ? [[key, { ...known, title: "Known", year: 2001, posterPath: "/p.jpg" } as never]]
+            : [],
+        );
+      };
+      const all = unwrap(await lists.getAllLists(W, { lookup }));
+      assert.deepEqual(
+        all.watchlist.rows.map((r) => [r.mediaType, r.tmdbId, r.title, r.year, r.posterUrl]),
+        [
+          [unknown.mediaType, unknown.tmdbId, null, null, null],
+          [known.mediaType, known.tmdbId, "Known", 2001, "https://image.tmdb.org/t/p/w185/p.jpg"],
+        ],
+      );
+      assert.deepEqual(all.passed.rows.map((r) => r.tmdbId), [passed.tmdbId]);
+      assert.deepEqual(all.seen.rows.map((r) => [r.tmdbId, r.rating, r.review]), [[seen.tmdbId, 3.5, "Fine."]]);
+      assert.equal(all.watchlist.nextCursor, null);
+      assert.equal(asked.length, 3, "one lookup per non-empty list");
+
+      // Watchlist to Seen, then Passed to Watchlist: each list reflects the move.
+      unwrap(await lib.moveTitle(W, known, { from: "watchlist", to: "seen", rating: 4.5, review: "Great." }, { now: tick() }));
+      unwrap(await lib.moveTitle(W, passed, { from: "passed", to: "watchlist" }, { now: tick() }));
+      const after = unwrap(await lists.getAllLists(W, { lookup }));
+      assert.deepEqual(after.watchlist.rows.map((r) => r.tmdbId), [passed.tmdbId, unknown.tmdbId]);
+      assert.deepEqual(after.seen.rows.map((r) => [r.tmdbId, r.rating, r.review, r.title]), [
+        [known.tmdbId, 4.5, "Great.", "Known"],
+        [seen.tmdbId, 3.5, "Fine.", null],
+      ]);
+      assert.deepEqual(after.passed.rows, []);
+    } finally {
+      await db.delete(users).where(inArray(users.id, [W]));
+    }
+  });
+
+  await check("getListRows pages at LISTS_PAGE_SIZE and follows the cursor", async () => {
+    const P = `itest-paging-${runId}`;
+    await db.insert(users).values({ id: P, name: "Integration Paging", email: `${P}@example.invalid` });
+    try {
+      const total = lists.LISTS_PAGE_SIZE + 3;
+      for (let i = 0; i < total; i++) unwrap(await lib.passTitle(P, fresh(), { now: tick() }));
+      const lookup = async () => new Map();
+      const first = unwrap(await lists.getListRows(P, "passed", { lookup }));
+      assert.equal(first.rows.length, lists.LISTS_PAGE_SIZE);
+      assert.notEqual(first.nextCursor, null);
+      const second = unwrap(await lists.getListRows(P, "passed", { lookup, cursor: first.nextCursor }));
+      assert.equal(second.rows.length, 3);
+      assert.equal(second.nextCursor, null);
+      const ids = new Set([...first.rows, ...second.rows].map((r) => r.tmdbId));
+      assert.equal(ids.size, total, "no row repeats across pages");
+    } finally {
+      await db.delete(users).where(inArray(users.id, [P]));
+    }
+  });
+
+  await check("PostgresCacheStore.getMany reads many keys in one statement; missing keys are absent", async () => {
+    const store = new PostgresCacheStore();
+    const k1 = `itest:${runId}:one`;
+    const k2 = `itest:${runId}:two`;
+    const expires = new Date(Date.UTC(2030, 0, 1));
+    try {
+      await store.set(k1, { n: 1 }, expires);
+      await store.set(k2, { n: 2 }, expires);
+      const got = await store.getMany([k1, k2, `itest:${runId}:missing`, k1]);
+      assert.deepEqual([...got.keys()].sort(), [k1, k2]);
+      assert.deepEqual(got.get(k2), { data: { n: 2 }, expiresAt: expires });
+      assert.equal((await store.getMany([])).size, 0);
+    } finally {
+      await db.execute(sql`delete from tmdb_cache where key in (${k1}, ${k2})`);
+    }
   });
 
   console.log("Unknown users and bad input");
