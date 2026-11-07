@@ -5,7 +5,13 @@
 // a component, so switching tabs and coming back shows the same card at once,
 // with no refetch. It is scoped to one user: a different user id resets it.
 // A change to the user's country or services (the settings key) refreshes the
-// queued cards, since their streaming data is stale.
+// queued cards, since their streaming data is stale. So does a change to the
+// mode or filters (the choice), since they are the wrong cards. Core's
+// deckInputChange is the one rule for both. The choice is saved to the
+// profile (core's saveDeckChoice), so it follows the user across devices: the
+// deck applies a change at once and saves it behind, and rolls it back with
+// an error notice if the save fails. The page hands in the saved choice when
+// the deck starts.
 //
 // The paging rules (dedupe, when to ask for more, stale cursors, refresh) are
 // core's (src/core/deck-queue). This file only sequences fetches and server
@@ -15,6 +21,7 @@ import { useSyncExternalStore } from "react";
 import {
   addPage,
   afterRefusal,
+  deckInputChange,
   emptyQueue,
   forgetTitle,
   needsMore,
@@ -29,9 +36,23 @@ import {
   type DeckQueue,
 } from "@/core/deck-queue";
 import type { DeckPage, DeckPageCard } from "@/core/deck-service/types";
+import {
+  DEFAULT_DECK_CHOICE,
+  deckChoiceKey,
+  deckChoiceToParams,
+  normalizeDeckChoice,
+  type DeckChoice,
+} from "@/core/filters";
 import type { TitleId } from "@/core/types";
 import type { DeckResponse } from "@/app/api/deck/route";
-import { markSeenAction, sortCardAction, undoSortAction, type DeckActionResult, type SortKind } from "./actions";
+import {
+  markSeenAction,
+  saveDeckChoiceAction,
+  sortCardAction,
+  undoSortAction,
+  type DeckActionResult,
+  type SortKind,
+} from "./actions";
 
 /** How long the Undo toast stays up. An error notice stays until dismissed or the next sort. */
 const TOAST_MS = 4500;
@@ -76,6 +97,8 @@ export interface DeckState {
   userId: string | null;
   /** The user's country and services the queued cards were fetched for. */
   settingsKey: string | null;
+  /** The mode and filters the queued cards were fetched for. */
+  choice: DeckChoice;
   queue: DeckQueue;
   fetching: boolean;
   /** The last page fetch failed. */
@@ -88,10 +111,11 @@ export interface DeckState {
   undoing: boolean;
 }
 
-function initialState(userId: string | null, settingsKey: string | null): DeckState {
+function initialState(userId: string | null, settingsKey: string | null, choice: DeckChoice = DEFAULT_DECK_CHOICE): DeckState {
   return {
     userId,
     settingsKey,
+    choice,
     queue: emptyQueue(),
     fetching: false,
     failed: false,
@@ -149,16 +173,17 @@ export function useDeck(): DeckState {
  * the tab). Binds the store to the signed-in user, refreshes the queued cards
  * if the country or services changed, re-checks a locked or no_seeds deck
  * (ratings made elsewhere may unlock it), and fills the queue.
+ *
+ * `savedChoice` is the mode and filters saved to the profile. The deck takes
+ * it when it starts for a user (the app opens or reloads). Later visits keep
+ * the deck's own choice, which is never older than the profile's: a page
+ * rendered while a save is on its way could carry the old one. A choice
+ * changed on another device shows after a reload.
  */
-export function startDeck(userId: string, settingsKey: string) {
+export function startDeck(userId: string, settingsKey: string, savedChoice: DeckChoice) {
   if (state.userId !== userId) {
-    reset(userId, settingsKey);
-  } else if (state.settingsKey !== settingsKey) {
-    // The toast's Undo would bring back a card with the old streaming data.
-    dropUndo();
-    fetchEpoch++;
-    set({ settingsKey, queue: refreshQueue(state.queue), gate: null, failed: false });
-  } else if (state.gate) {
+    reset(userId, settingsKey, savedChoice);
+  } else if (!rebase(settingsKey, state.choice) && state.gate) {
     fetchEpoch++;
     set({ gate: null, queue: restartCursor(state.queue) });
   }
@@ -166,14 +191,80 @@ export function startDeck(userId: string, settingsKey: string) {
   void fill();
 }
 
-function reset(userId: string, settingsKey: string) {
+/** The choice the profile is known to hold. A failed save rolls back to it. */
+let profileChoice: DeckChoice = DEFAULT_DECK_CHOICE;
+
+/**
+ * A new mode or new filters from the Discover controls. The queue refreshes
+ * at once (a locked "for you" is left for the new mode), and the choice is
+ * saved to the profile behind it.
+ */
+export function chooseDeck(next: DeckChoice) {
+  if (!state.userId || state.settingsKey === null) return;
+  const choice = normalizeDeckChoice(next);
+  if (!rebase(state.settingsKey, choice)) return;
+  void fill();
+  void saveChoice(choice);
+}
+
+/** Each save's number, in the order sent. The latest one sent decides what the deck shows. */
+let lastSaveSent = 0;
+let lastSaveConfirmed = 0;
+
+/**
+ * Saves a choice to the profile. Saves run in order (server actions from one
+ * page run one at a time). Only the latest save sent can roll the deck back:
+ * if it fails, the deck goes back to the last choice the profile confirmed and
+ * says so. An older save's failure is ignored, since a newer save follows it
+ * and decides what the profile holds.
+ */
+async function saveChoice(choice: DeckChoice) {
+  const gen = generation;
+  const seq = ++lastSaveSent;
+  let result: { ok: true } | { ok: false; error: string };
+  try {
+    result = await saveDeckChoiceAction(choice);
+  } catch {
+    result = { ok: false, error: "Couldn't save your mode and filters. Check your connection." };
+  }
+  if (gen !== generation) return;
+  if (result.ok) {
+    if (seq > lastSaveConfirmed) {
+      lastSaveConfirmed = seq;
+      profileChoice = choice;
+    }
+    return;
+  }
+  if (seq !== lastSaveSent) return;
+  showNotice(result.error);
+  if (state.settingsKey !== null && rebase(state.settingsKey, profileChoice)) void fill();
+}
+
+/**
+ * Applies new settings or a new choice through core's one staleness rule
+ * (deckInputChange). Returns true when the queue refreshed.
+ */
+function rebase(settingsKey: string, choice: DeckChoice): boolean {
+  const change = deckInputChange(
+    { settingsKey: state.settingsKey ?? "", choiceKey: deckChoiceKey(state.choice) },
+    { settingsKey, choiceKey: deckChoiceKey(choice) },
+  );
+  if (!change.refresh) return false;
+  if (change.dropUndo) dropUndo();
+  fetchEpoch++;
+  set({ settingsKey, choice, queue: refreshQueue(state.queue), gate: null, failed: false });
+  return true;
+}
+
+function reset(userId: string, settingsKey: string, savedChoice: DeckChoice) {
   generation++;
   fetchEpoch++;
   lastSort = null;
   clearTimeout(toastTimer);
   saving.clear();
   preloaded.clear();
-  state = { ...initialState(userId, settingsKey), fetching: filling };
+  profileChoice = normalizeDeckChoice(savedChoice);
+  state = { ...initialState(userId, settingsKey, profileChoice), fetching: filling };
   for (const l of listeners) l();
 }
 
@@ -195,8 +286,8 @@ export function retry() {
   void fill();
 }
 
-async function fetchPage(cursor: string | null): Promise<DeckResponse> {
-  const params = new URLSearchParams();
+async function fetchPage(cursor: string | null, choice: DeckChoice): Promise<DeckResponse> {
+  const params = new URLSearchParams(deckChoiceToParams(choice));
   if (cursor) params.set("cursor", cursor);
   try {
     const res = await fetch(`/api/deck${params.size ? `?${params}` : ""}`, { cache: "no-store" });
@@ -220,7 +311,7 @@ async function fill() {
     // A failed fetch doesn't stop later fills: the next sort or tab visit tries again.
     while (state.userId && !state.gate && needsMore(state.queue)) {
       const epoch = fetchEpoch;
-      const body = await fetchPage(state.queue.cursor);
+      const body = await fetchPage(state.queue.cursor, state.choice);
       if (epoch !== fetchEpoch) {
         restarted = false;
         continue;

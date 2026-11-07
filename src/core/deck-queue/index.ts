@@ -113,8 +113,9 @@ export function afterRefusal(queue: DeckQueue, error: string, alreadyRestarted: 
 
 /**
  * The user's country or services changed, so every queued card shows stale
- * streaming data. Drops the queued cards and starts the deck again from the
- * first page. The dropped titles are forgotten, so the next pages deal them
+ * streaming data, or the mode or filters changed, so they are the wrong cards
+ * (see deckInputChange). Drops the queued cards and starts the deck again
+ * from the first page. The dropped titles are forgotten, so the next pages deal them
  * again with fresh data. Sorted titles stay in dealt, so a sort still saving
  * can't come back. The card on screen returns on top if the first page has it.
  */
@@ -132,6 +133,35 @@ export function refreshQueue(queue: DeckQueue): DeckQueue {
 export function deckSettingsKey(settings: { country: string; providerIds: readonly number[] }): string {
   const ids = [...new Set(settings.providerIds)].sort((a, b) => a - b);
   return `${settings.country.toUpperCase()}:${ids.join(",")}`;
+}
+
+/**
+ * What a queue was dealt for: the settings key (deckSettingsKey) and the
+ * Discover choice key (deckChoiceKey in core/filters: the mode and filters).
+ */
+export interface DeckInputs {
+  settingsKey: string;
+  choiceKey: string;
+}
+
+/** What a change to the deck's inputs means for the queue. */
+export type DeckInputChange =
+  | { refresh: false }
+  /** Refresh the queue (refreshQueue). dropUndo: the last sort's Undo would bring back a card with stale streaming data. */
+  | { refresh: true; dropUndo: boolean };
+
+/**
+ * The one staleness rule for the queue. A new mode or new filters make the
+ * queued cards the wrong ones, and new settings make their streaming data
+ * stale: either way the queue refreshes (refreshQueue), and the card on
+ * screen stays on top if the first new page deals it. Only a settings change
+ * ends the last sort's Undo window. After a mode or filter change, Undo still
+ * brings the card back, even if it no longer matches: the user asked for it.
+ */
+export function deckInputChange(prev: DeckInputs, next: DeckInputs): DeckInputChange {
+  const settings = prev.settingsKey !== next.settingsKey;
+  if (!settings && prev.choiceKey === next.choiceKey) return { refresh: false };
+  return { refresh: true, dropUndo: settings };
 }
 
 /**

@@ -15,7 +15,8 @@ import {
   type Result,
   type UndoInput,
 } from "@/core/library";
-import { getListRows, type ListRowsPage } from "@/core/lists";
+import { normalizeFilterChoice, toDeckFilters, type FilterChoice } from "@/core/filters";
+import { getAllLists, getListRows, type ListRowsPage } from "@/core/lists";
 import type { ListStatus, TitleId } from "@/core/types";
 import { getCurrentUserForRequest } from "@/lib/current-user";
 
@@ -83,7 +84,19 @@ export async function undoAction(ref: TitleId, outcome: UndoInput): Promise<Acti
   return run((userId) => restoreTitleState(userId, ref, outcome));
 }
 
-/** The next page of a list. */
-export async function loadMoreAction(status: ListStatus, cursor: string): Promise<ActionResult<ListRowsPage>> {
-  return run((userId) => getListRows(userId, status, { cursor }), "Couldn't load more. Try again.");
+/** The filters for a choice from the client. Core cleans the choice, and the server's clock dates the era. */
+const filtersFrom = (choice: unknown) => toDeckFilters(normalizeFilterChoice(choice), new Date());
+
+/** The first page of every list under these filters. */
+export async function loadListsAction(choice: FilterChoice): Promise<ActionResult<Record<ListStatus, ListRowsPage>>> {
+  return run((userId) => getAllLists(userId, { filters: filtersFrom(choice) }), "Couldn't load your lists. Try again.");
+}
+
+/** The next page of a list, under the same filters as the page before. */
+export async function loadMoreAction(
+  status: ListStatus,
+  cursor: string,
+  choice: FilterChoice,
+): Promise<ActionResult<ListRowsPage>> {
+  return run((userId) => getListRows(userId, status, { cursor, filters: filtersFrom(choice) }), "Couldn't load more. Try again.");
 }

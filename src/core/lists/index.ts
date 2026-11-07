@@ -1,6 +1,7 @@
 // The Lists tab's reads. The writes are the library's (src/core/library).
 
 export {
+  createTitleInfoLookup,
   getAllLists,
   getListRows,
   LISTS_PAGE_SIZE,
