@@ -28,6 +28,7 @@ import {
   dropTitles,
   emptyQueue,
   forgetTitle,
+  keepOutAfterUndo,
   needsMore,
   queuedTitles,
   refreshQueue,
@@ -586,7 +587,7 @@ export async function markCardSeen(card: DeckPageCard, rating: number, review: s
  * while on screen), the Undo puts it back on that list, and the card stays
  * out of the deck (core's afterUndo, VISION invariant 3). If the sort's save
  * hasn't settled yet, the card comes back on top and leaves again once it
- * settles, if it must.
+ * settles, if it must (core's keepOutAfterUndo, which never puts it back).
  */
 export async function undoLastSort() {
   const sort = lastSort;
@@ -607,9 +608,13 @@ export async function undoLastSort() {
     // A failed sort already put the card back and said so.
     if (!done.ok) return;
     if (!known && gen === generation) {
-      set({ queue: afterUndo(state.queue, sort.card, done.outcome.previous, new Date()) });
-      preload();
-      void fill();
+      // Only ever takes the card out: a settings change may have refreshed the queue since the tap.
+      const out = keepOutAfterUndo(state.queue, sort.card, done.outcome.previous, new Date());
+      if (out !== state.queue) {
+        set({ queue: out });
+        preload();
+        void fill();
+      }
     }
     undone = await undoSortAction(toTitleId(sort.card), done.outcome);
   } catch {

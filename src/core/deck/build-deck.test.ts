@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { TITLE_STATUSES, type titleStatus } from "../../db/schema";
 import { LIST_STATUSES, type Candidate, type PoolName, type UserTitleState } from "../types";
-import { buildDeck, createFilterMatcher, createVisibilityCheck, interleave, matchesFilters, type DeckInput, type DeckResult } from "./build-deck";
+import { buildDeck, createFilterMatcher, createVisibilityCheck, interleave, matchesFilters, rowVisible, type DeckInput, type DeckResult } from "./build-deck";
 import {
   BLEND_WEIGHTS,
   DEEP_CUTS_MIN_SCORE,
@@ -799,5 +799,19 @@ describe("createVisibilityCheck (shared with the deck service)", () => {
       keys({ pools: { popular: titles }, states }),
     );
     expect(visible({ mediaType: "person", tmdbId: 9 })).toBe(false);
+  });
+});
+
+describe("rowVisible (one title, the same rule)", () => {
+  const ref = { mediaType: "movie", tmdbId: 1 } as const;
+  test("no row is visible, a list status is not", () => {
+    expect(rowVisible(ref, null, NOW)).toBe(true);
+    for (const status of ["watchlist", "passed", "seen"] as const) expect(rowVisible(ref, { status }, NOW)).toBe(false);
+  });
+  test("a skip hides until its return time, and fails closed without one", () => {
+    expect(rowVisible(ref, { status: "skipped", skipUntil: new Date(NOW.getTime() + 1) }, NOW)).toBe(false);
+    expect(rowVisible(ref, { status: "skipped", skipUntil: NOW }, NOW)).toBe(true);
+    expect(rowVisible(ref, { status: "skipped", skipUntil: NOW.toISOString() }, NOW)).toBe(true);
+    expect(rowVisible(ref, { status: "skipped", skipUntil: null }, NOW)).toBe(false);
   });
 });

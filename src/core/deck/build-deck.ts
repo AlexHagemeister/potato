@@ -15,6 +15,8 @@ import {
   type DeckFilters,
   type DiscoveryMode,
   type PoolName,
+  type TitleId,
+  type TitleStatus,
   type UserTitleState,
 } from "../types";
 import {
@@ -189,6 +191,20 @@ export function createVisibilityCheck(states: readonly UserTitleState[], now: Da
     const key = tryFormatTitleKey(id);
     return key !== null && !hidden.has(key);
   };
+}
+
+/**
+ * Whether the deck may show one title whose row is `row` at `now`, by the
+ * same rule (createVisibilityCheck). No row: shown. The card's user state
+ * (cardUserState) and the deck's Undo (afterUndo) both ask it.
+ */
+export function rowVisible(
+  ref: TitleId,
+  row: { status: TitleStatus; skipUntil?: Date | string | null } | null,
+  now: Date,
+): boolean {
+  if (row === null) return true;
+  return createVisibilityCheck([{ mediaType: ref.mediaType, tmdbId: ref.tmdbId, status: row.status, skipUntil: row.skipUntil }], now)(ref);
 }
 
 /**

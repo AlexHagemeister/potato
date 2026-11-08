@@ -11,6 +11,7 @@ import {
   dropTitles,
   emptyQueue,
   forgetTitle,
+  keepOutAfterUndo,
   MAX_EMPTY_PAGES,
   needsMore,
   QUEUE_LOW_WATER,
@@ -193,9 +194,51 @@ describe("afterUndo (issue 54)", () => {
     expect(q.dealt.has("movie:7")).toBe(true);
   });
 
+  test("a listed title that keepOnTop names after a refresh is no longer kept on top", () => {
+    const refreshed = refreshQueue(returnToFront(sortedAway(), card(1)));
+    expect(refreshed.keepOnTop).toBe("movie:1");
+    const q = afterUndo(refreshed, card(1), { status: "passed" }, now);
+    expect(q.keepOnTop).toBeNull();
+    expect(ids(addPage(q, { cards: [card(1), card(2)], nextCursor: null }))).toEqual(["movie:2"]);
+  });
+
   test("the pair (media type, TMDB ID) decides, not the ID alone", () => {
     const q = afterUndo(addPage(emptyQueue(), { cards: [card(1, "tv"), card(2)], nextCursor: "c" }), card(1), { status: "watchlist" }, now);
     expect(ids(q)).toEqual(["tv:1", "movie:2"]);
+  });
+});
+
+describe("keepOutAfterUndo (the Undo's late step, PR 82 review)", () => {
+  const now = new Date("2026-11-07T12:00:00.000Z");
+  // The Undo was tapped before the sort's save settled: the card went back on top at the tap.
+  const returned = () => returnToFront(addPage(emptyQueue(), { cards: [card(2), card(3)], nextCursor: "c" }), card(1));
+
+  test("a row the deck shows: the same queue comes back, so nothing re-renders", () => {
+    const q = returned();
+    expect(keepOutAfterUndo(q, card(1), null, now)).toBe(q);
+    expect(keepOutAfterUndo(q, card(1), { status: "skipped", skipUntil: "2026-11-01T12:00:00.000Z" }, now)).toBe(q);
+  });
+
+  test("a listed row: the card leaves the top and stays dealt", () => {
+    const q = keepOutAfterUndo(returned(), card(1), { status: "watchlist" }, now);
+    expect(ids(q)).toEqual(["movie:2", "movie:3"]);
+    expect(q.dealt.has("movie:1")).toBe(true);
+  });
+
+  test("never puts back a card a settings refresh took out, so the fresh copy can be dealt", () => {
+    // Pass, Undo before the save lands, then the country or services change: the queue refreshes.
+    const refreshed = refreshQueue(returned());
+    expect(ids(refreshed)).toEqual([]);
+    const q = keepOutAfterUndo(refreshed, card(1), null, now);
+    expect(q).toBe(refreshed);
+    expect(q.dealt.has("movie:1")).toBe(false);
+    // The next page deals the title again, with fresh data, and it goes back on top.
+    expect(ids(addPage(q, { cards: [card(4), card(1)], nextCursor: null }))).toEqual(["movie:1", "movie:4"]);
+  });
+
+  test("a listed row after a refresh: the title stays out of the refreshed deck", () => {
+    const q = keepOutAfterUndo(refreshQueue(returned()), card(1), { status: "passed" }, now);
+    expect(ids(addPage(q, { cards: [card(1), card(4)], nextCursor: null }))).toEqual(["movie:4"]);
   });
 });
 
