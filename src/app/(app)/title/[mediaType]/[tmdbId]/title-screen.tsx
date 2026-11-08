@@ -159,7 +159,7 @@ export function TitleScreen({ card }: { card: Card }) {
   const [toast, setToast] = useState<Toast | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const seq = useRef(0);
-  /** A change landed that the Lists rows kept for Back couldn't take: refresh the screen Back shows (landed). */
+  /** The latest change landed where the Lists rows kept for Back couldn't take it: refresh Lists on leaving (landed). */
   const changed = useRef(false);
   /** A stale refusal couldn't read where the title is now: reload the card once the rating sheet closes. */
   const refreshOnClose = useRef(false);
@@ -189,13 +189,22 @@ export function TitleScreen({ card }: { card: Card }) {
    * The Lists rows kept for Back take it at once (issues 93 and 110), whether or not this card is still on screen, so
    * Back to Lists shows the title where it is now, and an Edit tapped there opens on what this card saved. No server
    * refresh follows then: one that read before a Lists save made right after Back, and arrived after it, would put
-   * the old row back. Only a title the kept rows don't show (not loaded, or on no list) needs the refresh. Search
-   * fetches afresh on every visit.
+   * the old row back. Only a title the kept rows neither show nor dropped earlier (not loaded, or on no list) needs
+   * the refresh. A row they dropped (Skip, Remove rating) comes back from there on Undo.
    */
   function landed(record: TitleRecord | null) {
-    if (applyTitleChange(ref, record)) return;
-    changed.current = true;
-    if (gone.current) router.refresh();
+    // The kept rows now hold the title's latest row, so an earlier change they couldn't take needs no refresh either.
+    changed.current = !applyTitleChange(ref, record);
+    if (changed.current) refreshAfterLeaving();
+  }
+
+  /**
+   * A change the kept Lists rows couldn't take settled after Back. The refresh on leaving ran without it, so refresh
+   * now, but only while Lists is the screen showing: a refresh starts it over from the server. Search fetches afresh
+   * on every visit, and the Lists tab reads the server when tapped, so no other screen needs it.
+   */
+  function refreshAfterLeaving() {
+    if (gone.current && window.location.pathname === "/lists") router.refresh();
   }
 
   useEffect(() => {
@@ -282,7 +291,8 @@ export function TitleScreen({ card }: { card: Card }) {
   function showTrueState(result: { current?: ActionOutcome["current"] }, sheetStaysOpen = false) {
     if (result.current === undefined) {
       changed.current = true;
-      if (sheetStaysOpen && !gone.current) refreshOnClose.current = true;
+      if (gone.current) refreshAfterLeaving();
+      else if (sheetStaysOpen) refreshOnClose.current = true;
       else router.refresh();
       return;
     }

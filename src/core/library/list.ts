@@ -160,13 +160,18 @@ export function applyListFilters(
   });
 }
 
+/** The values a row sorts by in the updated sorts: last change, then identity. Lists rows use it too (applyTitleRecord). */
+export function updatedSortKey(row: Pick<TitleRecord, "updatedAt" | "mediaType" | "tmdbId">): (number | string)[] {
+  return [row.updatedAt.getTime(), row.mediaType, row.tmdbId];
+}
+
 /** The values a row sorts by, ending in its identity so the order is total. */
 export function sortKey(row: TitleRecord, sort: ListSort): (number | string)[] {
   const identity = [row.mediaType, row.tmdbId];
   switch (sort) {
     case "updated_desc":
     case "updated_asc":
-      return [row.updatedAt.getTime(), ...identity];
+      return updatedSortKey(row);
     case "created_desc":
     case "created_asc":
       return [row.createdAt.getTime(), ...identity];
@@ -195,10 +200,16 @@ export function encodeCursor(key: CursorKey): string {
   return Buffer.from(JSON.stringify([key.sort, ...key.values]), "utf8").toString("base64url");
 }
 
+/** Base64url to text, with web APIs only, so a browser can read a cursor too (applyTitleRecord). Throws on bad input. */
+function fromBase64url(text: string): string {
+  const binary = atob(text.replace(/-/g, "+").replace(/_/g, "/"));
+  return new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(binary, (c) => c.charCodeAt(0)));
+}
+
 export function decodeCursor(cursor: unknown): CursorKey | null {
   if (typeof cursor !== "string" || cursor === "") return null;
   try {
-    const parsed: unknown = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    const parsed: unknown = JSON.parse(fromBase64url(cursor));
     if (!Array.isArray(parsed) || parsed.length < 2) return null;
     const [sort, ...values] = parsed as unknown[];
     if (!(LIST_SORTS as readonly unknown[]).includes(sort)) return null;

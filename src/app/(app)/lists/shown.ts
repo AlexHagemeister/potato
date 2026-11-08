@@ -4,7 +4,8 @@
 import type { FilterChoice } from "@/core/filters";
 import type { TitleRecord } from "@/core/library/types";
 import { applyTitleRecord, type ListRow } from "@/core/lists";
-import type { ListStatus, TitleId } from "@/core/types";
+import { formatTitleKey } from "@/core/title-id";
+import { LIST_STATUSES, type ListStatus, type TitleId } from "@/core/types";
 
 export type ListState = { rows: ListRow[]; nextCursor: string | null };
 export type Lists = Record<ListStatus, ListState>;
@@ -31,12 +32,23 @@ const shownRenders = new Set<string>();
  */
 const MAX_SHOWN_RENDERS = 50;
 
+/**
+ * Rows a card's change took off the kept lists (a Skip, or Remove rating), by title key, newest last. A card's Undo
+ * brings the title back, and only the dropped row still holds its title and poster. A few are plenty: an Undo
+ * follows its own change within seconds.
+ */
+const dropped = new Map<string, ListRow>();
+const MAX_DROPPED = 20;
+
 /** Whether this server render was shown already, so Back restoring it shows the rows kept here. */
 export const wasShown = (renderId: string) => shownRenders.has(renderId);
 
 /** Notes a fresh render as shown, and starts the rows over from it. */
 export function seedShown(renderId: string, from: Shown) {
-  if (shownNow && shownNow.userId !== from.userId) shownRenders.clear();
+  if (shownNow && shownNow.userId !== from.userId) {
+    shownRenders.clear();
+    dropped.clear();
+  }
   shownRenders.add(renderId);
   while (shownRenders.size > MAX_SHOWN_RENDERS) shownRenders.delete(shownRenders.values().next().value as string);
   setShown(from);
@@ -67,12 +79,32 @@ export function updateLists(change: (lists: Lists) => Lists) {
  * A title card saved a change (issues 93 and 110): `record` is the title's row as the server now holds it. Back to
  * Lists then shows the title where it is now at once, not the row from before the card, so an Edit tapped right after
  * Back opens on the rating and review the card saved. Core decides where the row goes (applyTitleRecord). False when
- * the kept rows don't show the title, so they couldn't take the change: the card then refreshes the screen instead.
+ * the kept rows neither show the title nor hold a row they dropped for it, so they couldn't take the change: the card
+ * then refreshes Lists instead.
  */
 export function applyTitleChange(ref: TitleId, record: TitleRecord | null): boolean {
   if (!shownNow) return false;
-  const lists = applyTitleRecord(shownNow.lists, ref, record);
-  if (lists === shownNow.lists) return false;
+  const key = formatTitleKey(ref);
+  const before = shownNow.lists;
+  const lists = applyTitleRecord(before, ref, record, dropped.get(key));
+  if (lists === before) return false;
+  // A Skip or Remove rating drops the row. Keep it, so the card's Undo can put it back with its title and poster.
+  const now = rowOf(lists, key);
+  const was = rowOf(before, key);
+  if (now) dropped.delete(key);
+  else if (was) {
+    dropped.delete(key);
+    dropped.set(key, was);
+    if (dropped.size > MAX_DROPPED) dropped.delete(dropped.keys().next().value as string);
+  }
   setShown({ ...shownNow, lists });
   return true;
+}
+
+function rowOf(lists: Lists, key: string): ListRow | undefined {
+  for (const status of LIST_STATUSES) {
+    const row = lists[status].rows.find((r) => formatTitleKey(r) === key);
+    if (row) return row;
+  }
+  return undefined;
 }

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { TitleRecord } from "../library/types";
+import { encodeCursor, updatedSortKey } from "../library/list";
+import { DEFAULT_LIST_SORT, type TitleRecord } from "../library/types";
 import type { ListStatus, TitleStatus } from "../types";
 import { applyTitleRecord } from "./apply-record";
 import type { ListRow } from "./lists";
@@ -42,11 +43,17 @@ function record(tmdbId: number, status: TitleStatus, extra: Partial<TitleRecord>
 
 type Lists = Record<ListStatus, { rows: ListRow[]; nextCursor: string | null }>;
 
+/** The cursor a server page ending on this row carries, as getListRows makes it. */
+const cursorAfter = (r: ListRow) => encodeCursor({ sort: "updated_desc", values: updatedSortKey(r) });
+const W_CURSOR = cursorAfter(row(2, "watchlist"));
+const P_CURSOR = cursorAfter(row(6, "passed"));
+
+/** Watchlist and Passed have more pages, Seen doesn't. */
 function lists(): Lists {
   return {
-    watchlist: { rows: [row(1, "watchlist"), row(2, "watchlist")], nextCursor: "w" },
+    watchlist: { rows: [row(1, "watchlist"), row(2, "watchlist")], nextCursor: W_CURSOR },
     seen: { rows: [row(3, "seen"), row(4, "seen", { review: "Old review." })], nextCursor: null },
-    passed: { rows: [row(5, "passed"), row(6, "passed")], nextCursor: "p" },
+    passed: { rows: [row(5, "passed"), row(6, "passed")], nextCursor: P_CURSOR },
   };
 }
 
@@ -65,8 +72,8 @@ describe("applyTitleRecord", () => {
     expect(ids(out, "passed")).toEqual([5]);
     expect(ids(out, "watchlist")).toEqual([6, 1, 2]);
     expect(out.watchlist.rows[0]).toMatchObject({ status: "watchlist", rating: null, title: "Title 6", updatedAt: NOW });
-    expect(out.watchlist.nextCursor).toBe("w");
-    expect(out.passed.nextCursor).toBe("p");
+    expect(out.watchlist.nextCursor).toBe(W_CURSOR);
+    expect(out.passed.nextCursor).toBe(P_CURSOR);
   });
 
   test("Seen carries the rating and review to the Seen list", () => {
@@ -98,6 +105,14 @@ describe("applyTitleRecord", () => {
     expect(ids(last, "seen")).toEqual([3, 4, 1]);
   });
 
+  test("an Undo of a move puts back the last row loaded, the one the list's cursor names", () => {
+    const passed = applyTitleRecord(lists(), ref(2), record(2, "passed"));
+    expect(ids(passed, "watchlist")).toEqual([1]);
+    const undone = applyTitleRecord(passed, ref(2), record(2, "watchlist", { updatedAt: at(2) }));
+    expect(ids(undone, "watchlist")).toEqual([1, 2]);
+    expect(ids(undone, "passed")).toEqual([5, 6]);
+  });
+
   test("equal times fall back to the identity order the server uses", () => {
     const base = lists();
     base.passed.rows = [5, 6, 7].map((id) => row(id, "passed", { updatedAt: NOW }));
@@ -111,6 +126,45 @@ describe("applyTitleRecord", () => {
     expect(ids(applyTitleRecord(lists(), ref(1), record(1, "skipped")), "watchlist")).toEqual([2]);
     const gone = applyTitleRecord(lists(), ref(3), null);
     expect(ids(gone, "seen")).toEqual([4]);
+  });
+
+  test("Skip then Undo: the dropped row comes back in its place, with its title and poster", () => {
+    const start = lists();
+    const kept = start.passed.rows[1];
+    const skipped = applyTitleRecord(start, ref(6), record(6, "skipped"));
+    expect(ids(skipped, "passed")).toEqual([5]);
+    // The Undo's record restores the earlier time. The lists no longer show the title, so the dropped row is handed in.
+    const undone = applyTitleRecord(skipped, ref(6), record(6, "passed", { updatedAt: at(6) }), kept);
+    expect(ids(undone, "passed")).toEqual([5, 6]);
+    expect(undone.passed.rows[1]).toEqual(row(6, "passed"));
+  });
+
+  test("Remove rating then Undo: the dropped Seen row comes back with its rating and review", () => {
+    const start = lists();
+    const kept = start.seen.rows[1];
+    const removed = applyTitleRecord(start, ref(4), null);
+    expect(ids(removed, "seen")).toEqual([3]);
+    const undone = applyTitleRecord(
+      removed,
+      ref(4),
+      record(4, "seen", { rating: 3, review: "Old review.", updatedAt: at(4) }),
+      kept,
+    );
+    expect(ids(undone, "seen")).toEqual([3, 4]);
+    expect(undone.seen.rows[1]).toEqual(row(4, "seen", { review: "Old review." }));
+  });
+
+  test("a known row is used only for its own title, and only when the lists don't show it", () => {
+    const before = lists();
+    expect(applyTitleRecord(before, ref(99), record(99, "watchlist"), row(98, "watchlist"))).toBe(before);
+    // Shown: the shown row wins, so its title and poster stay.
+    const out = applyTitleRecord(before, ref(5), record(5, "watchlist"), row(5, "passed", { title: "Old copy" }));
+    expect(out.watchlist.rows[0]).toMatchObject({ tmdbId: 5, title: "Title 5" });
+  });
+
+  test("the lists' order is an updated sort, which the placement above relies on", () => {
+    // applyTitleRecord orders rows with updatedSortKey. If the default list sort ever changes, so must it.
+    expect(DEFAULT_LIST_SORT.startsWith("updated_")).toBe(true);
   });
 
   test("a title the lists don't show changes nothing", () => {
