@@ -81,3 +81,5 @@ State lives in GitHub. Do not create status, progress, or tracking files in the 
 ## Notes
 
 Lasting quirks discovered during the build go here, one line each, with the date.
+
+- 2026-11-07: `.env.local` points at the production database. `.env.development.local` overrides only the database variables, pointing them at `potato_dev`. The Next dev server loads both and the dev file wins, so a new worktree needs both copied. Any other local database tool or script takes its connection from `.env.development.local`, never from `.env.local`.
