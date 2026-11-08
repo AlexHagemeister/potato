@@ -7,12 +7,15 @@
 // takes a clock or a user id from the client.
 
 import {
+  getTitleState,
   moveTitle,
+  removeRatingReview,
   restoreTitleState,
   updateRatingReview,
   type ActionOutcome,
   type CoreError,
   type Result,
+  type TitleRecord,
   type UndoInput,
 } from "@/core/library";
 import { normalizeFilterChoice, toDeckFilters, type FilterChoice } from "@/core/filters";
@@ -22,11 +25,16 @@ import { getCurrentUserForRequest } from "@/lib/current-user";
 
 export type ActionResult<T> =
   | { ok: true; value: T }
-  /** `stale` means the title changed elsewhere (another device, the AI connection): reload the lists. */
-  | { ok: false; error: string; stale?: boolean };
+  /**
+   * `stale` means the title changed elsewhere (another device, the AI connection): reload the lists. A removal's
+   * refusal also carries `current`, the title's row as it is now, when it could be read.
+   */
+  | { ok: false; error: string; stale?: boolean; current?: TitleRecord | null };
 
 const SIGNED_OUT = "You're signed out. Sign in again to save.";
 const STALE = "This title changed somewhere else. Your lists are up to date now.";
+const NOT_REMOVED_CHANGED = "Not removed: the rating or review changed somewhere else. Open Edit rating to see it.";
+const NOT_REMOVED_GONE = "Not removed: this title changed somewhere else and isn't on your Seen list now.";
 
 /** Presentation only: the words the screen shows for each core error. */
 function failure(error: CoreError): { ok: false; error: string; stale?: boolean } {
@@ -35,6 +43,7 @@ function failure(error: CoreError): { ok: false; error: string; stale?: boolean 
     case "unknown_user":
       return { ok: false, error: SIGNED_OUT };
     case "wrong_state":
+    case "stale_value":
     case "not_found":
       return { ok: false, error: STALE, stale: true };
     case "invalid_rating":
@@ -77,6 +86,33 @@ export async function addToWatchlistAction(ref: TitleId): Promise<ActionResult<A
 /** Edits a Seen title's rating and review. A blank review clears it. */
 export async function editRatingAction(ref: TitleId, rating: number, review: string): Promise<ActionResult<ActionOutcome>> {
   return run((userId) => updateRatingReview(userId, ref, { rating, review }));
+}
+
+/**
+ * Removes a Seen title's rating and review, after the user confirmed it (issue 43). `rating` and `review` are what
+ * the screen showed: core removes them only while the title still has exactly those.
+ */
+export async function removeRatingAction(ref: TitleId, rating: number, review: string | null): Promise<ActionResult<ActionOutcome>> {
+  try {
+    const user = await getCurrentUserForRequest();
+    if (!user) return { ok: false, error: SIGNED_OUT };
+    const result = await removeRatingReview(user.id, ref, { rating, review });
+    if (result.ok) return result;
+    const code = result.error.code;
+    if (code === "stale_value" || code === "wrong_state" || code === "not_found") {
+      // Refused because the title changed elsewhere. Send where it is now, so the screen can show it with the reason.
+      const now = await getTitleState(user.id, ref).catch(() => null);
+      const error = code === "stale_value" ? NOT_REMOVED_CHANGED : NOT_REMOVED_GONE;
+      return { ok: false, error, stale: true, ...(now?.ok ? { current: now.value } : {}) };
+    }
+    if (code === "invalid_user" || code === "unknown_user") return { ok: false, error: SIGNED_OUT };
+    // The screen sends back what it showed, so any other refusal is a bug, not something the user can fix.
+    console.error("remove rating rejected:", result.error);
+    return { ok: false, error: "Couldn't remove. Try again." };
+  } catch (err) {
+    console.error("remove rating failed:", err);
+    return { ok: false, error: "Couldn't remove. Try again." };
+  }
 }
 
 /** Undoes one of the actions above, if the title has not changed since. */

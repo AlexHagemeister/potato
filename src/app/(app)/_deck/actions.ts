@@ -62,6 +62,7 @@ function messageFor(error: CoreError, undo: boolean): string {
     case "invalid_review":
       return "That review can't be saved. Try shortening it.";
     case "wrong_state":
+    case "stale_value":
     case "not_found":
       if (undo) return "Couldn't undo: this title changed since.";
       break;
@@ -97,21 +98,20 @@ async function run(
 }
 
 /**
- * Pass, Skip, or Watchlist on a card. `seenShown` is true only when the card showed the title as Seen (the
- * title card of a Seen title). Without it core refuses to move a Seen title, so a stale card never erases a
- * rating and review written elsewhere (issue 74).
+ * Pass, Skip, or Watchlist on a card. Core refuses to move a Seen title, so a card never erases a rating and
+ * review (issues 43 and 74). A Seen title's card shows no sort buttons, so a refusal here means the card is
+ * stale: the title was marked Seen elsewhere.
  */
-export async function sortCardAction(kind: Exclude<SortKind, "seen">, ref: TitleId, seenShown = false): Promise<DeckActionResult> {
-  const options = { seenShown: seenShown === true };
+export async function sortCardAction(kind: Exclude<SortKind, "seen">, ref: TitleId): Promise<DeckActionResult> {
   return run(
     (userId) => {
       switch (kind) {
         case "pass":
-          return passTitle(userId, ref, options);
+          return passTitle(userId, ref);
         case "skip":
-          return skipTitle(userId, ref, options);
+          return skipTitle(userId, ref);
         case "watchlist":
-          return watchlistTitle(userId, ref, options);
+          return watchlistTitle(userId, ref);
         default:
           return Promise.resolve({ ok: false, error: { code: "invalid_move", message: `unknown sort: ${String(kind)}` } });
       }

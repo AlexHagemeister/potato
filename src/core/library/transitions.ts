@@ -18,38 +18,54 @@ export interface StatusColumns {
 
 /** Every status, in a fixed order. The Record type makes the compiler flag a status added to the schema. */
 const EVERY_STATUS = Object.keys({ watchlist: 0, passed: 0, skipped: 0, seen: 0 } satisfies Record<TitleStatus, 0>) as TitleStatus[];
-const NOT_SEEN = EVERY_STATUS.filter((s) => s !== "seen");
 
 /**
- * The one rule for which row a card button may replace (issues 65 and 74,
- * VISION invariant 6). Returns the statuses the title's row may have now for
- * the write to go ahead. A title on no list can always be written. The
- * write's SQL guard and its refusal's `expected` are both built from this.
+ * The one rule for which row a write may replace or delete without naming
+ * what the user was shown (issues 43, 65, and 74, VISION invariant 6): any row
+ * but a Seen one. A title on no list can always be written.
  *
- * A Seen row holds a rating, and maybe a review, that the card may never have
- * shown: another device or the AI connection can write them while the card
- * sits open. So:
- * - Seen it never replaces a Seen row. Changing a Seen title's rating or
- *   review is updateRatingReview's job, and its callers show the current
- *   review first.
- * - Pass, Skip, and Watchlist replace a Seen row only when the caller showed
- *   the title as Seen (`seenShown`). The user then moves it off the Seen list
- *   knowingly (what that should ask first is issue 43). Without it, the card
- *   is stale and the write refuses. Leaving it out is the safe default, so a
- *   caller that never read the row (the AI connection) can't erase a review.
+ * A Seen row holds a rating, and maybe a review, that the caller may never
+ * have shown: another device or the AI connection can write them while a card
+ * sits open. So no card button (Pass, Skip, Watchlist, Seen it) and no
+ * removeTitle ever replaces or deletes a Seen row, whatever the caller says it
+ * showed. A Seen title changes only through the calls that name what the user
+ * saw: updateRatingReview edits the rating and review, and removeRatingReview
+ * takes them off the Seen list (Alex's ruling on issue 43: removing them is a
+ * deliberate step, never one stray tap). Undo (restoreTitleState) can also
+ * take a title off the Seen list, but only by naming the Seen row's exact
+ * rating and review, as the action it undoes returned them.
+ *
+ * The SQL guards and the refusal's `expected` are both built from this.
  */
-export function cardWriteFrom(intent: TitleStatus, seenShown: boolean): readonly TitleStatus[] {
-  return intent !== "seen" && seenShown ? EVERY_STATUS : NOT_SEEN;
+export const REPLACEABLE: readonly TitleStatus[] = EVERY_STATUS.filter((s) => s !== "seen");
+
+/**
+ * The refusal when a REPLACEABLE guard holds. The guard can only refuse a Seen
+ * row, so the error says so directly, rather than reading the statement's
+ * snapshot, which can miss a Seen row committed at the same instant.
+ */
+export function seenRefused(): CoreError {
+  return { code: "wrong_state", status: "seen", expected: [...REPLACEABLE] };
 }
 
 /**
- * The refusal when a card write's guard holds. Every allowed set holds every
- * status but Seen, so the guard can only refuse a Seen row. The error says so
- * directly, rather than reading the statement's snapshot, which can miss a
- * Seen row committed at the same instant.
+ * Checks what a removal says the user was shown. The review is kept exactly as
+ * given, not normalized the way a write stores one: it is compared with the
+ * stored row, which may hold text no write would store today (a blank review
+ * put back by an undo), and the caller echoes the stored value. Left out or
+ * null means no review was shown.
  */
-export function cardWriteRefused(allowed: readonly TitleStatus[]): CoreError {
-  return { code: "wrong_state", status: "seen", expected: [...allowed] };
+export function planRatingReviewRemoval(shown: unknown): Result<{ rating: number; review: string | null }> {
+  const s = typeof shown === "object" && shown !== null ? (shown as Record<string, unknown>) : {};
+  const rating = validateRating(s.rating);
+  if (!rating.ok) return rating;
+  const review = s.review ?? null;
+  if (review !== null && typeof review !== "string") {
+    return fail({ code: "invalid_review", message: "review must be a string or null" });
+  }
+  // Postgres text cannot hold a NUL character, so no stored review has one, and the parameter would fail.
+  if (review?.includes("\u0000")) return fail({ code: "invalid_review", message: "review contains a NUL character" });
+  return ok({ rating: rating.value, review });
 }
 
 /** The four card buttons, as row writes. */
@@ -80,7 +96,8 @@ export function columnsFor(intent: CardIntent, now: Date): Result<StatusColumns>
 /**
  * The moves the Lists tab offers (VISION: Your lists). Each list move names
  * where the title must be now, so a stale screen cannot move a title it no
- * longer shows. Any other change goes through a card action or removeTitle.
+ * longer shows. Any other change goes through a card action, removeTitle, or
+ * removeRatingReview.
  */
 export const ALLOWED_MOVES: ReadonlyArray<{ from: TitleStatus; to: TitleStatus }> = [
   { from: "watchlist", to: "seen" },

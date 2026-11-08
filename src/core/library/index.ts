@@ -5,6 +5,7 @@ export {
   markSeen,
   moveTitle,
   passTitle,
+  removeRatingReview,
   removeTitle,
   restoreTitleState,
   skipTitle,

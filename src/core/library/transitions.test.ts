@@ -2,12 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { SKIP_DAYS } from "../deck/constants";
 import {
   ALLOWED_MOVES,
-  cardWriteFrom,
-  cardWriteRefused,
   columnsFor,
   isAllowedMove,
   planMove,
   planRatingReviewPatch,
+  planRatingReviewRemoval,
+  REPLACEABLE,
+  seenRefused,
 } from "./transitions";
 import type { MoveRequest } from "./types";
 
@@ -56,38 +57,49 @@ describe("columnsFor: every card action sets all four status columns", () => {
   });
 });
 
-describe("cardWriteFrom: which row a card button may replace (issues 65 and 74)", () => {
-  const sorted = (s: readonly string[]) => [...s].sort();
-
-  test("Seen it replaces any row but a Seen one, whatever the card showed", () => {
-    for (const seenShown of [false, true]) {
-      expect(sorted(cardWriteFrom("seen", seenShown))).toEqual(["passed", "skipped", "watchlist"]);
-    }
+describe("REPLACEABLE: which row a card button or removeTitle may replace (issues 43, 65, and 74)", () => {
+  test("every status but Seen, so no button ever replaces a Seen row", () => {
+    expect([...REPLACEABLE].sort()).toEqual(["passed", "skipped", "watchlist"]);
+    expect(REPLACEABLE).not.toContain("seen");
   });
 
-  test("Pass, Skip, and Watchlist refuse a Seen row unless the card showed the title as Seen", () => {
-    for (const intent of ["passed", "skipped", "watchlist"] as const) {
-      expect(sorted(cardWriteFrom(intent, false))).toEqual(["passed", "skipped", "watchlist"]);
-      expect(sorted(cardWriteFrom(intent, true))).toEqual(["passed", "seen", "skipped", "watchlist"]);
-    }
-  });
-
-  test("every allowed set holds every status but Seen, so a refusal always means the row is Seen", () => {
-    for (const intent of ["passed", "skipped", "watchlist", "seen"] as const) {
-      for (const seenShown of [false, true]) {
-        for (const status of ["passed", "skipped", "watchlist"] as const) {
-          expect(cardWriteFrom(intent, seenShown)).toContain(status);
-        }
-      }
-    }
-  });
-
-  test("the refusal says the title is Seen and lists what would have worked, from the allowed set alone", () => {
-    const allowed = cardWriteFrom("passed", false);
-    expect(cardWriteRefused(allowed)).toEqual({ code: "wrong_state", status: "seen", expected: [...allowed] });
+  test("the refusal says the title is Seen and lists what would have worked", () => {
+    expect(seenRefused()).toEqual({ code: "wrong_state", status: "seen", expected: [...REPLACEABLE] });
     // A copy: changing the error can't change the rule.
-    const refused = cardWriteRefused(allowed);
-    expect(refused.code === "wrong_state" && refused.expected).not.toBe(allowed);
+    const refused = seenRefused();
+    expect(refused.code === "wrong_state" && refused.expected).not.toBe(REPLACEABLE);
+  });
+});
+
+describe("planRatingReviewRemoval: what a removal says the user was shown (issue 43)", () => {
+  test("keeps a valid rating and review as they are", () => {
+    expect(planRatingReviewRemoval({ rating: 4.5, review: "Loved it." })).toEqual({ ok: true, value: { rating: 4.5, review: "Loved it." } });
+  });
+
+  test("a review left out or null means none was shown", () => {
+    for (const shown of [{ rating: 3 }, { rating: 3, review: null }]) {
+      expect(planRatingReviewRemoval(shown)).toEqual({ ok: true, value: { rating: 3, review: null } });
+    }
+  });
+
+  test("keeps a shown review exactly, blank or long, so it compares with the stored row as it is", () => {
+    for (const review of ["", "   ", " Padded. ", "x".repeat(20_000)]) {
+      expect(planRatingReviewRemoval({ rating: 3, review })).toEqual({ ok: true, value: { rating: 3, review } });
+    }
+  });
+
+  test("rejects a review with a NUL character, which no stored review can hold", () => {
+    expect(planRatingReviewRemoval({ rating: 3, review: "a\u0000b" })).toMatchObject({ ok: false, error: { code: "invalid_review" } });
+  });
+
+  test("needs the rating that was shown: a Seen title always has one", () => {
+    for (const shown of [{}, { review: "Text." }, { rating: 0 }, { rating: 4.2 }, { rating: "4" }, null, undefined, "x", 4]) {
+      expect(planRatingReviewRemoval(shown)).toMatchObject({ ok: false, error: { code: "invalid_rating" } });
+    }
+  });
+
+  test("rejects a review that is not text", () => {
+    expect(planRatingReviewRemoval({ rating: 2, review: 42 })).toMatchObject({ ok: false, error: { code: "invalid_review" } });
   });
 });
 

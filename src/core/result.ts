@@ -30,6 +30,12 @@ export type CoreError =
    * (empty when the action needed no row at all).
    */
   | { code: "wrong_state"; status: TitleStatus; expected: TitleStatus[] }
+  /**
+   * The title is Seen, as the action expected, but its rating or review is not
+   * the one the caller showed: it changed since (another device, the AI
+   * connection). Read the title again, show it, and ask again before retrying.
+   */
+  | { code: "stale_value"; status: "seen" }
   /** A state passed to restoreTitleState is malformed or names another title. */
   | { code: "invalid_snapshot"; message: string }
   /** A list status, sort, cursor, limit, or filter is invalid. */

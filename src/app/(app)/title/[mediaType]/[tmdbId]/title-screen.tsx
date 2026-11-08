@@ -13,10 +13,11 @@ import { CardView } from "../../../_deck/card-view";
 import { DeckButtons } from "../../../_deck/deck-buttons";
 import { NoticePill, UndoPill } from "../../../_components/toast-pills";
 import { Screen } from "../../../_shell/screen";
-import { editRatingAction } from "../../../lists/actions";
+import { editRatingAction, removeRatingAction } from "../../../lists/actions";
 
 // The full card for one title, opened from Search or Lists. The same card and
-// the same four buttons as the deck. The difference: the card stays on screen
+// the same four buttons as the deck, except on a Seen title, which shows only
+// Edit rating (issue 43). The other difference: the card stays on screen
 // after a tap, showing where the title now is, since there is no next card.
 // Each button calls the same server action the deck does, and core decides
 // what it does to the title's row. Pass, Skip, and Watchlist show at once and
@@ -112,6 +113,26 @@ function StatusLine({ state }: { state: CardUserState | null }) {
   );
 }
 
+/** The one action on a Seen title's card, in place of the four sort buttons. */
+function EditRatingButton({ disabled, onTap }: { disabled: boolean; onTap: () => void }) {
+  return (
+    <div className="flex h-full items-center">
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={onTap}
+        className="flex h-14 w-full items-center justify-center gap-2 rounded-2xl bg-surface-raised text-sm font-medium text-accent transition-transform active:scale-95 disabled:opacity-40"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="M4 20h4L19 9l-4-4L4 16v4z" />
+          <path d="M13.5 6.5l4 4" />
+        </svg>
+        <span className="text-foreground">Edit rating</span>
+      </button>
+    </div>
+  );
+}
+
 export function TitleScreen({ card }: { card: Card }) {
   const router = useRouter();
   const ref: TitleId = { mediaType: card.mediaType, tmdbId: card.tmdbId };
@@ -168,8 +189,9 @@ export function TitleScreen({ card }: { card: Card }) {
     setBusy(true);
     let result: DeckActionResult;
     try {
-      // Moving a Seen title off the Seen list is allowed only from a card that shows it as Seen (issue 74).
-      result = await sortCardAction(kind, ref, before?.status === "seen");
+      // A Seen title's card shows no sort buttons, and core refuses to move a Seen title (issue 43). A refusal
+      // means the title was marked Seen elsewhere while this card was open.
+      result = await sortCardAction(kind, ref);
     } catch {
       result = { ok: false, error: "Couldn't save. Check your connection." };
     }
@@ -233,6 +255,35 @@ export function TitleScreen({ card }: { card: Card }) {
     return reloadStale();
   }
 
+  /**
+   * Remove rating and review, confirmed in the sheet (issue 43). Core removes them only while the title still has
+   * the rating and review this sheet was opened with, so it never erases ones written elsewhere since.
+   */
+  async function removeSeen(): Promise<string | null> {
+    if (state?.status !== "seen" || state.rating === null) return reloadStale();
+    let result: Awaited<ReturnType<typeof removeRatingAction>>;
+    try {
+      result = await removeRatingAction(ref, state.rating, state.review);
+    } catch {
+      return "Couldn't remove. Check your connection.";
+    }
+    if (result.ok) {
+      setSheet(null);
+      changed.current = true;
+      setState(cardUserState(ref, result.value.current, new Date()));
+      setNotice(null);
+      setToast({ id: ++seq.current, message: "Rating removed", outcome: result.value });
+      return null;
+    }
+    if (!result.stale) return result.error;
+    // Changed elsewhere since the sheet opened: close it, show where the title is now, and say why nothing was
+    // removed. The sheet doesn't stay open, since its rating and review are no longer the stored ones.
+    setSheet(null);
+    showTrueState(result);
+    fail(result.error);
+    return null;
+  }
+
   function reloadStale(): null {
     // The title moved since this card loaded. Reload it from the server: page.tsx keys this screen on the
     // title's state, so the screen starts over with where the title is now.
@@ -271,7 +322,15 @@ export function TitleScreen({ card }: { card: Card }) {
 
   return (
     <Screen
-      actions={<DeckButtons disabled={busy || seenOpen} current={state ? KIND_OF[state.status] : null} onTap={(k) => void onTap(k)} />}
+      actions={
+        // A Seen title's card offers only Edit rating (Alex's ruling on issue 43): no single tap here can erase a
+        // rating or review. Removing them is a separate, confirmed step inside the Edit rating sheet.
+        state?.status === "seen" ? (
+          <EditRatingButton disabled={busy || seenOpen} onTap={() => void onTap("seen")} />
+        ) : (
+          <DeckButtons disabled={busy || seenOpen} current={state ? KIND_OF[state.status] : null} onTap={(k) => void onTap(k)} />
+        )
+      }
     >
       {/*
         The top bar: Back, and the Undo toast beside it, clear of the card and the four buttons (issue 50).
@@ -307,6 +366,7 @@ export function TitleScreen({ card }: { card: Card }) {
           initialReview={sheet === "edit" && state?.status === "seen" ? state.review : null}
           onCancel={() => setSheet(null)}
           onSave={saveSeen}
+          onRemove={sheet === "edit" ? removeSeen : undefined}
         />
       )}
     </Screen>
