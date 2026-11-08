@@ -61,6 +61,20 @@ export interface ActionOptions {
   now?: Date;
 }
 
+/** Options for Pass, Skip, and Watchlist. */
+export interface SortOptions extends ActionOptions {
+  /**
+   * The caller showed the title on no list, as a Discover card always does
+   * (issue 83). The write then goes ahead only while the deck may still show
+   * the title: no row, or a Skip whose return time has passed. A title put on
+   * any list, or skipped, since the card was dealt stays where it is, and the
+   * result is wrong_state with the status it has now and an empty `expected`.
+   * Only strictly `true` counts. Left out, the write replaces any row but a
+   * Seen one, as the title card and the AI connection need.
+   */
+  shownOnNoList?: boolean;
+}
+
 /**
  * The rating and review a caller showed the user, as removeRatingReview takes
  * them. The removal goes ahead only while the title's row still holds exactly

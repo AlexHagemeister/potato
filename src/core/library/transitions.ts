@@ -56,7 +56,8 @@ export function seenRefused(): CoreError {
  *
  * - wrong_state: the title is on another list than the write needs (a list
  *   move from the wrong list, a rating edit on a title no longer Seen, a card
- *   write on a Seen title, an undo of a row that moved).
+ *   write on a Seen title, a Discover card's tap on a title already on a list,
+ *   an undo of a row that moved).
  * - not_found: the title is on no list now.
  * - stale_value: the title is still Seen, with another rating or review.
  *
@@ -65,6 +66,34 @@ export function seenRefused(): CoreError {
  */
 export function isChangedElsewhere(error: CoreError): boolean {
   return error.code === "wrong_state" || error.code === "not_found" || error.code === "stale_value";
+}
+
+/**
+ * Which rows a card write may replace (Alex's ruling on issue 83, option A).
+ *
+ * - `replaceable`: any row but a Seen one (REPLACEABLE). The title card uses
+ *   it: it shows the list the title is on, so a tap there is a knowing move.
+ *   So does any caller that says nothing, such as the future AI connection.
+ * - `on_no_list`: only a row the deck may show (core's rowVisible): no row at
+ *   all, or a Skip whose return time has passed, since a returned Skip is
+ *   dealt again. A Discover card always showed the title on no list, so a row
+ *   on any list, or a Skip that hasn't returned yet, means the card went
+ *   stale while on screen: the title was sorted on another device or in
+ *   another tab. The earlier choice wins, and the tap changes nothing
+ *   (VISION invariant 3: the deck respects decisions already made).
+ */
+export type CardGuard = "replaceable" | "on_no_list";
+
+/**
+ * The guard for one card write. Pass, Skip, and Watchlist use `on_no_list`
+ * only when the caller says it showed the title on no list (strictly
+ * `shownOnNoList: true`). Seen it always uses `replaceable`: it records a
+ * rating the user typed on purpose, and Watchlist to Seen is a move the lists
+ * offer anyway, so a stale card's Seen it still moves a title off another
+ * list. It still never replaces a Seen row.
+ */
+export function cardGuardFor(intent: CardIntent, shownOnNoList: unknown): CardGuard {
+  return intent.status !== "seen" && shownOnNoList === true ? "on_no_list" : "replaceable";
 }
 
 /**
