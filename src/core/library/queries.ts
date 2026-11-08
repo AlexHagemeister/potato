@@ -6,9 +6,10 @@ import { getDb } from "@/db/client";
 import { MEDIA_TYPES, titleStatus } from "@/db/schema";
 import { getUserSettings } from "../settings/user-settings";
 import type { Candidate, ListStatus, MediaType, TitleId, TitleStatus, UserTitleState } from "../types";
-import { fail, ok, validateUserId, type Result } from "../result";
+import { fail, ok, validateUserId, type CoreError, type Result } from "../result";
 import { applyListFilters, filtersNeedDetails, pageRows, parseListQuery, withDetails } from "./list";
 import { recordFromDrizzle } from "./rows";
+import { isChangedElsewhere } from "./transitions";
 import type { DetailsLookupContext, ListOptions, ListPage, TitleRecord } from "./types";
 import { validateTitleRef } from "./validate";
 
@@ -82,6 +83,31 @@ export async function getTitleState(userId: string, ref: TitleId): Promise<Resul
     )
     .limit(1);
   return ok(rows[0] ? recordFromDrizzle(rows[0]) : null);
+}
+
+/**
+ * For a refused write: whether the refusal means the title changed elsewhere
+ * (isChangedElsewhere), and if so, the title's row as it is now, so a screen
+ * can show where the title went instead of what it last showed. Null when
+ * the refusal means something else (bad input, an unknown user).
+ *
+ * `current` is the row read after the refusal (null when the title is on no
+ * list), or undefined when that read failed. A refusal is already the
+ * answer, so a failed read never turns it into an outage: the caller still
+ * says nothing was saved.
+ */
+export async function readChangedElsewhere(
+  userId: string,
+  ref: TitleId,
+  error: CoreError,
+): Promise<{ current: TitleRecord | null | undefined } | null> {
+  if (!isChangedElsewhere(error)) return null;
+  try {
+    const now = await getTitleState(userId, ref);
+    return { current: now.ok ? now.value : undefined };
+  } catch {
+    return { current: undefined };
+  }
 }
 
 /** How many titles the user has rated (Seen rows always carry a rating). Gates "for you". */

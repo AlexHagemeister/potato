@@ -49,6 +49,25 @@ export function seenRefused(): CoreError {
 }
 
 /**
+ * Whether a refused write means the title changed since the caller read it
+ * (another device, the AI connection), rather than bad input or an unknown
+ * user. Every write that names what the caller showed refuses this way when
+ * that no longer holds:
+ *
+ * - wrong_state: the title is on another list than the write needs (a list
+ *   move from the wrong list, a rating edit on a title no longer Seen, a card
+ *   write on a Seen title, an undo of a row that moved).
+ * - not_found: the title is on no list now.
+ * - stale_value: the title is still Seen, with another rating or review.
+ *
+ * Nothing was written. Read the title again to show where it is now
+ * (readChangedElsewhere).
+ */
+export function isChangedElsewhere(error: CoreError): boolean {
+  return error.code === "wrong_state" || error.code === "not_found" || error.code === "stale_value";
+}
+
+/**
  * Checks what a removal says the user was shown. The review is kept exactly as
  * given, not normalized the way a write stores one: it is compared with the
  * stored row, which may hold text no write would store today (a blank review

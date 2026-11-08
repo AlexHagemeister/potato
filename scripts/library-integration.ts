@@ -645,6 +645,44 @@ try {
     assert.deepEqual(await state(A, ref), before);
   });
 
+  await check("a refused edit or Watchlist-to-Seen reads where the title is now (issue 79)", async () => {
+    // Edit rating, after another device removed the rating and put the title on the Watchlist.
+    const ref = fresh();
+    unwrap(await lib.markSeen(A, ref, { rating: 4, review: "Shown." }, { now: tick() }));
+    unwrap(await lib.removeRatingReview(A, ref, { rating: 4, review: "Shown." })); // elsewhere
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() })); // elsewhere
+    const before = await state(A, ref);
+    const edit = await lib.updateRatingReview(A, ref, { rating: 2, review: "Typed here." });
+    assert.equal(edit.ok, false);
+    if (edit.ok) return;
+    assert.deepEqual(await lib.readChangedElsewhere(A, ref, edit.error), { current: before });
+    assert.deepEqual(await state(A, ref), before);
+
+    // Edit rating, on no list now.
+    const gone = fresh();
+    const none = await lib.updateRatingReview(A, gone, { rating: 2 });
+    assert.equal(!none.ok && none.error.code, "not_found");
+    if (none.ok) return;
+    assert.deepEqual(await lib.readChangedElsewhere(A, gone, none.error), { current: null });
+
+    // Watchlist to Seen, after another device marked it Seen: the row read carries that device's rating and review.
+    const marked = fresh();
+    unwrap(await lib.watchlistTitle(A, marked, { now: tick() }));
+    unwrap(await lib.markSeen(A, marked, { rating: 5, review: "From the other device." }, { now: tick() })); // elsewhere
+    const seenRow = await state(A, marked);
+    const move = await lib.moveTitle(A, marked, { from: "watchlist", to: "seen", rating: 1, review: "Typed here." });
+    assert.equal(move.ok, false);
+    if (move.ok) return;
+    assert.deepEqual(await lib.readChangedElsewhere(A, marked, move.error), { current: seenRow });
+    assert.deepEqual(await state(A, marked), seenRow);
+
+    // Bad input is not a change elsewhere: no read, null.
+    const bad = await lib.updateRatingReview(A, marked, { rating: 6 });
+    assert.equal(bad.ok, false);
+    if (bad.ok) return;
+    assert.equal(await lib.readChangedElsewhere(A, marked, bad.error), null);
+  });
+
   console.log("Remove and restore");
 
   await check("removeTitle deletes a row that is not Seen, the deck sees it gone, and undo brings it back exactly", async () => {

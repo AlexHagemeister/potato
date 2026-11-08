@@ -9,6 +9,7 @@
 import {
   getTitleState,
   moveTitle,
+  readChangedElsewhere,
   removeRatingReview,
   restoreTitleState,
   updateRatingReview,
@@ -26,8 +27,9 @@ import { getCurrentUserForRequest } from "@/lib/current-user";
 export type ActionResult<T> =
   | { ok: true; value: T }
   /**
-   * `stale` means the title changed elsewhere (another device, the AI connection): reload the lists. A removal's
-   * refusal also carries `current`, the title's row as it is now, when it could be read.
+   * `stale` means the title changed elsewhere (another device, the AI connection): reload the lists. The refusals
+   * of a removal and of the rating sheet's saves also carry `current`, the title's row as it is now, when it could
+   * be read.
    */
   | { ok: false; error: string; stale?: boolean; current?: TitleRecord | null };
 
@@ -35,6 +37,48 @@ const SIGNED_OUT = "You're signed out. Sign in again to save.";
 const STALE = "This title changed somewhere else. Your lists are up to date now.";
 const NOT_REMOVED_CHANGED = "Not removed: the rating or review changed somewhere else. Open Edit rating to see it.";
 const NOT_REMOVED_GONE = "Not removed: this title changed somewhere else and isn't on your Seen list now.";
+
+/*
+ * A rating sheet's save refused because the title changed elsewhere (issue 79). The sheet stays open with what the
+ * user typed, so each message says what happened and where the title is now, worded from the row read after the
+ * refusal. The title card's Edit rating uses the same action as the Lists tab, so the edit's words hold on both.
+ */
+const NOT_SAVED_CHANGED = "Not saved: this title changed somewhere else.";
+const COPY_REVIEW = "Copy your review if you want to keep it.";
+
+/** Where a title is now, for a message. Skipped counts as no list, as VISION words it. */
+function whereNow(current: TitleRecord | null): string {
+  switch (current?.status) {
+    case "watchlist":
+      return "It's on your Watchlist now.";
+    case "passed":
+      return "It's on your Passed list now.";
+    case "seen":
+      return "It's on your Seen list now.";
+    default:
+      return "It isn't on any of your lists now.";
+  }
+}
+
+/** Edit rating, refused: the title is no longer Seen. */
+function editRefused(current: TitleRecord | null | undefined): string {
+  // Unread, or Seen again by the time it was read: say only that it changed.
+  if (current === undefined || current?.status === "seen") return NOT_SAVED_CHANGED;
+  return `Not saved: this title left your Seen list somewhere else. ${whereNow(current)}`;
+}
+
+/** Watchlist to Seen, refused: the title is no longer on the Watchlist. */
+function markSeenRefused(current: TitleRecord | null | undefined): string {
+  if (current === undefined || current?.status === "watchlist") return NOT_SAVED_CHANGED;
+  // The same words as Seen it on a card, refused for the same reason.
+  if (current?.status === "seen") return "Not saved: you already marked this Seen somewhere else, and the rating there stays.";
+  return `Not saved: this title left your Watchlist somewhere else. ${whereNow(current)}`;
+}
+
+/** A refusal message, with the reminder to copy the review when the sheet holds one. */
+function withCopy(message: string, review: unknown): string {
+  return typeof review === "string" && review.trim() !== "" ? `${message} ${COPY_REVIEW}` : message;
+}
 
 /** Presentation only: the words the screen shows for each core error. */
 function failure(error: CoreError): { ok: false; error: string; stale?: boolean } {
@@ -57,16 +101,27 @@ function failure(error: CoreError): { ok: false; error: string; stale?: boolean 
   }
 }
 
+/**
+ * Runs one action as the signed-in user. With `stale`, a refusal that means the title changed elsewhere (core
+ * decides which do) is worded by `stale.message` from the title's row as it is now, and carries that row.
+ */
 async function run<T>(
   fn: (userId: string) => Promise<Result<T>>,
   outage = "Couldn't save. Try again.",
+  stale?: { ref: TitleId; message: (current: TitleRecord | null | undefined) => string },
 ): Promise<ActionResult<T>> {
   try {
     // The session read is a database read too, so it sits inside the try.
     const user = await getCurrentUserForRequest();
     if (!user) return { ok: false, error: SIGNED_OUT };
     const result = await fn(user.id);
-    return result.ok ? result : failure(result.error);
+    if (result.ok) return result;
+    const changed = stale ? await readChangedElsewhere(user.id, stale.ref, result.error) : null;
+    if (stale && changed) {
+      const { current } = changed;
+      return { ok: false, error: stale.message(current), stale: true, ...(current !== undefined ? { current } : {}) };
+    }
+    return failure(result.error);
   } catch (err) {
     console.error("lists action failed:", err);
     return { ok: false, error: outage };
@@ -75,7 +130,10 @@ async function run<T>(
 
 /** Watchlist to Seen, with a rating and an optional review. A blank review saves none. */
 export async function markSeenAction(ref: TitleId, rating: number, review: string): Promise<ActionResult<ActionOutcome>> {
-  return run((userId) => moveTitle(userId, ref, { from: "watchlist", to: "seen", rating, review }));
+  return run((userId) => moveTitle(userId, ref, { from: "watchlist", to: "seen", rating, review }), undefined, {
+    ref,
+    message: (current) => withCopy(markSeenRefused(current), review),
+  });
 }
 
 /** Passed to Watchlist. */
@@ -85,7 +143,10 @@ export async function addToWatchlistAction(ref: TitleId): Promise<ActionResult<A
 
 /** Edits a Seen title's rating and review. A blank review clears it. */
 export async function editRatingAction(ref: TitleId, rating: number, review: string): Promise<ActionResult<ActionOutcome>> {
-  return run((userId) => updateRatingReview(userId, ref, { rating, review }));
+  return run((userId) => updateRatingReview(userId, ref, { rating, review }), undefined, {
+    ref,
+    message: (current) => withCopy(editRefused(current), review),
+  });
 }
 
 /**

@@ -555,16 +555,21 @@ export function ListsScreen({
     };
   }
 
+  /**
+   * A rating sheet's save refused because the title changed elsewhere (issue 79). The sheet stays open with the
+   * message and what the user typed, so a review is still there to copy, and the lists reload behind it to show
+   * where the title is now. Cancel closes it.
+   */
+  function refusedInSheet(result: { error: string }): string {
+    void reload();
+    return result.error;
+  }
+
   async function saveMarkSeen(row: ListRow, rating: number, review: string): Promise<string | null> {
     const ref = refOf(row);
     const key = keyOf(row);
     const result = await call(() => markSeenAction(ref, rating, review));
-    if (!result.ok) {
-      if (!result.stale) return result.error;
-      setSheet(null);
-      failed(result);
-      return null;
-    }
+    if (!result.ok) return result.stale ? refusedInSheet(result) : result.error;
     const index = lists.watchlist.rows.findIndex((r) => keyOf(r) === key);
     const moved = withRecord(row, result.value.current);
     const next = index >= 0 ? lists.watchlist.rows[index + 1] : undefined;
@@ -581,12 +586,7 @@ export function ListsScreen({
   async function saveEdit(row: ListRow, rating: number, review: string): Promise<string | null> {
     const ref = refOf(row);
     const result = await call(() => editRatingAction(ref, rating, review));
-    if (!result.ok) {
-      if (!result.stale) return result.error;
-      setSheet(null);
-      failed(result);
-      return null;
-    }
+    if (!result.ok) return result.stale ? refusedInSheet(result) : result.error;
     updateLists((prev) => replaced(prev, "seen", withRecord(row, result.value.current)));
     setSheet(null);
     show("Rating saved", undoer(ref, result.value, (prev) => replaced(prev, "seen", row)), keyOf(row));

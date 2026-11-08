@@ -4,6 +4,7 @@ import {
   ALLOWED_MOVES,
   columnsFor,
   isAllowedMove,
+  isChangedElsewhere,
   planMove,
   planRatingReviewPatch,
   planRatingReviewRemoval,
@@ -166,5 +167,29 @@ describe("planRatingReviewPatch", () => {
 
   test("validates the rating", () => {
     expect(planRatingReviewPatch({ rating: 0 })).toMatchObject({ ok: false, error: { code: "invalid_rating" } });
+  });
+});
+
+describe("isChangedElsewhere: which refusals mean the title changed since the caller read it", () => {
+  test("wrong_state, not_found, and stale_value do", () => {
+    expect(isChangedElsewhere({ code: "wrong_state", status: "watchlist", expected: ["seen"] })).toBe(true);
+    expect(isChangedElsewhere(seenRefused())).toBe(true);
+    expect(isChangedElsewhere({ code: "not_found" })).toBe(true);
+    expect(isChangedElsewhere({ code: "stale_value", status: "seen" })).toBe(true);
+  });
+
+  test("bad input and an unknown user do not", () => {
+    for (const error of [
+      { code: "invalid_user" },
+      { code: "unknown_user" },
+      { code: "invalid_rating", rating: 6 },
+      { code: "invalid_review", message: "too long" },
+      { code: "invalid_title", message: "bad id" },
+      { code: "invalid_move", message: "no" },
+      { code: "empty_patch" },
+      { code: "invalid_snapshot", message: "bad" },
+    ] as const) {
+      expect(isChangedElsewhere(error)).toBe(false);
+    }
   });
 });

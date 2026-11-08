@@ -149,6 +149,13 @@ export function TitleScreen({ card }: { card: Card }) {
   const seq = useRef(0);
   /** A save or undo landed on this screen. */
   const changed = useRef(false);
+  /** A stale refusal couldn't read where the title is now: reload the card once the rating sheet closes. */
+  const refreshOnClose = useRef(false);
+  useEffect(() => {
+    if (sheet !== null || !refreshOnClose.current) return;
+    refreshOnClose.current = false;
+    router.refresh();
+  }, [sheet, router]);
 
   // Back restores the previous screen from the router's cache. If this card changed the title, that copy is
   // stale (a Lists row still on its old list), so once the next screen is up, refresh it from the server.
@@ -218,7 +225,7 @@ export function TitleScreen({ card }: { card: Card }) {
     if (!result.ok) {
       // Marked Seen elsewhere: the card behind the sheet shows that now, and the sheet stays open with the
       // message, so a review the user typed is still there to copy. Cancel closes it.
-      if (result.stale) showTrueState(result);
+      if (result.stale) showTrueState(result, true);
       return result.error;
     }
     setSheet(null);
@@ -228,12 +235,14 @@ export function TitleScreen({ card }: { card: Card }) {
 
   /**
    * A write refused because the title changed elsewhere: show where it is now, from the row the refusal carries.
-   * If the row couldn't be read, reload the card from the server instead.
+   * If the row couldn't be read, reload the card from the server instead. A reload starts the screen over (see
+   * reloadStale), so while the rating sheet stays open with the user's text, it waits until the sheet closes.
    */
-  function showTrueState(result: { current?: ActionOutcome["current"] }) {
+  function showTrueState(result: { current?: ActionOutcome["current"] }, sheetStaysOpen = false) {
     changed.current = true;
     if (result.current === undefined) {
-      router.refresh();
+      if (sheetStaysOpen) refreshOnClose.current = true;
+      else router.refresh();
       return;
     }
     setState(cardUserState(ref, result.current, new Date()));
@@ -251,8 +260,11 @@ export function TitleScreen({ card }: { card: Card }) {
       done("seen", result.value);
       return null;
     }
-    if (!result.stale) return result.error;
-    return reloadStale();
+    // Taken off Seen elsewhere (issue 79): as for Seen it above, the card behind shows where the title is now, and
+    // the sheet stays open with the message and the text. It stays an Edit rating sheet, so a second Save is
+    // refused too: saving it as a new rating would undo a removal made on purpose on the other device.
+    if (result.stale) showTrueState(result, true);
+    return result.error;
   }
 
   /**
@@ -366,7 +378,9 @@ export function TitleScreen({ card }: { card: Card }) {
           initialReview={sheet === "edit" && state?.status === "seen" ? state.review : null}
           onCancel={() => setSheet(null)}
           onSave={saveSeen}
-          onRemove={sheet === "edit" ? removeSeen : undefined}
+          // Only while the card shows the title as Seen: after an edit refused because the title left Seen elsewhere,
+          // there is no rating or review left to remove.
+          onRemove={sheet === "edit" && state?.status === "seen" ? removeSeen : undefined}
         />
       )}
     </Screen>
