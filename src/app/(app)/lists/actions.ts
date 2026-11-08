@@ -104,7 +104,7 @@ function failure(error: CoreError): { ok: false; error: string; stale?: boolean 
     case "not_found":
       return { ok: false, error: STALE, stale: true };
     case "invalid_rating":
-      return { ok: false, error: "Pick a rating from half a star to 5 stars." };
+      return { ok: false, error: "Pick a rating from half a star to 10 stars." };
     case "invalid_review":
       return { ok: false, error: "That review can't be saved. It may be too long." };
     default:

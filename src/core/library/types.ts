@@ -3,9 +3,9 @@
 
 import type { Candidate, DeckFilters, ListStatus, TitleId, TitleStatus } from "../types";
 
-/** The rating scale (Alex's ruling on issue 3): half a star to 5 stars, in half steps. */
+/** The rating scale: half a star to 10 stars, in half steps (Alex, 2026-11-07, widening his ruling on issue 3). */
 export const RATING_MIN = 0.5;
-export const RATING_MAX = 5;
+export const RATING_MAX = 10;
 
 /** Longest review the core accepts, in UTF-16 code units. A guard against runaway input, not a style rule. */
 export const REVIEW_MAX_LENGTH = 10_000;

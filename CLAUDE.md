@@ -32,7 +32,7 @@ Before any work, orient from the record:
 ## Architecture rules
 
 1. **A title's identity is (media type, TMDB ID).** Movie and series IDs come from separate pools, so an ID alone is ambiguous. Every table, cache key, and URL uses the pair.
-2. **One row per user per title, with one status:** `watchlist`, `passed`, `seen`, or `skipped`. A skipped row carries the date it returns to the deck. A seen row carries the rating (0.5 to 5 in 0.5 steps) and the optional review. A database constraint enforces one row per user per title.
+2. **One row per user per title, with one status:** `watchlist`, `passed`, `seen`, or `skipped`. A skipped row carries the date it returns to the deck. A seen row carries the rating (0.5 to 10 in 0.5 steps) and the optional review. A database constraint enforces one row per user per title.
 3. **All app logic lives in one core layer.** The UI and the API call it. Neither holds logic of its own. The core layer does not import UI or framework code. This is what lets the future MCP do anything the app does (VISION invariant 7).
 4. **Each external service has exactly one module,** with caching: one for TMDB, one for IMDb. TMDB publishes no fixed rate limit, so the TMDB module handles HTTP 429 responses.
 5. **The deck engine is a pure function.** Input: the user's lists, the filters, and the discovery mode. Output: an ordered list of titles. It has unit tests.

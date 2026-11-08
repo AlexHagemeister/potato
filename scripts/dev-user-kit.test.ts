@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { isValidRating } from "../src/core/library/validate";
 import { SEED_ROWS, parseDevUserArgs } from "./dev-user-kit";
 
 describe("parseDevUserArgs", () => {
@@ -62,11 +63,7 @@ describe("SEED_ROWS", () => {
     for (const r of SEED_ROWS) {
       expect(r.tmdbId).toBeGreaterThan(0);
       expect(r.rating !== null).toBe(r.status === "seen");
-      if (r.rating !== null) {
-        expect(r.rating).toBeGreaterThanOrEqual(0.5);
-        expect(r.rating).toBeLessThanOrEqual(5);
-        expect(Number.isInteger(r.rating * 2)).toBe(true);
-      }
+      if (r.rating !== null) expect(isValidRating(r.rating)).toBe(true);
       if (r.review !== null) expect(r.status).toBe("seen");
     }
     expect(SEED_ROWS.some((r) => r.review !== null)).toBe(true);

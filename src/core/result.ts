@@ -12,7 +12,7 @@ export type CoreError =
   | { code: "unknown_user" }
   /** The media type is not movie or tv, or the TMDB ID is not a positive integer that fits the database. */
   | { code: "invalid_title"; message: string }
-  /** The rating is not 0.5 to 5 in half steps. */
+  /** The rating is not 0.5 to 10 in half steps. */
   | { code: "invalid_rating"; rating: unknown }
   /** The review is not a string or null, is too long, or holds a character the database cannot store. */
   | { code: "invalid_review"; message: string }

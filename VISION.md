@@ -39,7 +39,7 @@ A title on any list never returns to the deck.
 
 ## Ratings and reviews
 
-A rating is half a star to 5 stars, in half-star steps. A review is free text and is optional. A series gets one rating and one review for the whole show. Ratings and reviews belong to your profile and live inside Potato.
+A rating is half a star to 10 stars, in half-star steps. A review is free text and is optional. A series gets one rating and one review for the whole show. Ratings and reviews belong to your profile and live inside Potato.
 
 ## Your lists
 

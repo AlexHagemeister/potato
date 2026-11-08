@@ -15,6 +15,13 @@
       "when": 1794051804567,
       "tag": "0001_deck_choice",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794124942295,
+      "tag": "0002_ten_star_rating",
+      "breakpoints": true
     }
   ]
 }

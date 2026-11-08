@@ -455,7 +455,7 @@ try {
   });
 
   await check("removeRatingReview refuses when the rating or review differs from what was shown, changing nothing", async () => {
-    const ref = await seenElsewhere("none"); // 5 stars, "Elsewhere."
+    const ref = await seenElsewhere("none"); // rated 5, "Elsewhere."
     const before = await state(A, ref);
     for (const shown of [
       { rating: 4.5, review: "Elsewhere." },
@@ -627,8 +627,8 @@ try {
 
   console.log("Rating bounds");
 
-  await check("every half step from 0.5 to 5 stores exactly", async () => {
-    for (let r = 0.5; r <= 5; r += 0.5) {
+  await check("every half step from 0.5 to 10 stores exactly", async () => {
+    for (let r = 0.5; r <= 10; r += 0.5) {
       const ref = fresh();
       unwrap(await lib.markSeen(A, ref, { rating: r }, { now: tick() }));
       assert.equal((await state(A, ref))?.rating, r);
@@ -639,7 +639,7 @@ try {
     const ref = fresh();
     unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
     const before = await state(A, ref);
-    for (const rating of [0, 0.25, 5.5, 3.3, -1, Number.NaN]) {
+    for (const rating of [0, 0.25, 10.5, 11, 3.3, -1, Number.NaN]) {
       const r = await lib.markSeen(A, ref, { rating });
       assert.equal(!r.ok && r.error.code, "invalid_rating", `rating ${rating}`);
     }
@@ -650,7 +650,7 @@ try {
     const ref = fresh();
     await assert.rejects(
       db.execute(sql`insert into title_status (user_id, media_type, tmdb_id, status, rating)
-        values (${A}, ${ref.mediaType}, ${ref.tmdbId}, 'seen', 5.5)`),
+        values (${A}, ${ref.mediaType}, ${ref.tmdbId}, 'seen', 10.5)`),
       sqlState("23514", "title_status_rating_scale_check"),
     );
     await assert.rejects(
@@ -718,12 +718,12 @@ try {
     const wrong = await lib.updateRatingReview(A, ref, { rating: 4 }, { rating: 3 });
     assert.deepEqual(wrong, { ok: false, error: { code: "wrong_state", status: "watchlist", expected: ["seen"] } });
     assert.deepEqual(await state(A, ref), before);
-    const bad = await lib.updateRatingReview(A, ref, { rating: 6 }, { rating: 3 });
+    const bad = await lib.updateRatingReview(A, ref, { rating: 10.5 }, { rating: 3 });
     assert.equal(!bad.ok && bad.error.code, "invalid_rating");
   });
 
   await check("updateRatingReview refuses when the rating or review differs from what was shown, changing nothing (issue 103)", async () => {
-    const ref = await seenElsewhere("none"); // 5 stars, "Elsewhere."
+    const ref = await seenElsewhere("none"); // rated 5, "Elsewhere."
     const before = await state(A, ref);
     for (const shown of [
       { rating: 4.5, review: "Elsewhere." },
@@ -865,7 +865,7 @@ try {
     assert.deepEqual(await state(A, marked), seenRow);
 
     // Bad input is not a change elsewhere: no read, null.
-    const bad = await lib.updateRatingReview(A, marked, { rating: 6 }, { rating: 5, review: "From the other device." });
+    const bad = await lib.updateRatingReview(A, marked, { rating: 10.5 }, { rating: 5, review: "From the other device." });
     assert.equal(bad.ok, false);
     if (bad.ok) return;
     assert.equal(await lib.readChangedElsewhere(A, marked, bad.error), null);
@@ -913,7 +913,7 @@ try {
     const before = await state(A, ref);
     const other = { previous: { ...act.previous!, tmdbId: ref.tmdbId + 1 }, current: act.current };
     assert.equal((await lib.restoreTitleState(A, ref, other)).ok, false);
-    const malformed = { previous: { ...act.previous!, status: "seen" as const, rating: 9 }, current: act.current };
+    const malformed = { previous: { ...act.previous!, status: "seen" as const, rating: 10.5 }, current: act.current };
     assert.equal((await lib.restoreTitleState(A, ref, malformed)).ok, false);
     const noCurrent = { previous: act.previous } as never;
     assert.equal((await lib.restoreTitleState(A, ref, noCurrent)).ok, false);
