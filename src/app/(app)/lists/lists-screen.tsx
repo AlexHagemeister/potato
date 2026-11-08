@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   DEFAULT_FILTER_CHOICE,
   filterChoiceFromParams,
@@ -140,6 +140,42 @@ function toLists(pages: Record<ListStatus, ListRowsPage>): Lists {
   return out;
 }
 
+/** The rows on screen, and the filters they were loaded under. */
+type Shown = { filters: FilterChoice; lists: Lists };
+
+/*
+ * The rows the screen shows live here, at module scope, not in the component (issue 76). Back from a card mounts
+ * the screen again from the router's copy of the page, which holds the rows of its server render and none of this
+ * screen's changes since: an edited rating, Seen it, + Watchlist, an Undo, a filter change. So the screen takes its
+ * rows from the server only for a render it hasn't shown yet. For a render it has shown (a copy Back restored), it
+ * takes the rows it showed last, here. A save that settles after the screen is gone still lands here, and a screen
+ * mounted meanwhile shows it. A reload starts the module over, from a fresh server render.
+ */
+let shownNow: Shown | null = null;
+/** The server renders of the page already shown. Each fresh one replaces the rows above. */
+const shownRenders = new Set<string>();
+const shownListeners = new Set<() => void>();
+
+function subscribeShown(listener: () => void) {
+  shownListeners.add(listener);
+  return () => {
+    shownListeners.delete(listener);
+  };
+}
+const getShown = () => shownNow;
+// The server never holds a user's rows between requests: it renders from the page's props.
+const getServerShown = () => null;
+
+function setShown(next: Shown) {
+  shownNow = next;
+  for (const listener of shownListeners) listener();
+}
+
+/** Changes the rows on screen. The rows' filters stay. */
+function updateLists(change: (lists: Lists) => Lists) {
+  if (shownNow) setShown({ ...shownNow, lists: change(shownNow.lists) });
+}
+
 // Screen-state helpers. They only move rows the server already returned
 // between the three on-screen lists. Every rule lives in core.
 function without(lists: Lists, status: ListStatus, key: string): Lists {
@@ -175,26 +211,42 @@ interface Toast {
 type Sheet = { mode: "markSeen" | "edit"; row: ListRow };
 
 export function ListsScreen({
+  renderId,
   lists: fromServer,
   filters: filtersFromServer,
   hasServices,
 }: {
+  /** Names this server render. Back restores a render with the id it had (see shownNow). */
+  renderId: string;
   lists: Record<ListStatus, ListRowsPage>;
   /** The filters the server loaded `lists` with (from the address it rendered). */
   filters: FilterChoice;
   hasServices: boolean;
 }) {
   // The address names the list and the filters (issue 67). This screen writes it directly (writeAddress), so the
-  // router's copy of the page, which Back restores, can be older than the address. Its rows are used only when
-  // they were loaded under the address's filters. Otherwise the screen loads the rows for the address.
+  // rows it shows can be for older filters than the address names (Back to an entry whose filters were changed).
+  // Those rows are used only when they were loaded under the address's filters. Otherwise the screen loads the
+  // rows for the address.
   const searchParams = useSearchParams();
   const addressList = listFromParam(searchParams.get("list"));
   const addressFilters = filterChoiceFromParams(searchParams);
-  const serverFits = sameFilterChoice(filtersFromServer, addressFilters);
 
-  const [lists, setLists] = useState(() => toLists(fromServer));
+  // The rows: the server's for a render not shown yet, else the ones this screen showed last (issue 76).
+  const fromRender = useMemo<Shown>(
+    () => ({ filters: filtersFromServer, lists: toLists(fromServer) }),
+    [filtersFromServer, fromServer],
+  );
+  const stored = useSyncExternalStore(subscribeShown, getShown, getServerShown);
+  const shown = stored !== null && shownRenders.has(renderId) ? stored : fromRender;
+  useEffect(() => {
+    if (shownRenders.has(renderId)) return;
+    shownRenders.add(renderId);
+    setShown(fromRender);
+  }, [renderId, fromRender]);
+  const lists = shown.lists;
   // The filters the rows on screen were loaded under. A failed filter load falls back to them.
-  const [loaded, setLoaded] = useState(filtersFromServer);
+  const loaded = shown.filters;
+  const shownFits = sameFilterChoice(loaded, addressFilters);
   // The filters the label shows: `loaded`, or the ones a running filter load is for.
   const [filters, setFilters] = useState(addressFilters);
   const filtersRef = useRef(filters);
@@ -207,10 +259,10 @@ export function ListsScreen({
     activeRef.current = active;
   }, [active]);
   // A filter load to run (see the effect below): for a filter change, or on mount for the address's filters when
-  // the router's copy has rows for other filters. While it is set, the rows stay dimmed. If it fails, the screen
-  // goes back to `fallback`, the filters of the rows it still shows.
+  // the rows have other filters. While it is set, the rows stay dimmed. If it fails, the screen goes back to
+  // `fallback`, the filters of the rows it still shows.
   const [due, setDue] = useState<{ filters: FilterChoice; fallback: FilterChoice } | null>(() =>
-    serverFits ? null : { filters: addressFilters, fallback: filtersFromServer },
+    shownFits ? null : { filters: addressFilters, fallback: loaded },
   );
   const filtering = due !== null;
   const filteringRef = useRef(filtering);
@@ -231,23 +283,31 @@ export function ListsScreen({
     loadSeq.current++;
     leaving.current = false;
   }, [restarts]);
-  // The server data and address last seen. New server data (a refresh after a change on a card, the Lists tab
-  // while on Lists, Back between two Lists entries) or an address this screen didn't write (the Lists tab while on
-  // Lists, when Next reuses its copy of the page) starts the screen over on the list and filters the address names.
+  // A load (a reload, Show more) that settles once the screen is gone changes nothing. A save still lands, in the
+  // rows at module scope (updateLists), so Back shows it.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  // The render and address last seen. A new render (a refresh after a change on a card, the Lists tab while on
+  // Lists, Back between two Lists entries) or an address this screen didn't write (the Lists tab while on Lists,
+  // when Next reuses its copy of the page) starts the screen over on the list and filters the address names, with
+  // the rows `shown` picks for the render.
   const addressKey = searchParams.toString();
-  const [seen, setSeen] = useState({ server: fromServer, address: addressKey });
-  if (fromServer !== seen.server || addressKey !== seen.address) {
-    setSeen({ server: fromServer, address: addressKey });
-    const newServer = fromServer !== seen.server;
+  const [seen, setSeen] = useState({ renderId, address: addressKey });
+  if (renderId !== seen.renderId || addressKey !== seen.address) {
+    setSeen({ renderId, address: addressKey });
+    const newRender = renderId !== seen.renderId;
     const sameFilters = sameFilterChoice(addressFilters, filters);
     // This screen's own writes name the list and filters it already shows.
-    if (newServer || addressList !== active || !sameFilters) setActive(addressList);
-    if (newServer || !sameFilters) {
-      setLists(toLists(fromServer));
-      setLoaded(filtersFromServer);
+    if (newRender || addressList !== active || !sameFilters) setActive(addressList);
+    if (newRender || !sameFilters) {
       setFilters(addressFilters);
       setRefill(null);
-      setDue(serverFits ? null : { filters: addressFilters, fallback: filtersFromServer });
+      setDue(shownFits ? null : { filters: addressFilters, fallback: loaded });
       setRestarts((n) => n + 1);
     }
   }
@@ -282,7 +342,7 @@ export function ListsScreen({
           );
           if (cancelled || !result.ok) break;
           const page: ListRowsPage = result.value;
-          setLists((prev) => ({ ...prev, [status]: appendPage(prev[status], page) }));
+          updateLists((prev) => ({ ...prev, [status]: appendPage(prev[status], page) }));
           have += page.rows.length;
           cursor = page.nextCursor;
         }
@@ -321,9 +381,10 @@ export function ListsScreen({
   }, [toast]);
 
   // Back to this screen (or a reload) puts the list where it was, once rows for the address show: at once when the
-  // router's copy fits the address, or when the load for the address settles. The position is saved when a scroll
+  // rows fit the address, or when the load for the address settles. The position is saved when a scroll
   // ends and when a link is tapped, so it is always the latest. (A write while the page unloads for a reload is not
-  // kept, so it can't wait until then.) Rows added with Show more aren't reloaded, so a position past them clamps.
+  // kept, so it can't wait until then.) Back keeps rows added with Show more, but a reload doesn't fetch them again,
+  // so after a reload a position past them clamps.
   const scrollDue = useRef<number | null | undefined>(undefined);
   useLayoutEffect(() => {
     const main = panel.current?.closest("main");
@@ -384,23 +445,23 @@ export function ListsScreen({
     const seq = ++loadSeq.current;
     // The latest filters, not this closure's: a write can come back stale after the filters changed.
     const using = filtersRef.current;
-    const shown = lists;
+    const before = lists;
     const result = await call(() => loadListsAction(using), FILTER_FAILED);
-    if (seq !== loadSeq.current) return;
+    if (seq !== loadSeq.current || !mounted.current) return;
     if (!result.ok) return;
     const fresh = toLists(result.value);
     const jobs: Refill["jobs"] = {};
     for (const { status } of TABS) {
       const cursor = fresh[status].nextCursor;
-      const want = shown[status].rows.length;
+      const want = before[status].rows.length;
       if (cursor && want > fresh[status].rows.length) jobs[status] = { cursor, have: fresh[status].rows.length, want };
     }
-    setLists(fresh);
+    updateLists(() => fresh);
     setRefill(Object.keys(jobs).length > 0 ? { filters: using, jobs } : null);
   }
 
   /**
-   * The filter load, for a filter change or for an address the router's copy doesn't fit. Wherever `due` is set,
+   * The filter load, for a filter change or for an address the rows don't fit. Wherever `due` is set,
    * the Filters label already shows its filters and the rows are dimmed. The address is written once the load
    * settles: with the new filters if it loaded, or with `fallback`, whose rows still show, if it failed. So the
    * address never names filters the rows don't have. The list in it is the one showing then, since a tab can be
@@ -418,8 +479,7 @@ export function ListsScreen({
       filteringRef.current = false;
       const settled = result.ok ? due.filters : due.fallback;
       if (result.ok) {
-        setLists(toLists(result.value));
-        setLoaded(due.filters);
+        setShown({ filters: due.filters, lists: toLists(result.value) });
       } else {
         setFilters(due.fallback);
         // Now, not after the next render: the deferred reload below reads it.
@@ -468,7 +528,7 @@ export function ListsScreen({
       const result = await call(() => undoAction(ref, outcome));
       // On failure nothing was undone, so the screen already matches the server.
       if (!result.ok) return failed(result);
-      setLists(putBack);
+      updateLists(putBack);
     };
   }
 
@@ -485,7 +545,7 @@ export function ListsScreen({
     const index = lists.watchlist.rows.findIndex((r) => keyOf(r) === key);
     const moved = withRecord(row, result.value.current);
     const next = index >= 0 ? lists.watchlist.rows[index + 1] : undefined;
-    setLists((prev) => insertAt(without(prev, "watchlist", key), "seen", moved, 0));
+    updateLists((prev) => insertAt(without(prev, "watchlist", key), "seen", moved, 0));
     setSheet(null);
     show(
       "Moved to Seen",
@@ -504,7 +564,7 @@ export function ListsScreen({
       failed(result);
       return null;
     }
-    setLists((prev) => replaced(prev, "seen", withRecord(row, result.value.current)));
+    updateLists((prev) => replaced(prev, "seen", withRecord(row, result.value.current)));
     setSheet(null);
     show("Rating saved", undoer(ref, result.value, (prev) => replaced(prev, "seen", row)), keyOf(row));
     return null;
@@ -518,14 +578,14 @@ export function ListsScreen({
     const putBack = (prev: Lists) => insertAt(without(prev, "watchlist", key), "passed", row, index);
     // Moves on tap, with the row's button disabled until the move saves. A failure puts the row back.
     setRowPending(key, true);
-    setLists((prev) => insertAt(without(prev, "passed", key), "watchlist", { ...row, status: "watchlist" }, 0));
+    updateLists((prev) => insertAt(without(prev, "passed", key), "watchlist", { ...row, status: "watchlist" }, 0));
     const result = await call(() => addToWatchlistAction(ref));
     setRowPending(key, false);
     if (!result.ok) {
-      setLists(putBack);
+      updateLists(putBack);
       return failed(result);
     }
-    setLists((prev) => replaced(prev, "watchlist", withRecord(row, result.value.current)));
+    updateLists((prev) => replaced(prev, "watchlist", withRecord(row, result.value.current)));
     show("Moved to Watchlist", undoer(ref, result.value, putBack), next && keyOf(next));
   }
 
@@ -538,10 +598,10 @@ export function ListsScreen({
     setLoadingMore(true);
     const result = await call(() => loadMoreAction(status, cursor, filters), LOAD_FAILED);
     setLoadingMore(false);
-    if (seq !== loadSeq.current) return;
+    if (seq !== loadSeq.current || !mounted.current) return;
     if (!result.ok) return failed(result);
     const page = result.value;
-    setLists((prev) => ({ ...prev, [status]: appendPage(prev[status], page) }));
+    updateLists((prev) => ({ ...prev, [status]: appendPage(prev[status], page) }));
   }
 
   const current = lists[active];
