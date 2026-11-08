@@ -53,7 +53,7 @@ Before any work, orient from the record:
   1. It invokes the `code-review` skill at `high` effort on the PR number, with `--comment`, so findings land on the PR as comments.
   2. It reads VISION.md and comments on any invariant the PR fights.
   3. The builder fixes each finding or answers it in the PR thread with a reason.
-  4. A fresh reviewer re-checks the fixes.
+  4. A fresh reviewer re-checks only the fixes. It reads the diff since the commit the last review checked, confirms each finding is fixed or that the builder's answer holds (in the running app when the finding was seen there), and checks that the changed code broke nothing nearby. It does not rerun the full `code-review` skill. It posts its result as one PR comment that names the head commit it checked. Why: full re-reviews re-read code that was already checked and took 10 to 20 minutes a round (Alex, 2026-11-07).
   5. After three rounds without a clean review, label the PR `needs-alex` and move on to other work.
 - **Merge** with a squash merge once the review is clean and CI is green. Delete the branch.
 - **Before handing the milestone to Alex,** a fresh subagent reviews the whole codebase against VISION.md, and its findings go through the same fix loop.
@@ -81,3 +81,10 @@ State lives in GitHub. Do not create status, progress, or tracking files in the 
 ## Notes
 
 Lasting quirks discovered during the build go here, one line each, with the date.
+
+- 2026-11-07: `.env.local` points at the production database. `.env.development.local` overrides only the database variables, pointing them at `potato_dev`. The Next dev server loads both and the dev file wins, so a new worktree needs both copied. Any other local database tool or script takes its connection from `.env.development.local`, never from `.env.local`.
+- 2026-11-07: Walk as your own test user, never the shared one: open `/api/dev/login?as=<slug>` (for example `?as=pr90`; 1 to 24 lowercase letters, digits, and inner dashes) to sign in as `dev-test-<slug>@example.com`, created on first use. Plain `/api/dev/login` is the shared user other agents may be using.
+- 2026-11-07: `bun run dev:user show <slug>` counts that user's rows in each list (potato_dev only, read only).
+- 2026-11-07: `bun run dev:user reset <slug>` deletes that user's title rows and settings so a walk starts clean, and keeps it signed in. It refuses any database but potato_dev, and the shared user needs `--shared` in place of a slug.
+- 2026-11-07: `bun run dev:user seed <slug>` writes two real titles to each list (Watchlist, Passed, Seen with ratings and a review, Skipped), creating the user if needed. It overwrites that user's rows for those eight titles and keeps its other rows. Run `reset` first for exactly those eight rows.
+- 2026-11-07: `bun run dev:user delete <slug>` deletes the user and everything it owns. Run it when your walk is done.

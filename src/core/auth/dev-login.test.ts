@@ -83,4 +83,10 @@ describe("createDevSession", () => {
       "Dev login is disabled",
     );
   });
+
+  test("refuses a slug the route would reject, before touching auth or the database", async () => {
+    for (const slug of ["", "Bad!", "user", "a".repeat(25)]) {
+      await expect(createDevSession(open, slug)).rejects.toThrow("Dev login refused");
+    }
+  });
 });

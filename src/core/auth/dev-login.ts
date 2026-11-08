@@ -1,6 +1,7 @@
 // Development-only test session (CLAUDE.md: "Behind sign-in, use a
 // development-only test session"). Agents can't sign in to Google, so this
-// signs a fixed test user in with a real Better Auth session in potato_dev.
+// signs a test user in with a real Better Auth session in potato_dev: the
+// shared test user, or a per-agent user named by a slug (dev-user.ts).
 //
 // It must never work in a production build, on Vercel, or against any
 // database but potato_dev. The gate fails closed on three independent checks,
@@ -11,14 +12,15 @@ import { sql } from "drizzle-orm";
 import { makeSignature } from "better-auth/crypto";
 import { getDb } from "@/db/client";
 import { getAuth } from "./auth";
+import {
+  DEV_DATABASE_NAME,
+  databaseNameFromUrl,
+  devDatabaseRefusal,
+  devTestUser,
+  parseDevUserSlug,
+} from "./dev-user";
 
-export const DEV_TEST_USER = {
-  email: "dev-test-user@example.com",
-  name: "Dev Test User",
-} as const;
-
-/** The only database the dev login may write to. */
-export const DEV_DATABASE_NAME = "potato_dev";
+export { DEV_DATABASE_NAME, DEV_TEST_USER, databaseNameFromUrl, parseDevUserSlug } from "./dev-user";
 
 export interface DevLoginEnv {
   /**
@@ -31,17 +33,6 @@ export interface DevLoginEnv {
   vercelEnv: string | undefined;
   /** process.env.DATABASE_URL. */
   databaseUrl: string | undefined;
-}
-
-/** The database name in a Postgres connection URL, or null if it can't be read. */
-export function databaseNameFromUrl(url: string | undefined): string | null {
-  if (!url) return null;
-  try {
-    const name = decodeURIComponent(new URL(url).pathname.replace(/^\//, ""));
-    return name || null;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -75,30 +66,36 @@ function isUniqueViolation(error: unknown): boolean {
 }
 
 /**
- * Finds or creates the test user, opens a session for it, and returns the
- * Set-Cookie header value that carries the session. Safe to call
- * concurrently: a second request racing the first one's insert re-reads the
- * user instead of failing.
+ * Finds or creates the test user for `slug` (the shared user when null),
+ * opens a session for it, and returns the Set-Cookie header value that
+ * carries the session. Safe to call concurrently: a second request racing
+ * the first one's insert re-reads the user instead of failing.
  */
-export async function createDevSession(env: DevLoginEnv): Promise<{ setCookie: string }> {
+export async function createDevSession(
+  env: DevLoginEnv,
+  slug: string | null = null,
+): Promise<{ setCookie: string }> {
   if (!isDevLoginEnabled(env)) throw new Error("Dev login is disabled outside local development");
+  // The route validates the slug first. Checked again here so no caller can
+  // build an email from an unchecked slug.
+  const parsed = parseDevUserSlug(slug === null ? [] : [slug]);
+  if (!parsed.ok) throw new Error(`Dev login refused: ${parsed.reason}`);
+  const testUser = devTestUser(parsed.slug);
 
   // Check the live connection too, not just the URL string.
   const result = await getDb().execute<{ name: string }>(sql`select current_database() as name`);
-  const connected = result.rows[0]?.name;
-  if (connected !== DEV_DATABASE_NAME) {
-    throw new Error(`Dev login refused: connected to "${connected}", not "${DEV_DATABASE_NAME}"`);
-  }
+  const refusal = devDatabaseRefusal(result.rows[0]?.name, "the connected database");
+  if (refusal) throw new Error(`Dev login refused: ${refusal}`);
 
   const ctx = await getAuth().$context;
   const findUser = async () =>
-    (await ctx.internalAdapter.findUserByEmail(DEV_TEST_USER.email))?.user ?? null;
+    (await ctx.internalAdapter.findUserByEmail(testUser.email))?.user ?? null;
 
   let user = await findUser();
   if (!user) {
     try {
       user = await ctx.internalAdapter.createUser(
-        { email: DEV_TEST_USER.email, name: DEV_TEST_USER.name, emailVerified: true },
+        { email: testUser.email, name: testUser.name, emailVerified: true },
         { method: "dev-login" },
       );
     } catch (error) {
