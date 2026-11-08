@@ -5,6 +5,7 @@ import type { MediaType } from "../types";
 import {
   addPage,
   afterRefusal,
+  afterUndo,
   deckInputChange,
   deckSettingsKey,
   dropTitles,
@@ -142,6 +143,59 @@ describe("removeCard and returnToFront", () => {
     let q = returnToFront(emptyQueue(), card(5));
     q = addPage(q, { cards: [card(5), card(6)], nextCursor: null });
     expect(ids(q)).toEqual(["movie:5", "movie:6"]);
+  });
+});
+
+describe("afterUndo (issue 54)", () => {
+  const now = new Date("2026-11-07T12:00:00.000Z");
+  const later = "2026-11-21T12:00:00.000Z";
+  const earlier = "2026-11-01T12:00:00.000Z";
+  // The deck after a sort of movie:1: the next card is on top.
+  const sortedAway = () => removeCard(addPage(emptyQueue(), { cards: [card(1), card(2)], nextCursor: "c" }), card(1));
+
+  test("no row before the sort: the card comes back on top, once", () => {
+    let q = afterUndo(sortedAway(), card(1), null, now);
+    expect(ids(q)).toEqual(["movie:1", "movie:2"]);
+    q = afterUndo(q, card(1), null, now);
+    expect(ids(q)).toEqual(["movie:1", "movie:2"]);
+  });
+
+  test.each(["watchlist", "passed", "seen"] as const)("a %s row: the card stays out, and stays dealt", (status) => {
+    const q = afterUndo(sortedAway(), card(1), { status, skipUntil: null }, now);
+    expect(ids(q)).toEqual(["movie:2"]);
+    expect(q.dealt.has("movie:1")).toBe(true);
+    // A later page can't deal it again.
+    expect(ids(addPage(q, { cards: [card(1), card(3)], nextCursor: null }))).toEqual(["movie:2", "movie:3"]);
+  });
+
+  test("a listed title on top (an optimistic return) is taken out", () => {
+    const shown = returnToFront(sortedAway(), card(1));
+    expect(ids(afterUndo(shown, card(1), { status: "watchlist" }, now))).toEqual(["movie:2"]);
+  });
+
+  test("a skip that has not run out keeps the card out, as a Date or an ISO string", () => {
+    expect(ids(afterUndo(sortedAway(), card(1), { status: "skipped", skipUntil: new Date(later) }, now))).toEqual(["movie:2"]);
+    expect(ids(afterUndo(sortedAway(), card(1), { status: "skipped", skipUntil: later }, now))).toEqual(["movie:2"]);
+  });
+
+  test("a skip that has run out puts the card back on top", () => {
+    expect(ids(afterUndo(sortedAway(), card(1), { status: "skipped", skipUntil: earlier }, now))).toEqual(["movie:1", "movie:2"]);
+  });
+
+  test("a skip whose return time names no moment fails closed: the card stays out", () => {
+    expect(ids(afterUndo(sortedAway(), card(1), { status: "skipped", skipUntil: null }, now))).toEqual(["movie:2"]);
+    expect(ids(afterUndo(sortedAway(), card(1), { status: "skipped", skipUntil: "not a date" }, now))).toEqual(["movie:2"]);
+  });
+
+  test("a title not in the queue and not dealt is added to dealt when it stays out", () => {
+    const q = afterUndo(emptyQueue(), card(7), { status: "passed" }, now);
+    expect(ids(q)).toEqual([]);
+    expect(q.dealt.has("movie:7")).toBe(true);
+  });
+
+  test("the pair (media type, TMDB ID) decides, not the ID alone", () => {
+    const q = afterUndo(addPage(emptyQueue(), { cards: [card(1, "tv"), card(2)], nextCursor: "c" }), card(1), { status: "watchlist" }, now);
+    expect(ids(q)).toEqual(["tv:1", "movie:2"]);
   });
 });
 

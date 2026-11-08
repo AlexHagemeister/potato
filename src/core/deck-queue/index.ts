@@ -2,16 +2,19 @@
 // and when to ask the deck service for another page. Pure functions over an
 // immutable value, so the Discover screen, a future native app, and tests
 // share one set of paging rules (CLAUDE.md architecture rule 3). It runs in
-// the browser, so it may import only pure modules: today that is types and
-// formatTitleKey from ../title-id. Never import server-only code here.
+// the browser, so it may import only pure modules: today that is types,
+// formatTitleKey from ../title-id, and the deck engine's hiding rule
+// (createVisibilityCheck, pure, which the card screen also runs in the
+// browser). Never import server-only code here.
 //
 // The paging rules come from DeckPage (src/core/deck-service/types.ts):
 // keep calling while nextCursor is not null, even when a page has no cards,
 // and drop any card already dealt, by (media type, TMDB ID).
 
+import { createVisibilityCheck } from "../deck/build-deck";
 import type { DeckPageCard } from "../deck-service/types";
 import { formatTitleKey, toTitleId } from "../title-id";
-import type { TitleId } from "../types";
+import type { TitleId, TitleStatus } from "../types";
 
 /** Ask for another page when fewer cards than this are queued. */
 export const QUEUE_LOW_WATER = 5;
@@ -245,4 +248,30 @@ export function returnToFront(queue: DeckQueue, card: DeckPageCard): DeckQueue {
   const key = titleKey(card);
   const dealt = queue.dealt.has(key) ? queue.dealt : new Set([...queue.dealt, key]);
   return { ...queue, dealt, cards: [card, ...queue.cards.filter((c) => titleKey(c) !== key)] };
+}
+
+/** A title's row as the deck's hiding rule reads it. skipUntil may be a string once it has crossed JSON. */
+export interface UndoneRow {
+  status: TitleStatus;
+  skipUntil?: Date | string | null;
+}
+
+/**
+ * Where an undone card goes (issue 54). An Undo puts the title back to its
+ * row before the sort: `restored` (null when it had none). The card goes back
+ * on top only if the deck may show that row now, by the deck's own hiding
+ * rule (createVisibilityCheck). A title on a list, or skipped until later,
+ * stays out of the queue, since a title on a list never returns to the deck
+ * (VISION invariant 3). It stays in dealt, so a later page can't deal it
+ * again. That happens when the card was stale: the title was put on a list
+ * elsewhere while it was on screen, then sorted here and undone.
+ */
+export function afterUndo(queue: DeckQueue, card: DeckPageCard, restored: UndoneRow | null, now: Date): DeckQueue {
+  const visible =
+    restored === null ||
+    createVisibilityCheck([{ mediaType: card.mediaType, tmdbId: card.tmdbId, status: restored.status, skipUntil: restored.skipUntil }], now)(card);
+  if (visible) return returnToFront(queue, card);
+  const out = removeCard(queue, card);
+  const key = titleKey(card);
+  return out.dealt.has(key) ? out : { ...out, dealt: new Set([...out.dealt, key]) };
 }
