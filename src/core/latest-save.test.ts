@@ -9,21 +9,28 @@ interface Result {
 function harness() {
   const sent: { value: string; answer: (r: Result) => Promise<void> }[] = [];
   const settled: [string, boolean][] = [];
+  /** What the server holds: each ok answer stands for its write landing then. */
+  let stored: string | null = null;
   const saves = latestSave<string, Result>(
     (value) =>
       new Promise<Result>((resolve) => {
         sent.push({
           value,
           answer: async (r) => {
+            if (r.ok) stored = value;
             resolve(r);
-            // Let the answer's handlers (settle, the next send) run.
-            for (let i = 0; i < 5; i++) await Promise.resolve();
+            await ticks();
           },
         });
       }),
     (value, result) => settled.push([value, result.ok]),
   );
-  return { saves, sent, settled, values: () => sent.map((s) => s.value) };
+  return { saves, sent, settled, values: () => sent.map((s) => s.value), stored: () => stored };
+}
+
+/** Lets pending handlers (settle, the next send) run. */
+async function ticks() {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
 }
 
 const OK = { ok: true };
@@ -121,6 +128,49 @@ describe("latestSave", () => {
     await sent[1].answer(OK);
     saves.save("c");
     await sent[0].answer(OK);
+    expect(values()).toEqual(["a", "b", "c"]);
+  });
+
+  test("after a flush, the next value waits for the flushed save too, and the newest is what lands", async () => {
+    const { saves, sent, values, stored } = harness();
+    saves.save("a");
+    saves.save("b");
+    saves.flush();
+    saves.save("c");
+    await sent[0].answer(OK);
+    // A answered, but B (flushed) is still on its way: C must not go out yet.
+    expect(values()).toEqual(["a", "b"]);
+    await sent[1].answer(OK);
+    expect(values()).toEqual(["a", "b", "c"]);
+    await sent[2].answer(OK);
+    expect(values()).toEqual(["a", "b", "c"]);
+    expect(stored()).toBe("c");
+  });
+
+  test("after a flush, a value saved once both answered goes out at once", async () => {
+    const { saves, sent, values } = harness();
+    saves.save("a");
+    saves.save("b");
+    saves.flush();
+    await sent[0].answer(OK);
+    await sent[1].answer(OK);
+    saves.save("c");
+    await ticks();
+    expect(values()).toEqual(["a", "b", "c"]);
+  });
+
+  test("clear forgets the saves on their way: an older answer after it sends nothing again", async () => {
+    const { saves, sent, values } = harness();
+    saves.save("a");
+    saves.save("b");
+    saves.flush();
+    await sent[1].answer(OK);
+    saves.clear();
+    await sent[0].answer(OK);
+    expect(values()).toEqual(["a", "b"]);
+    // The next user's saves still go out.
+    saves.save("c");
+    await ticks();
     expect(values()).toEqual(["a", "b", "c"]);
   });
 

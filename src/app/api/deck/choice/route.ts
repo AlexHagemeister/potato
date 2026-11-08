@@ -1,4 +1,5 @@
 import { saveDeckChoiceAction } from "@/app/(app)/_deck/actions";
+import { handleJsonPost } from "@/lib/json-post";
 
 // Saves the Discover mode and filters to the profile. Thin glue (CLAUDE.md
 // rule 3): it reads the body and calls the same function the deck's server
@@ -13,28 +14,13 @@ import { saveDeckChoiceAction } from "@/app/(app)/_deck/actions";
 //   POST /api/deck/choice   { choice: DeckChoice }
 //
 // 200 { ok: true } | { ok: false, error }   saved, or refused with the message the screen shows
-// 400 { ok: false, error }                  the body is not JSON
-// 415 { ok: false, error }                  not sent as JSON. A cross-site page can't send JSON without a preflight, which fails.
+// 400, 403, 415                            refused before saving (src/lib/json-post): not JSON, cross-site, not sent as JSON
 export const dynamic = "force-dynamic";
 
 export type ChoiceSaveResult = Awaited<ReturnType<typeof saveDeckChoiceAction>>;
 
-const NOT_SAVED = "Couldn't save your mode and filters. Try again.";
+const NOT_SAVED: ChoiceSaveResult = { ok: false, error: "Couldn't save your mode and filters. Try again." };
 
-function reply(body: ChoiceSaveResult, status: number): Response {
-  return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
-}
-
-export async function POST(request: Request): Promise<Response> {
-  if (!request.headers.get("content-type")?.startsWith("application/json")) {
-    return reply({ ok: false, error: NOT_SAVED }, 415);
-  }
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return reply({ ok: false, error: NOT_SAVED }, 400);
-  }
-  const choice = typeof body === "object" && body !== null ? (body as { choice?: unknown }).choice : undefined;
-  return reply(await saveDeckChoiceAction(choice), 200);
+export function POST(request: Request): Promise<Response> {
+  return handleJsonPost(request, NOT_SAVED, ({ choice }) => saveDeckChoiceAction(choice));
 }

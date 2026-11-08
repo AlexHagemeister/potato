@@ -1,4 +1,5 @@
 import { sortDeckCardAction, type DeckActionResult } from "@/app/(app)/_deck/actions";
+import { handleJsonPost } from "@/lib/json-post";
 
 // Pass, Skip, or Watchlist on a Discover card. Thin glue (CLAUDE.md rule 3):
 // it reads the body and calls the same function the deck's server action
@@ -15,28 +16,14 @@ import { sortDeckCardAction, type DeckActionResult } from "@/app/(app)/_deck/act
 //   POST /api/deck/sort   { kind: "pass" | "skip" | "watchlist", title: { mediaType, tmdbId } }
 //
 // 200 DeckActionResult      saved, or refused with the message the screen shows
-// 400 { ok: false, error }  the body is not JSON
-// 415 { ok: false, error }  not sent as JSON. A cross-site page can't send JSON without a preflight, which fails.
+// 400, 403, 415             refused before saving (src/lib/json-post): not JSON, cross-site, not sent as JSON
 export const dynamic = "force-dynamic";
 
-const NOT_SAVED = "Couldn't save. Try again.";
+const NOT_SAVED: DeckActionResult = { ok: false, error: "Couldn't save. Try again." };
 
-function reply(body: DeckActionResult, status: number): Response {
-  return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
-}
+type SortArgs = Parameters<typeof sortDeckCardAction>;
 
-export async function POST(request: Request): Promise<Response> {
-  if (!request.headers.get("content-type")?.startsWith("application/json")) {
-    return reply({ ok: false, error: NOT_SAVED }, 415);
-  }
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return reply({ ok: false, error: NOT_SAVED }, 400);
-  }
-  const { kind, title } = (typeof body === "object" && body !== null ? body : {}) as { kind?: unknown; title?: unknown };
+export function POST(request: Request): Promise<Response> {
   // Core refuses an unknown kind or a malformed title, and the action words it.
-  const result = await sortDeckCardAction(kind as Parameters<typeof sortDeckCardAction>[0], title as Parameters<typeof sortDeckCardAction>[1]);
-  return reply(result, 200);
+  return handleJsonPost(request, NOT_SAVED, ({ kind, title }) => sortDeckCardAction(kind as SortArgs[0], title as SortArgs[1]));
 }

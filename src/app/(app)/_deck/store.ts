@@ -51,6 +51,7 @@ import {
   normalizeDeckChoice,
   type DeckChoice,
 } from "@/core/filters";
+import type { UndoInput } from "@/core/library";
 import { latestSave } from "@/core/latest-save";
 import { toTitleId } from "@/core/title-id";
 import type { ChoiceSaveResult } from "@/app/api/deck/choice/route";
@@ -84,12 +85,19 @@ export interface Notice {
   message: string;
 }
 
+/**
+ * A sort's result as the deck holds it. A sort's answer crosses plain JSON
+ * (the /api/deck/sort route), so the outcome's dates may be ISO strings: core's
+ * UndoInput, which Undo and the deck's hiding rule both accept.
+ */
+type SortResult = { ok: true; outcome: UndoInput } | { ok: false; error: string; stale?: boolean };
+
 interface LastSort {
   id: number;
   card: DeckPageCard;
-  pending: Promise<DeckActionResult>;
+  pending: Promise<SortResult>;
   /** The sort's result once its save settles. Its outcome says what an Undo restores. */
-  settled: DeckActionResult | null;
+  settled: SortResult | null;
 }
 
 export type DeckView =
@@ -326,11 +334,18 @@ function saveChoice(choice: DeckChoice) {
   choiceSaves.save({ choice, seq: ++lastSaveMade, gen: generation });
 }
 
+/** The latest choice made whose save failed, so the deck rolled back. 0 when none has. */
+let lastSaveRolledBack = 0;
+
 /**
  * A choice save came back. Only the latest choice made can roll the deck
  * back: if its save fails, the deck goes back to the last choice the profile
  * confirmed and says so. An older save's failure is ignored, since a newer
  * save follows it and decides what the profile holds.
+ *
+ * After a flush, an older save can answer after the latest one (issue 106).
+ * If the latest failed and rolled the deck back, and an older one then
+ * succeeds, the profile holds that older choice, so the deck moves to it too.
  */
 function settleChoice({ choice, seq, gen }: ChoiceSave, result: ChoiceSaveResult) {
   if (gen !== generation) return;
@@ -338,10 +353,12 @@ function settleChoice({ choice, seq, gen }: ChoiceSave, result: ChoiceSaveResult
     if (seq > lastSaveConfirmed) {
       lastSaveConfirmed = seq;
       profileChoice = choice;
+      if (lastSaveRolledBack === lastSaveMade && state.settingsKey !== null && rebase(state.settingsKey, choice)) void fill();
     }
     return;
   }
   if (seq !== lastSaveMade) return;
+  lastSaveRolledBack = seq;
   showNotice(result.error);
   if (state.settingsKey !== null && rebase(state.settingsKey, profileChoice)) void fill();
 }
@@ -544,7 +561,7 @@ export function dismissNotice(id: number) {
 }
 
 /** A sort was made: the previous error is old news. Its toast offers Undo. */
-function sorted(kind: SortKind, card: DeckPageCard, pending: Promise<DeckActionResult>) {
+function sorted(kind: SortKind, card: DeckPageCard, pending: Promise<SortResult>) {
   if (state.notice) set({ notice: null });
   const id = showToast(DONE_LABEL[kind]);
   const sort: LastSort = { id, card, pending, settled: null };
@@ -574,8 +591,8 @@ export function sortCard(kind: Exclude<SortKind, "seen">, card: DeckPageCard) {
   preload();
 
   // Sent now, never queued, so a reload or a closed app right after the tap can't drop it (issue 106).
-  const pending = postSave<DeckActionResult>("/api/deck/sort", { kind, title: toTitleId(card) })
-    .catch((): DeckActionResult => ({ ok: false, error: "Couldn't save. Check your connection." }))
+  const pending = postSave<SortResult>("/api/deck/sort", { kind, title: toTitleId(card) })
+    .catch((): SortResult => ({ ok: false, error: "Couldn't save. Check your connection." }))
     .then((result) => {
       if (gen !== generation) return result;
       saving.delete(key);
