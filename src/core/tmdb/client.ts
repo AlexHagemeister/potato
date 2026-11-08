@@ -16,6 +16,7 @@ import {
   TMDB_TTL_MS,
   TMDB_YEAR_RANGE,
 } from "./constants";
+import { DEV_UNKNOWN_PROVIDERS_VAR, devUnknownProviderTitles, withUnknownProviders } from "./dev-unknown-providers";
 import { buildPath, tmdbGet, type FetchFn, type Params, type SleepFn } from "./http";
 import {
   normalizeDetailsCore,
@@ -198,11 +199,15 @@ export function createTmdbClient(options: TmdbClientOptions) {
     return { core: normalized, providers: freshProviders };
   }
 
-  /** Everything a card shows. Null when TMDB has no such title. */
+  /**
+   * Everything a card shows. Null when TMDB has no such title. Its
+   * providersByCountry is null when availability is unknown (a failed
+   * refresh with nothing cached), never `{}`, which means it streams nowhere.
+   */
   async function getTitleDetails(mediaType: MediaType, tmdbId: number): Promise<TitleDetails | null> {
     const loaded = await loadDetails({ mediaType, tmdbId }, true);
     if (!loaded) return null;
-    return { ...loaded.core, providersByCountry: loaded.providers ?? {} };
+    return { ...loaded.core, providersByCountry: loaded.providers ?? null };
   }
 
   /**
@@ -458,18 +463,38 @@ export function createTmdbClient(options: TmdbClientOptions) {
 }
 
 /** A client using TMDB_API_READ_TOKEN from the environment. */
-export function createTmdbClientFromEnv(cache: CacheStore): TmdbClient {
+export function createTmdbClientFromEnv(cache: CacheStore, fetchFn?: FetchFn): TmdbClient {
   const token = process.env.TMDB_API_READ_TOKEN;
   if (!token) throw new Error("TMDB_API_READ_TOKEN is not set");
-  return createTmdbClient({ token, cache });
+  return createTmdbClient({ token, cache, fetch: fetchFn });
 }
 
 let appClient: TmdbClient | undefined;
 
-/** The app's TMDB client: environment token, Postgres cache (tmdb_cache). Created on first use. */
+/**
+ * The app's TMDB client: environment token, Postgres cache (tmdb_cache).
+ * Created on first use. In a local dev run only, the dev seam can make chosen
+ * titles' availability unknown (dev-unknown-providers.ts).
+ */
 export function getTmdb(): TmdbClient {
-  appClient ??= createTmdbClientFromEnv(new PostgresCacheStore());
+  appClient ??= createAppClient();
   return appClient;
+}
+
+function createAppClient(): TmdbClient {
+  const cache = new PostgresCacheStore();
+  const unknownTitles = devUnknownProviderTitles({
+    // Literal member access on purpose: Next.js replaces process.env.NODE_ENV
+    // with "production" in `next build` output, so the seam can't be turned on there.
+    nodeEnv: process.env.NODE_ENV,
+    vercelEnv: process.env.VERCEL_ENV,
+    databaseUrl: process.env.DATABASE_URL,
+    titles: process.env[DEV_UNKNOWN_PROVIDERS_VAR],
+  });
+  if (!unknownTitles) return createTmdbClientFromEnv(cache);
+  console.warn(`${DEV_UNKNOWN_PROVIDERS_VAR}: streaming availability is unknown for ${[...unknownTitles].join(", ")} (dev only)`);
+  const seam = withUnknownProviders(unknownTitles, cache, (input, init) => fetch(input, init));
+  return createTmdbClientFromEnv(seam.cache, seam.fetch);
 }
 
 function poolParams(pool: DiscoverPool): Params {

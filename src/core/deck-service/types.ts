@@ -35,10 +35,26 @@ export interface CardProvider {
   isMine: boolean;
 }
 
-/** Where to watch a title in the user's country. Data from JustWatch, via TMDB. */
-export interface CardStreaming {
+/**
+ * Where to watch a title in the user's country. Data from JustWatch, via TMDB.
+ * Two states, so the UI never says "not streaming" when the lookup only
+ * failed (issue 30):
+ * - known: TMDB answered. `providers` is empty when the title streams nowhere
+ *   in the country. This is the only state that means "not streaming".
+ * - unknown: the providers lookup failed and nothing was cached. Say that
+ *   availability is unknown, not that it streams nowhere.
+ */
+export type CardStreaming = KnownStreaming | UnknownStreaming;
+
+interface StreamingBase {
   /** The user's country (ISO 3166-1 alpha-2), from their settings. */
   country: string;
+  /** Must be shown next to this streaming info, in either state (CLAUDE.md architecture rule 7). */
+  attribution: typeof JUSTWATCH_ATTRIBUTION;
+}
+
+export interface KnownStreaming extends StreamingBase {
+  kind: "known";
   /**
    * One entry per service. Order: the user's services that stream it, then
    * other services that stream it, then rent or buy only. Within each group,
@@ -49,8 +65,10 @@ export interface CardStreaming {
   onMyServices: boolean;
   /** TMDB's watch page for the title in this country, or null. */
   link: string | null;
-  /** Must be shown next to this streaming info (CLAUDE.md architecture rule 7). */
-  attribution: typeof JUSTWATCH_ATTRIBUTION;
+}
+
+export interface UnknownStreaming extends StreamingBase {
+  kind: "unknown";
 }
 
 /** The user's current row for the title, or null on the card when there is none. */

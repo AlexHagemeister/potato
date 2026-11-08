@@ -52,7 +52,12 @@ export interface TitleDetails extends TitleSummary {
   imdbId: string | null;
   /** YouTube video key of the best trailer, or null when there is none. */
   trailerYouTubeKey: string | null;
-  providersByCountry: ProvidersByCountry;
+  /**
+   * Where the title streams, by country. Null when availability is unknown:
+   * the providers lookup failed and nothing was cached. A known title that
+   * streams nowhere is `{}`, or has no entry for the country.
+   */
+  providersByCountry: ProvidersByCountry | null;
 }
 
 /** A provider in a country's list of available services, for the settings screen. */

@@ -70,10 +70,15 @@ function ProviderLogo({ provider }: { provider: CardProvider }) {
   );
 }
 
-/** Where to stream it in the user's country, the user's own services first and marked. */
+/**
+ * Where to stream it in the user's country, the user's own services first and
+ * marked. When availability is unknown (the lookup failed), it says so rather
+ * than "not streaming" (issue 30).
+ */
 function Streaming({ streaming }: { streaming: Card["streaming"] }) {
-  const streams = streaming.providers.filter((p) => p.streams);
-  const rentOrBuy = streaming.providers.filter((p) => !p.streams);
+  const providers = streaming.kind === "known" ? streaming.providers : [];
+  const streams = providers.filter((p) => p.streams);
+  const rentOrBuy = providers.filter((p) => !p.streams);
   const country = countryName(streaming.country);
 
   return (
@@ -81,7 +86,14 @@ function Streaming({ streaming }: { streaming: Card["streaming"] }) {
       <h3 id="where-to-watch" className="mb-3 text-xs font-semibold tracking-wide text-muted uppercase">
         Where to watch in {country}
       </h3>
-      {streaming.providers.length === 0 && <p className="text-muted">Not streaming in {country} right now.</p>}
+      {streaming.kind === "unknown" && (
+        <p className="text-muted" data-availability="unknown">
+          Streaming info isn&apos;t available right now. Check back later.
+        </p>
+      )}
+      {streaming.kind === "known" && providers.length === 0 && (
+        <p className="text-muted">Not streaming in {country} right now.</p>
+      )}
 
       {streams.length > 0 && (
         <ul className="space-y-2">

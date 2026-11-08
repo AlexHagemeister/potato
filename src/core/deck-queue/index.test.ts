@@ -38,7 +38,7 @@ function card(tmdbId: number, mediaType: MediaType = "movie"): DeckPageCard {
     numberOfSeasons: null,
     imdb: { kind: "unavailable", imdbId: null },
     synopsis: "",
-    streaming: { country: "US", providers: [], onMyServices: false, link: null, attribution: JUSTWATCH_ATTRIBUTION },
+    streaming: { kind: "known", country: "US", providers: [], onMyServices: false, link: null, attribution: JUSTWATCH_ATTRIBUTION },
     trailerYouTubeKey: null,
     userState: null,
     source: "popular",

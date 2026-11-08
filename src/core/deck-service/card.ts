@@ -33,12 +33,16 @@ export function imdbState(imdbId: string | null, ratings: ReadonlyMap<string, Im
   return r ? { kind: "rated", imdbId, rating: r.rating, votes: r.votes } : { kind: "none", imdbId };
 }
 
-/** Streaming info for one country, with the user's services flagged. */
+/**
+ * Streaming info for one country, with the user's services flagged. Unknown
+ * when the details carry no providers (null), never an empty known list.
+ */
 export function streamingFor(
   details: Pick<TitleDetails, "providersByCountry">,
   country: string,
   userProviderIds: readonly number[],
 ): CardStreaming {
+  if (details.providersByCountry === null) return { kind: "unknown", country, attribution: JUSTWATCH_ATTRIBUTION };
   const listing = details.providersByCountry[country];
   const mine = new Set(userProviderIds);
   const byId = new Map<number, { provider: WatchProvider; offers: StreamingOffer[]; streams: boolean }>();
@@ -73,6 +77,7 @@ export function streamingFor(
         a.id - b.id,
     );
   return {
+    kind: "known",
     country,
     providers,
     onMyServices: providers.some((p) => p.streams && p.isMine),

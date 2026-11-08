@@ -504,8 +504,9 @@ function toCandidate(
     popularity: s.popularity,
     tmdbVoteAverage: s.tmdbVoteAverage,
     tmdbVoteCount: s.tmdbVoteCount,
-    providerIds: streamingProviderIds(d.providersByCountry[country]),
   };
+  // Unknown availability (null) leaves providerIds undefined, as attachProviderIds does. "On my services" then leaves the title out.
+  if (d.providersByCountry !== null) c.providerIds = streamingProviderIds(d.providersByCountry[country]);
   if (imdb.kind === "rated") c.imdb = { rating: imdb.rating, votes: imdb.votes };
   return c;
 }

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { FOR_YOU_MIN_RATINGS } from "../deck/constants";
 import { formatTitleKey } from "../title-id";
 import type { UserTitleState } from "../types";
-import type { DeckPage, DeckPageCard } from "./types";
+import type { CardStreaming, DeckPage, DeckPageCard, KnownStreaming } from "./types";
 import {
   FOR_YOU_SEED_COUNT,
   JUSTWATCH_ATTRIBUTION,
@@ -21,6 +21,11 @@ const TOP = { tmdbVoteCount: 5000 }; // passes the engine's TMDB top-rated gate
 function cardsOf(page: DeckPage): DeckPageCard[] {
   if (page.kind !== "cards") throw new Error(`expected cards, got ${page.kind}`);
   return page.cards;
+}
+
+function known(s: CardStreaming): KnownStreaming {
+  if (s.kind !== "known") throw new Error("expected known streaming");
+  return s;
 }
 
 async function deck(w: FakeWorld, request: Parameters<ReturnType<typeof fakeService>["service"]["getDeck"]>[1] = {}) {
@@ -367,8 +372,29 @@ describe("getDeck: on my services", () => {
     expect(calls.lists[0].filters).toMatchObject({ mediaType: "tv", providerIds: [8], watchRegion: "GB", genreIds: [10765] });
     const cards = cardsOf(page);
     expect(keysOf(cards)).toEqual(["tv:1"]);
-    expect(cards[0].streaming).toMatchObject({ country: "GB", onMyServices: true });
-    expect(cards[0].streaming.providers[0]).toMatchObject({ id: 8, isMine: true, streams: true, offers: ["subscription"] });
+    expect(cards[0].streaming).toMatchObject({ kind: "known", country: "GB", onMyServices: true });
+    expect(known(cards[0].streaming).providers[0]).toMatchObject({ id: 8, isMine: true, streams: true, offers: ["subscription"] });
+  });
+
+  test("unknown availability (issue 30): left out under the filter, dealt without it with its card saying unknown", async () => {
+    const netflix = provider(8, "Netflix");
+    const s1 = summary("tv", 1);
+    const s2 = summary("tv", 2);
+    const s3 = summary("tv", 3);
+    const details = {
+      "tv:1": detailsFor(s1, { providersByCountry: { GB: emptyCountry({ flatrate: [netflix] }) } }),
+      "tv:2": detailsFor(s2, { providersByCountry: null }), // the providers lookup failed, nothing cached
+      "tv:3": detailsFor(s3, { providersByCountry: {} }), // known: streams nowhere
+    };
+    const make = () => world({ settings: { country: "GB", providerIds: [8] }, lists: { "popular:tv": [[s1, s2, s3]] }, details });
+
+    const filtered = cardsOf((await deck(make(), { mode: "popular", filters: { mediaTypes: ["tv"], onMyServices: true } })).page);
+    expect(keysOf(filtered)).toEqual(["tv:1"]);
+
+    const all = cardsOf((await deck(make(), { mode: "popular", filters: { mediaTypes: ["tv"] } })).page);
+    const byKey = new Map(all.map((c) => [formatTitleKey(c), c.streaming]));
+    expect(byKey.get("tv:2")).toEqual({ kind: "unknown", country: "GB", attribution: JUSTWATCH_ATTRIBUTION });
+    expect(byKey.get("tv:3")).toMatchObject({ kind: "known", providers: [], onMyServices: false });
   });
 });
 
@@ -690,16 +716,16 @@ describe("getCard", () => {
       trailerYouTubeKey: "yt603",
       userState: { status: "seen", rating: 4.5, review: "Great." },
     });
-    expect(card.streaming.link).toBe("https://tmdb.example/603");
-    expect(card.streaming.onMyServices).toBe(true);
+    expect(known(card.streaming).link).toBe("https://tmdb.example/603");
+    expect(known(card.streaming).onMyServices).toBe(true);
     expect(card.streaming.attribution).toEqual(JUSTWATCH_ATTRIBUTION);
     // Mine first, then other streaming services, then rent or buy only.
-    expect(card.streaming.providers.map((p) => [p.name, p.isMine, p.offers])).toEqual([
+    expect(known(card.streaming).providers.map((p) => [p.name, p.isMine, p.offers])).toEqual([
       ["Hulu", true, ["subscription"]],
       ["Netflix", false, ["subscription"]],
       ["Apple TV", false, ["rent", "buy"]],
     ]);
-    expect(card.streaming.providers[0].logoUrl).toBe("https://image.tmdb.org/t/p/w92/logo15.png");
+    expect(known(card.streaming).providers[0].logoUrl).toBe("https://image.tmdb.org/t/p/w92/logo15.png");
   });
 
   test("an expired skip shows as no status, a live skip as skipped (the deck's rule, as in Search)", async () => {
@@ -734,7 +760,15 @@ describe("getCard", () => {
     w.settings = { country: "DE", providerIds: [15] };
     const result = await fakeService(w).service.getCard(USER, { mediaType: "movie", tmdbId: 603 });
     if (!result.ok) throw new Error("expected ok");
-    expect(result.value.streaming).toMatchObject({ country: "DE", providers: [], onMyServices: false, link: null });
+    expect(result.value.streaming).toMatchObject({ kind: "known", country: "DE", providers: [], onMyServices: false, link: null });
+  });
+
+  test("availability unknown (issue 30): the card says unknown, with the JustWatch credit, not an empty provider list", async () => {
+    const w = base();
+    w.details["movie:603"] = detailsFor(s, { providersByCountry: null });
+    const result = await fakeService(w).service.getCard(USER, { mediaType: "movie", tmdbId: 603 });
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.value.streaming).toEqual({ kind: "unknown", country: "US", attribution: JUSTWATCH_ATTRIBUTION });
   });
 
   test("IMDb: none without a mapping or a dataset row, unavailable when the lookup fails or the table is empty", async () => {
