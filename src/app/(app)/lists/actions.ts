@@ -76,7 +76,10 @@ function withCopy(message: string, typed: boolean): string {
 function editRefused(current: TitleRecord | null | undefined, typed: boolean): string {
   if (current === undefined) return withCopy(NOT_SAVED_CHANGED, typed);
   if (current?.status === "seen") {
-    const reopen = typed ? `${COPY_REVIEW} Then tap Cancel and Edit to see it.` : "Tap Cancel and Edit to see it.";
+    // "Edit rating" names the card's button and the sheet's heading, as NOT_REMOVED_CHANGED does.
+    const reopen = typed
+      ? `${COPY_REVIEW} Then cancel and open Edit rating again to see the new one.`
+      : "Cancel and open Edit rating again to see the new one.";
     return `Not saved: your rating or review changed somewhere else. ${reopen}`;
   }
   return withCopy(`Not saved: this title left your Seen list somewhere else. ${whereNow(current)}`, typed);
