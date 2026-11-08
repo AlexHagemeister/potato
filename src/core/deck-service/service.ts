@@ -146,8 +146,10 @@ export function createDeckService(deps: DeckServiceDeps) {
    * cursor from another user or from before a change to the settings its
    * lists depend on. A TMDB outage throws, so a caller never loops on a cursor
    * that cannot move and never reads an outage as the end of the deck: every
-   * list lookup failing, or most of a page's details lookups failing (see
-   * DETAILS_OUTAGE_MIN_FAILURES). A single title whose details fail is skipped.
+   * list lookup failing, most of a page's details lookups failing, or, under
+   * "on my services", most of a page's titles having unknown availability or
+   * failed details (see DETAILS_OUTAGE_MIN_FAILURES). A single title whose
+   * details fail, or whose availability is unknown, is skipped.
    */
   async function getDeck(userId: string, request: DeckRequest = {}): Promise<Result<DeckPage>> {
     const u = validateUserId(userId);
@@ -274,6 +276,20 @@ export function createDeckService(deps: DeckServiceDeps) {
       // them, so one title that always fails never blocks the deck.
       if (detailFailures >= DETAILS_OUTAGE_MIN_FAILURES && detailFailures * 2 > unique.size) {
         throw new Error(`getDeck: ${detailFailures} of ${unique.size} TMDB details lookups failed, so the deck cannot move forward`);
+      }
+      // "On my services" leaves out a title whose availability is unknown (its providers lookup failed with nothing
+      // cached), failing closed. When that is most of the page, together with details failures, it is a providers
+      // outage: the same empty or thin page with a moved cursor would lose these titles (issue 104). Throw before the
+      // cursor moves, as for a details outage. A few unknown titles are skipped, so the rest of the page is dealt.
+      if (filters.onMyServices) {
+        let unknownProviders = 0;
+        for (const key of unique.keys()) if (details.get(key)?.providersByCountry === null) unknownProviders++;
+        const unplaceable = detailFailures + unknownProviders;
+        if (unknownProviders > 0 && unplaceable >= DETAILS_OUTAGE_MIN_FAILURES && unplaceable * 2 > unique.size) {
+          throw new Error(
+            `getDeck: streaming availability is unknown for ${unknownProviders} of ${unique.size} titles and ${detailFailures} details lookups failed, so "on my services" can't be applied`,
+          );
+        }
       }
       const imdbIds = [...details].flatMap(([key, d]) => (!before.has(key) && d.imdbId !== null ? [d.imdbId] : []));
       const found = await lookupRatings(imdbIds);
