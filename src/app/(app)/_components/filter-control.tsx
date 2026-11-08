@@ -14,6 +14,7 @@ import {
   genresFor,
   isDefaultFilterChoice,
   normalizeFilterChoice,
+  sameFilterChoice,
   type FilterChoice,
 } from "@/core/filters";
 
@@ -30,11 +31,6 @@ export interface FilterControlProps {
   compact?: boolean;
 }
 
-/** Same filters, whatever order the genres were tapped in. */
-export function sameFilters(a: FilterChoice, b: FilterChoice): boolean {
-  return JSON.stringify(normalizeFilterChoice(a)) === JSON.stringify(normalizeFilterChoice(b));
-}
-
 /**
  * The filter control shared by Discover and Lists (VISION "Shaping the deck"):
  * a compact row with a Filters button and what is applied, and a full-screen
@@ -47,7 +43,7 @@ export function FilterControl({ value, onChange, hasServices, busy = false, comp
 
   function close(next: FilterChoice) {
     setDraft(null);
-    if (!sameFilters(next, value)) onChange(normalizeFilterChoice(next));
+    if (!sameFilterChoice(next, value)) onChange(normalizeFilterChoice(next));
   }
 
   return (

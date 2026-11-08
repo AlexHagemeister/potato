@@ -210,9 +210,9 @@ export function filterChoiceToParams(choice: FilterChoice): Record<string, strin
   return out;
 }
 
-/** A string that two choices share exactly when they filter the same way, so choices compare by value. */
-export function filterChoiceKey(choice: FilterChoice): string {
-  return new URLSearchParams(filterChoiceToParams(choice)).toString();
+/** Whether two choices filter the same way, whatever order the genres were tapped in. */
+export function sameFilterChoice(a: FilterChoice, b: FilterChoice): boolean {
+  return JSON.stringify(normalizeFilterChoice(a)) === JSON.stringify(normalizeFilterChoice(b));
 }
 
 /** A query value as Next's searchParams or URLSearchParams give it. */

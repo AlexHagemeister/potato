@@ -10,11 +10,11 @@ import {
   describeFilterChoice,
   eraBounds,
   filterChoiceFromParams,
-  filterChoiceKey,
   filterChoiceToParams,
   genresFor,
   isDefaultFilterChoice,
   normalizeFilterChoice,
+  sameFilterChoice,
   toDeckFilters,
   type FilterChoice,
 } from "./choice";
@@ -186,14 +186,14 @@ describe("query params", () => {
     expect(filterChoiceFromParams({})).toEqual(choice({}));
   });
 
-  test("filterChoiceKey is equal exactly for choices that filter the same way", () => {
+  test("sameFilterChoice is true exactly for choices that filter the same way", () => {
     const a = choice({ type: "tv", genres: ["scifi", "drama"], era: "recent" });
     const b = choice({ type: "tv", genres: ["drama", "scifi", "drama"], era: "recent" });
-    expect(filterChoiceKey(a)).toBe(filterChoiceKey(b));
-    expect(filterChoiceKey(a)).toBe(filterChoiceKey(filterChoiceFromParams(new URLSearchParams(filterChoiceToParams(a)))));
-    expect(filterChoiceKey(a)).not.toBe(filterChoiceKey(choice({ type: "tv", genres: ["scifi"], era: "recent" })));
-    expect(filterChoiceKey(choice({}))).toBe("");
-    expect(filterChoiceKey(choice({ onMyServices: true }))).not.toBe(filterChoiceKey(choice({})));
+    expect(sameFilterChoice(a, b)).toBe(true);
+    expect(sameFilterChoice(a, filterChoiceFromParams(new URLSearchParams(filterChoiceToParams(a))))).toBe(true);
+    expect(sameFilterChoice(a, choice({ type: "tv", genres: ["scifi"], era: "recent" }))).toBe(false);
+    expect(sameFilterChoice(choice({ onMyServices: true }), choice({}))).toBe(false);
+    expect(sameFilterChoice(choice({ minRating: "8" }), choice({}))).toBe(false);
   });
 });
 

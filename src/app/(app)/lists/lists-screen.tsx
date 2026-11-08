@@ -6,9 +6,9 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   DEFAULT_FILTER_CHOICE,
   filterChoiceFromParams,
-  filterChoiceKey,
   filterChoiceToParams,
   isDefaultFilterChoice,
+  sameFilterChoice,
   type FilterChoice,
 } from "@/core/filters";
 import type { ActionOutcome, TitleRecord } from "@/core/library/types";
@@ -120,6 +120,20 @@ function writeAddress(status: ListStatus, filters: FilterChoice) {
   window.history.replaceState(null, "", listsUrl(status, filters));
 }
 
+/**
+ * Sets one key in the history entry's state. Next's own state rides along (it carries `__NA`), so Next passes the
+ * write straight through and the address doesn't change.
+ */
+function keepHistoryState(key: string, value: number) {
+  const state = window.history.state as Record<string, unknown> | null;
+  if (!state || state[key] === value) return;
+  try {
+    window.history.replaceState({ ...state, [key]: value }, "");
+  } catch {
+    // Safari limits history writes. Losing the position is harmless.
+  }
+}
+
 function toLists(pages: Record<ListStatus, ListRowsPage>): Lists {
   const out = {} as Lists;
   for (const { status } of TABS) out[status] = { rows: pages[status].rows, nextCursor: pages[status].nextCursor };
@@ -175,10 +189,13 @@ export function ListsScreen({
   // they were loaded under the address's filters. Otherwise the screen loads the rows for the address.
   const searchParams = useSearchParams();
   const addressList = listFromParam(searchParams.get("list"));
-  const addressFilters = filterChoiceFromParams(new URLSearchParams(searchParams.toString()));
-  const serverFits = filterChoiceKey(filtersFromServer) === filterChoiceKey(addressFilters);
+  const addressFilters = filterChoiceFromParams(searchParams);
+  const serverFits = sameFilterChoice(filtersFromServer, addressFilters);
 
   const [lists, setLists] = useState(() => toLists(fromServer));
+  // The filters the rows on screen were loaded under. A failed filter load falls back to them.
+  const [loaded, setLoaded] = useState(filtersFromServer);
+  // The filters the label shows: `loaded`, or the ones a running filter load is for.
   const [filters, setFilters] = useState(addressFilters);
   const filtersRef = useRef(filters);
   useEffect(() => {
@@ -189,17 +206,22 @@ export function ListsScreen({
   useEffect(() => {
     activeRef.current = active;
   }, [active]);
-  // A filter load is running. The rows stay dimmed until it settles.
-  const [filtering, setFiltering] = useState(!serverFits);
+  // A filter load to run (see the effect below): for a filter change, or on mount for the address's filters when
+  // the router's copy has rows for other filters. While it is set, the rows stay dimmed. If it fails, the screen
+  // goes back to `fallback`, the filters of the rows it still shows.
+  const [due, setDue] = useState<{ filters: FilterChoice; fallback: FilterChoice } | null>(() =>
+    serverFits ? null : { filters: addressFilters, fallback: filtersFromServer },
+  );
+  const filtering = due !== null;
   const filteringRef = useRef(filtering);
   useEffect(() => {
     filteringRef.current = filtering;
   }, [filtering]);
-  // A filter load to run (see the effect below). On mount it is the address's filters, when the router's copy has
-  // rows for other filters. If the load fails, the screen goes back to `fallback`, whose rows it shows.
-  const [due, setDue] = useState<{ filters: FilterChoice; fallback: FilterChoice } | null>(() =>
-    serverFits ? null : { filters: addressFilters, fallback: filtersFromServer },
-  );
+  // A link on this screen was tapped, so a navigation away may be under way. A filter load that settles meanwhile
+  // must not write the address: Next would take that write as a navigation and drop the one the tap started.
+  const leaving = useRef(false);
+  // A reload a stale write asked for while a filter load ran. It runs if that load fails.
+  const reloadWanted = useRef(false);
   const [refill, setRefill] = useState<Refill | null>(null);
   // Counts list loads, so a slower, older load never overwrites a newer one,
   // or the server data a navigation brought in meanwhile. `restarts` counts the times the screen starts over.
@@ -207,6 +229,7 @@ export function ListsScreen({
   const [restarts, setRestarts] = useState(0);
   useEffect(() => {
     loadSeq.current++;
+    leaving.current = false;
   }, [restarts]);
   // The server data and address last seen. New server data (a refresh after a change on a card, the Lists tab
   // while on Lists, Back between two Lists entries) or an address this screen didn't write (the Lists tab while on
@@ -216,14 +239,14 @@ export function ListsScreen({
   if (fromServer !== seen.server || addressKey !== seen.address) {
     setSeen({ server: fromServer, address: addressKey });
     const newServer = fromServer !== seen.server;
-    const sameFilters = filterChoiceKey(addressFilters) === filterChoiceKey(filters);
+    const sameFilters = sameFilterChoice(addressFilters, filters);
     // This screen's own writes name the list and filters it already shows.
     if (newServer || addressList !== active || !sameFilters) setActive(addressList);
     if (newServer || !sameFilters) {
       setLists(toLists(fromServer));
+      setLoaded(filtersFromServer);
       setFilters(addressFilters);
       setRefill(null);
-      setFiltering(!serverFits);
       setDue(serverFits ? null : { filters: addressFilters, fallback: filtersFromServer });
       setRestarts((n) => n + 1);
     }
@@ -298,8 +321,9 @@ export function ListsScreen({
   }, [toast]);
 
   // Back to this screen (or a reload) puts the list where it was, once rows for the address show: at once when the
-  // router's copy fits the address, or when the load for the address settles. Rows added with Show more aren't
-  // reloaded, so a position past them clamps.
+  // router's copy fits the address, or when the load for the address settles. The position is saved when a scroll
+  // ends and when a link is tapped, so it is always the latest. (A write while the page unloads for a reload is not
+  // kept, so it can't wait until then.) Rows added with Show more aren't reloaded, so a position past them clamps.
   const scrollDue = useRef<number | null | undefined>(undefined);
   useLayoutEffect(() => {
     const main = panel.current?.closest("main");
@@ -316,17 +340,28 @@ export function ListsScreen({
   useEffect(() => {
     const main = panel.current?.closest("main");
     if (!main) return;
-    const save = (e: MouseEvent) => {
+    // A position not applied yet (rows for the address still loading) is still the one to keep.
+    const save = () => keepHistoryState(SCROLL_KEY, typeof scrollDue.current === "number" ? scrollDue.current : main.scrollTop);
+    const onClick = (e: MouseEvent) => {
       if (!(e.target instanceof Element) || !e.target.closest("a[href]")) return;
-      try {
-        // Next's own state rides along (it carries `__NA`), so Next passes this write straight through.
-        window.history.replaceState({ ...window.history.state, [SCROLL_KEY]: main.scrollTop }, "");
-      } catch {
-        // Safari limits history writes. Losing the position is harmless.
-      }
+      save();
+      leaving.current = true;
     };
-    document.addEventListener("click", save, true);
-    return () => document.removeEventListener("click", save, true);
+    // Once per scroll, after it settles: Safari limits how often history can be written.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onScroll = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (!leaving.current) save();
+      }, 250);
+    };
+    document.addEventListener("click", onClick, true);
+    main.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("click", onClick, true);
+      main.removeEventListener("scroll", onScroll);
+    };
   }, []);
 
   /** A write failed. Say why, and reload the lists when the title changed elsewhere. */
@@ -341,8 +376,11 @@ export function ListsScreen({
    * reload doesn't drop them.
    */
   async function reload() {
-    // A filter load under way brings fresh lists already.
-    if (filteringRef.current) return;
+    // A filter load under way brings fresh lists if it succeeds. If it fails, it runs this reload then.
+    if (filteringRef.current) {
+      reloadWanted.current = true;
+      return;
+    }
     const seq = ++loadSeq.current;
     // The latest filters, not this closure's: a write can come back stale after the filters changed.
     const using = filtersRef.current;
@@ -366,37 +404,54 @@ export function ListsScreen({
    * the Filters label already shows its filters and the rows are dimmed. The address is written once the load
    * settles: with the new filters if it loaded, or with `fallback`, whose rows still show, if it failed. So the
    * address never names filters the rows don't have. The list in it is the one showing then, since a tab can be
-   * tapped during the load.
+   * tapped during the load. A load that is replaced, or outlives the screen, changes nothing.
    */
   useEffect(() => {
     if (!due) return;
+    let cancelled = false;
     const seq = ++loadSeq.current;
     void (async () => {
       const result = await call(timed(() => loadListsAction(due.filters)), FILTER_FAILED);
-      // A newer load, or server data that fits the address, took over. Each settles the screen itself.
-      if (seq !== loadSeq.current) return;
-      setFiltering(false);
-      if (!result.ok) {
+      // A newer load, server data that fits the address, or leaving the screen took over.
+      if (cancelled || seq !== loadSeq.current) return;
+      setDue(null);
+      filteringRef.current = false;
+      const settled = result.ok ? due.filters : due.fallback;
+      if (result.ok) {
+        setLists(toLists(result.value));
+        setLoaded(due.filters);
+      } else {
         setFilters(due.fallback);
-        writeAddress(activeRef.current, due.fallback);
-        setToast({ id: ++toastSeq.current, message: result.error });
+      }
+      if (!leaving.current) writeAddress(activeRef.current, settled);
+      if (result.ok) {
+        reloadWanted.current = false;
         return;
       }
-      setLists(toLists(result.value));
-      writeAddress(activeRef.current, due.filters);
+      show(result.error);
+      if (reloadWanted.current) {
+        reloadWanted.current = false;
+        void reload();
+      }
     })();
+    return () => {
+      cancelled = true;
+    };
+    // show and reload are recreated each render. Only a new `due` starts a load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [due]);
 
-  /** New filters from the control. If the load fails, the old filters and their rows stay. */
+  /** New filters from the control. If the load fails, the filters of the rows on screen come back. */
   function applyFilters(next: FilterChoice) {
+    leaving.current = false;
     setFilters(next);
-    setFiltering(true);
     setRefill(null);
-    setDue({ filters: next, fallback: filters });
+    setDue({ filters: next, fallback: loaded });
   }
 
   function select(status: ListStatus) {
     if (status === active) return;
+    leaving.current = false;
     setActive(status);
     // During a filter load, the address is written when the load settles, with this list.
     if (filtering) return;
