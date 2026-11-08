@@ -411,7 +411,7 @@ try {
   await check("a Seen title's review can still be cleared on purpose, through the edit path", async () => {
     const ref = fresh();
     unwrap(await lib.markSeen(A, ref, { rating: 4, review: "To clear." }, { now: tick() }));
-    const out = await actThenUndo(ref, () => lib.updateRatingReview(A, ref, { rating: 4, review: null }, { now: tick() }));
+    const out = await actThenUndo(ref, () => lib.updateRatingReview(A, ref, { rating: 4, review: null }, { rating: 4, review: "To clear." }, { now: tick() }));
     assert.equal(out.current?.review, null);
   });
 
@@ -498,7 +498,7 @@ try {
   await check("two devices: a removal shown an older review never erases a newer one written elsewhere", async () => {
     const ref = fresh();
     unwrap(await lib.markSeen(A, ref, { rating: 3, review: "First take." }, { now: tick() })); // the phone shows this
-    unwrap(await lib.updateRatingReview(A, ref, { rating: 4, review: "Rewatched, better." }, { now: tick() })); // elsewhere
+    unwrap(await lib.updateRatingReview(A, ref, { rating: 4, review: "Rewatched, better." }, { rating: 3, review: "First take." }, { now: tick() })); // elsewhere
     const after = await state(A, ref);
     const r = await lib.removeRatingReview(A, ref, { rating: 3, review: "First take." });
     assert.equal(!r.ok && r.error.code, "stale_value");
@@ -514,7 +514,7 @@ try {
       unwrap(await lib.markSeen(A, ref, { rating: 3, review: "Shown." }, { now: tick() }));
       const [removed, edited] = await Promise.all([
         lib.removeRatingReview(A, ref, { rating: 3, review: "Shown." }),
-        lib.updateRatingReview(A, ref, { review: "Newer." }, { now: tick() }),
+        lib.updateRatingReview(A, ref, { review: "Newer." }, { rating: 3, review: "Shown." }, { now: tick() }),
       ]);
       assert.notEqual(removed.ok && edited.ok, true, `round ${i}: both landed`);
       const row = await state(A, ref);
@@ -698,27 +698,105 @@ try {
   await check("updateRatingReview: rating only keeps the review; null clears it; undo restores", async () => {
     const ref = fresh();
     unwrap(await lib.markSeen(A, ref, { rating: 3, review: "First take." }, { now: tick() }));
-    const r1 = await actThenUndo(ref, () => lib.updateRatingReview(A, ref, { rating: 4 }, { now: tick() }));
+    const shown = { rating: 3, review: "First take." };
+    const r1 = await actThenUndo(ref, () => lib.updateRatingReview(A, ref, { rating: 4 }, shown, { now: tick() }));
     assert.equal(r1.current?.rating, 4);
     assert.equal(r1.current?.review, "First take.");
-    const r2 = await actThenUndo(ref, () => lib.updateRatingReview(A, ref, { review: null }, { now: tick() }));
+    const r2 = await actThenUndo(ref, () => lib.updateRatingReview(A, ref, { review: null }, shown, { now: tick() }));
     assert.equal(r2.current?.review, null);
     assert.equal(r2.current?.rating, 3);
-    const r3 = await actThenUndo(ref, () => lib.updateRatingReview(A, ref, { review: "Better." }, { now: tick() }));
+    const r3 = await actThenUndo(ref, () => lib.updateRatingReview(A, ref, { review: "Better." }, shown, { now: tick() }));
     assert.equal(r3.current?.review, "Better.");
   });
 
   await check("updateRatingReview refuses a title that is not seen, or not there", async () => {
     const ref = fresh();
-    const missing = await lib.updateRatingReview(A, ref, { rating: 4 });
+    const missing = await lib.updateRatingReview(A, ref, { rating: 4 }, { rating: 3 });
     assert.deepEqual(missing, { ok: false, error: { code: "not_found" } });
     unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
     const before = await state(A, ref);
-    const wrong = await lib.updateRatingReview(A, ref, { rating: 4 });
+    const wrong = await lib.updateRatingReview(A, ref, { rating: 4 }, { rating: 3 });
     assert.deepEqual(wrong, { ok: false, error: { code: "wrong_state", status: "watchlist", expected: ["seen"] } });
     assert.deepEqual(await state(A, ref), before);
-    const bad = await lib.updateRatingReview(A, ref, { rating: 6 });
+    const bad = await lib.updateRatingReview(A, ref, { rating: 6 }, { rating: 3 });
     assert.equal(!bad.ok && bad.error.code, "invalid_rating");
+  });
+
+  await check("updateRatingReview refuses when the rating or review differs from what was shown, changing nothing (issue 103)", async () => {
+    const ref = await seenElsewhere("none"); // 5 stars, "Elsewhere."
+    const before = await state(A, ref);
+    for (const shown of [
+      { rating: 4.5, review: "Elsewhere." },
+      { rating: 5, review: "Older take." },
+      { rating: 5, review: null },
+      { rating: 5 },
+      { rating: 5, review: "elsewhere." },
+      { rating: 5, review: " Elsewhere." },
+    ]) {
+      const r = await lib.updateRatingReview(A, ref, { rating: 1, review: "Typed here." }, shown, { now: tick() });
+      // Its own code: the title is Seen as expected, but not with what was shown.
+      assert.deepEqual(r, { ok: false, error: { code: "stale_value", status: "seen" } }, JSON.stringify(shown));
+      assert.deepEqual(await state(A, ref), before, JSON.stringify(shown));
+    }
+    // A shown review never matches none, blank included.
+    const bare = fresh();
+    unwrap(await lib.markSeen(A, bare, { rating: 3 }, { now: tick() }));
+    for (const review of ["Something.", "", "  "]) {
+      const r = await lib.updateRatingReview(A, bare, { review: "Typed." }, { rating: 3, review }, { now: tick() });
+      assert.equal(!r.ok && r.error.code, "stale_value", JSON.stringify(review));
+    }
+    assert.equal((await state(A, bare))?.review, null);
+    // What was shown is required, and checked the way a removal checks it: the AI connection names it too.
+    for (const shown of [undefined, {}, { rating: 4.2 }, { review: "Elsewhere." }]) {
+      const r = await lib.updateRatingReview(A, ref, { rating: 1 }, shown as never);
+      assert.equal(!r.ok && r.error.code, "invalid_rating", JSON.stringify(shown));
+    }
+    const nul = await lib.updateRatingReview(A, ref, { rating: 1 }, { rating: 5, review: "a\u0000b" });
+    assert.equal(!nul.ok && nul.error.code, "invalid_review");
+    assert.deepEqual(await state(A, ref), before);
+  });
+
+  await check("two devices: an edit sheet refused once never overwrites a rating written elsewhere since (issue 103)", async () => {
+    // The phone opens Edit rating on 4 stars, "Shown.". Another device removes it and puts it on the Watchlist, so
+    // the phone's save is refused. The other device then marks it Seen with its own review. The phone's second
+    // save still names what its sheet opened with, so it is refused too, and the newer row stands.
+    const ref = fresh();
+    const shown = { rating: 4, review: "Shown." };
+    unwrap(await lib.markSeen(A, ref, shown, { now: tick() }));
+    unwrap(await lib.removeRatingReview(A, ref, shown)); // elsewhere
+    unwrap(await lib.watchlistTitle(A, ref, { now: tick() })); // elsewhere
+    const first = await lib.updateRatingReview(A, ref, { rating: 1, review: "Typed here." }, shown, { now: tick() });
+    assert.deepEqual(first, { ok: false, error: { code: "wrong_state", status: "watchlist", expected: ["seen"] } });
+    unwrap(await lib.markSeen(A, ref, { rating: 5, review: "From the other device." }, { now: tick() })); // elsewhere
+    const newer = await state(A, ref);
+    const second = await lib.updateRatingReview(A, ref, { rating: 1, review: "Typed here." }, shown, { now: tick() });
+    assert.deepEqual(second, { ok: false, error: { code: "stale_value", status: "seen" } });
+    assert.deepEqual(await state(A, ref), newer);
+    if (second.ok) return;
+    assert.deepEqual(await lib.readChangedElsewhere(A, ref, second.error), { current: newer });
+    // Opened again on the newer row, the edit lands.
+    const reopened = { rating: 5, review: "From the other device." };
+    const again = unwrap(await lib.updateRatingReview(A, ref, { rating: 1, review: "Typed here." }, reopened, { now: tick() }));
+    assert.equal(again.current?.review, "Typed here.");
+  });
+
+  await check("two devices at the same instant: two edits shown the same row never both land (issue 103)", async () => {
+    let firstWins = 0;
+    for (let i = 0; i < 20; i++) {
+      const ref = fresh();
+      const shown = { rating: 3, review: "Shown." };
+      unwrap(await lib.markSeen(A, ref, shown, { now: tick() }));
+      const [a, b] = await Promise.all([
+        lib.updateRatingReview(A, ref, { review: "Phone." }, shown, { now: tick() }),
+        lib.updateRatingReview(A, ref, { review: "Laptop." }, shown, { now: tick() }),
+      ]);
+      assert.equal(a.ok !== b.ok, true, `round ${i}: exactly one lands`);
+      const loser = a.ok ? b : a;
+      assert.equal(!loser.ok && loser.error.code, "stale_value", `round ${i}`);
+      assert.equal((await state(A, ref))?.review, a.ok ? "Phone." : "Laptop.", `round ${i}`);
+      if (a.ok) firstWins++;
+    }
+    console.log(`        (${firstWins} of 20 won by the first edit)`);
   });
 
   await check("moveTitle Watchlist to Seen asks for a rating; undo restores", async () => {
@@ -762,7 +840,7 @@ try {
     unwrap(await lib.removeRatingReview(A, ref, { rating: 4, review: "Shown." })); // elsewhere
     unwrap(await lib.watchlistTitle(A, ref, { now: tick() })); // elsewhere
     const before = await state(A, ref);
-    const edit = await lib.updateRatingReview(A, ref, { rating: 2, review: "Typed here." });
+    const edit = await lib.updateRatingReview(A, ref, { rating: 2, review: "Typed here." }, { rating: 4, review: "Shown." });
     assert.equal(edit.ok, false);
     if (edit.ok) return;
     assert.deepEqual(await lib.readChangedElsewhere(A, ref, edit.error), { current: before });
@@ -770,7 +848,7 @@ try {
 
     // Edit rating, on no list now.
     const gone = fresh();
-    const none = await lib.updateRatingReview(A, gone, { rating: 2 });
+    const none = await lib.updateRatingReview(A, gone, { rating: 2 }, { rating: 4 });
     assert.equal(!none.ok && none.error.code, "not_found");
     if (none.ok) return;
     assert.deepEqual(await lib.readChangedElsewhere(A, gone, none.error), { current: null });
@@ -787,7 +865,7 @@ try {
     assert.deepEqual(await state(A, marked), seenRow);
 
     // Bad input is not a change elsewhere: no read, null.
-    const bad = await lib.updateRatingReview(A, marked, { rating: 6 });
+    const bad = await lib.updateRatingReview(A, marked, { rating: 6 }, { rating: 5, review: "From the other device." });
     assert.equal(bad.ok, false);
     if (bad.ok) return;
     assert.equal(await lib.readChangedElsewhere(A, marked, bad.error), null);
@@ -850,7 +928,7 @@ try {
     unwrap(await lib.watchlistTitle(A, ref));
     await actThenUndo(ref, () => lib.moveTitle(A, ref, { from: "watchlist", to: "seen", rating: 3 }));
     unwrap(await lib.markSeen(A, ref, { rating: 3 }));
-    await actThenUndo(ref, () => lib.updateRatingReview(A, ref, { review: "Fine." }));
+    await actThenUndo(ref, () => lib.updateRatingReview(A, ref, { review: "Fine." }, { rating: 3 }));
     await actThenUndo(ref, () => lib.removeRatingReview(A, ref, { rating: 3 }));
     unwrap(await lib.removeRatingReview(A, ref, { rating: 3 }));
     unwrap(await lib.passTitle(A, ref));
@@ -861,7 +939,7 @@ try {
     const ref = fresh();
     unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
     const seen = unwrap(await lib.markSeen(A, ref, { rating: 4 }, { now: tick() })); // undo entry held on the phone
-    unwrap(await lib.updateRatingReview(A, ref, { rating: 5, review: "Rewatched." }, { now: tick() })); // elsewhere
+    unwrap(await lib.updateRatingReview(A, ref, { rating: 5, review: "Rewatched." }, { rating: 4 }, { now: tick() })); // elsewhere
     const after = await state(A, ref);
     const r = await lib.restoreTitleState(A, ref, JSON.parse(JSON.stringify(seen)));
     assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "seen", expected: ["seen"] } });
@@ -871,7 +949,7 @@ try {
   await check("a stale undo of a first action refuses to delete a row edited since", async () => {
     const ref = fresh();
     const first = unwrap(await lib.markSeen(A, ref, { rating: 3 }, { now: tick() })); // previous: null
-    unwrap(await lib.updateRatingReview(A, ref, { review: "Added later." }, { now: tick() }));
+    unwrap(await lib.updateRatingReview(A, ref, { review: "Added later." }, { rating: 3 }, { now: tick() }));
     const after = await state(A, ref);
     const r = await lib.restoreTitleState(A, ref, first);
     assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "seen", expected: ["seen"] } });

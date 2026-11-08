@@ -556,9 +556,10 @@ export function ListsScreen({
   }
 
   /**
-   * A rating sheet's save refused because the title changed elsewhere (issue 79). The sheet stays open with the
-   * message and what the user typed, so a review is still there to copy, and the lists reload behind it to show
-   * where the title is now. Cancel closes it.
+   * A rating sheet's save refused because the title changed elsewhere (issues 79 and 103). The sheet stays open with
+   * the message and what the user typed, so a review is still there to copy, and the lists reload behind it to show
+   * where the title is now. The sheet keeps the row it opened with, so its next Save is refused too, until the user
+   * cancels and opens it again on the row as it is now.
    */
   function refusedInSheet(result: { error: string }): string {
     void reload();
@@ -585,7 +586,11 @@ export function ListsScreen({
 
   async function saveEdit(row: ListRow, rating: number, review: string): Promise<string | null> {
     const ref = refOf(row);
-    const result = await call(() => editRatingAction(ref, rating, review));
+    // `row` is the row the sheet opened with (fixed in `sheet`, not reread), so core saves the edit only while the
+    // title still has that rating and review (issue 103). A Seen row always has a rating.
+    if (row.rating === null) return "Couldn't save. Try again.";
+    const shown = { rating: row.rating, review: row.review };
+    const result = await call(() => editRatingAction(ref, rating, review, shown));
     if (!result.ok) return result.stale ? refusedInSheet(result) : result.error;
     updateLists((prev) => replaced(prev, "seen", withRecord(row, result.value.current)));
     setSheet(null);

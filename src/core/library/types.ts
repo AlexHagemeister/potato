@@ -76,9 +76,10 @@ export interface SortOptions extends ActionOptions {
 }
 
 /**
- * The rating and review a caller showed the user, as removeRatingReview takes
- * them. The removal goes ahead only while the title's row still holds exactly
- * these, so it never erases a rating or review the user did not see.
+ * The rating and review a caller showed the user, as updateRatingReview and
+ * removeRatingReview take them. The edit or removal goes ahead only while the
+ * title's row still holds exactly these, so it never overwrites or erases a
+ * rating or review the user did not see (issues 43 and 103).
  */
 export interface ShownRatingReview {
   rating: number;

@@ -133,6 +133,16 @@ function EditRatingButton({ disabled, onTap }: { disabled: boolean; onTap: () =>
   );
 }
 
+/** What the rating sheet was opened for. */
+type SheetFor = { mode: "mark" } | { mode: "edit"; shown: EditShown };
+/** The rating and review an Edit rating sheet opened with. */
+type EditShown = { rating: number; review: string | null };
+
+/** Whether the card shows the title Seen with exactly the rating and review an Edit rating sheet opened with. */
+function showsAsOpened(state: CardUserState | null, shown: EditShown): boolean {
+  return state?.status === "seen" && state.rating === shown.rating && state.review === shown.review;
+}
+
 export function TitleScreen({ card }: { card: Card }) {
   const router = useRouter();
   const ref: TitleId = { mediaType: card.mediaType, tmdbId: card.tmdbId };
@@ -140,9 +150,10 @@ export function TitleScreen({ card }: { card: Card }) {
   const [state, setState] = useState<CardUserState | null>(card.userState);
   const [busy, setBusy] = useState(false);
   // The rating sheet, and what it was opened for: "mark" (Seen it on a title not Seen) or "edit" (a Seen title's
-  // rating). Fixed at open, so a refusal that shows the title's true state behind the sheet can't turn the next
-  // Save into an edit of a review the user was never shown.
-  const [sheet, setSheet] = useState<"mark" | "edit" | null>(null);
+  // rating, with the rating and review it opened with). Fixed at open, so a refusal that shows the title's true
+  // state behind the sheet can't turn the next Save or Remove into a write over a review the user was never shown:
+  // core saves or removes only while the title still has exactly what the sheet opened with (issues 43 and 103).
+  const [sheet, setSheet] = useState<SheetFor | null>(null);
   const seenOpen = sheet !== null;
   const [toast, setToast] = useState<Toast | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -174,6 +185,9 @@ export function TitleScreen({ card }: { card: Card }) {
 
   function done(kind: SortKind, outcome: ActionOutcome) {
     changed.current = true;
+    // The write carries the title's true row, so a reload queued by an earlier refusal is no longer needed. It would
+    // start the screen over and drop the Undo toast shown below.
+    refreshOnClose.current = false;
     setState(cardUserState(ref, outcome.current, new Date()));
     setNotice(null);
     setToast({ id: ++seq.current, message: state?.status === "seen" && kind === "seen" ? "Rating saved" : DONE_LABEL[kind], outcome });
@@ -186,7 +200,11 @@ export function TitleScreen({ card }: { card: Card }) {
   async function onTap(kind: SortKind) {
     if (busy) return;
     if (kind === "seen") {
-      setSheet(state?.status === "seen" ? "edit" : "mark");
+      setSheet(
+        state?.status === "seen" && state.rating !== null
+          ? { mode: "edit", shown: { rating: state.rating, review: state.review } }
+          : { mode: "mark" },
+      );
       return;
     }
     const before = state;
@@ -213,9 +231,10 @@ export function TitleScreen({ card }: { card: Card }) {
 
   async function saveSeen(rating: number, review: string): Promise<string | null> {
     // A Seen title's rating is edited the way the Lists tab edits it: core changes it only while the title is
-    // still Seen. Seen it on any other title moves it only while it is not Seen yet (issue 65). Either way, a
-    // rating or review written elsewhere (another device) is never silently overwritten.
-    if (sheet === "edit") return editSeen(rating, review);
+    // still Seen with the rating and review the sheet opened with (issue 103). Seen it on any other title moves it
+    // only while it is not Seen yet (issue 65). Either way, a rating or review written elsewhere (another device)
+    // is never silently overwritten.
+    if (sheet?.mode === "edit") return editSeen(sheet.shown, rating, review);
     let result: DeckActionResult;
     try {
       result = await markSeenAction(ref, rating, review === "" ? null : review);
@@ -235,8 +254,9 @@ export function TitleScreen({ card }: { card: Card }) {
 
   /**
    * A write refused because the title changed elsewhere: show where it is now, from the row the refusal carries.
-   * If the row couldn't be read, reload the card from the server instead. A reload starts the screen over (see
-   * reloadStale), so while the rating sheet stays open with the user's text, it waits until the sheet closes.
+   * If the row couldn't be read, reload the card from the server instead. A reload starts the screen over (page.tsx
+   * keys this screen on the title's state), so while the rating sheet stays open with the user's text, it waits
+   * until the sheet closes, and a later successful write cancels it (done, removeSeen).
    */
   function showTrueState(result: { current?: ActionOutcome["current"] }, sheetStaysOpen = false) {
     changed.current = true;
@@ -248,10 +268,10 @@ export function TitleScreen({ card }: { card: Card }) {
     setState(cardUserState(ref, result.current, new Date()));
   }
 
-  async function editSeen(rating: number, review: string): Promise<string | null> {
+  async function editSeen(shown: EditShown, rating: number, review: string): Promise<string | null> {
     let result: Awaited<ReturnType<typeof editRatingAction>>;
     try {
-      result = await editRatingAction(ref, rating, review);
+      result = await editRatingAction(ref, rating, review, shown);
     } catch {
       return "Couldn't save. Check your connection.";
     }
@@ -260,9 +280,10 @@ export function TitleScreen({ card }: { card: Card }) {
       done("seen", result.value);
       return null;
     }
-    // Taken off Seen elsewhere (issue 79): as for Seen it above, the card behind shows where the title is now, and
-    // the sheet stays open with the message and the text. It stays an Edit rating sheet, so a second Save is
-    // refused too: saving it as a new rating would undo a removal made on purpose on the other device.
+    // Changed elsewhere (issues 79 and 103): taken off Seen, or still Seen with another rating or review. As for
+    // Seen it above, the card behind shows where the title is now, and the sheet stays open with the message and the
+    // text. It keeps what it opened with, so a second Save is refused too: saving over the other device's change
+    // (a removal made on purpose, or a newer review) would erase something the user never saw.
     if (result.stale) showTrueState(result, true);
     return result.error;
   }
@@ -271,17 +292,17 @@ export function TitleScreen({ card }: { card: Card }) {
    * Remove rating and review, confirmed in the sheet (issue 43). Core removes them only while the title still has
    * the rating and review this sheet was opened with, so it never erases ones written elsewhere since.
    */
-  async function removeSeen(): Promise<string | null> {
-    if (state?.status !== "seen" || state.rating === null) return reloadStale();
+  async function removeSeen(shown: EditShown): Promise<string | null> {
     let result: Awaited<ReturnType<typeof removeRatingAction>>;
     try {
-      result = await removeRatingAction(ref, state.rating, state.review);
+      result = await removeRatingAction(ref, shown.rating, shown.review);
     } catch {
       return "Couldn't remove. Check your connection.";
     }
     if (result.ok) {
       setSheet(null);
       changed.current = true;
+      refreshOnClose.current = false; // as in done(): the true row is here, and a reload would drop the Undo toast
       setState(cardUserState(ref, result.value.current, new Date()));
       setNotice(null);
       setToast({ id: ++seq.current, message: "Rating removed", outcome: result.value });
@@ -293,14 +314,6 @@ export function TitleScreen({ card }: { card: Card }) {
     setSheet(null);
     showTrueState(result);
     fail(result.error);
-    return null;
-  }
-
-  function reloadStale(): null {
-    // The title moved since this card loaded. Reload it from the server: page.tsx keys this screen on the
-    // title's state, so the screen starts over with where the title is now.
-    setSheet(null);
-    router.refresh();
     return null;
   }
 
@@ -368,19 +381,24 @@ export function TitleScreen({ card }: { card: Card }) {
       <StatusLine state={state} />
       <CardView card={card} />
 
-      {seenOpen && (
+      {sheet && (
         <RatingSheet
-          heading={sheet === "edit" ? "Edit rating" : "Mark as seen"}
+          heading={sheet.mode === "edit" ? "Edit rating" : "Mark as seen"}
           title={card.title}
           subtitle={[card.year, card.mediaType === "movie" ? "Movie" : "Series"].filter(Boolean).join(" · ")}
           posterUrl={card.posterUrl}
-          initialRating={sheet === "edit" && state?.status === "seen" ? state.rating : null}
-          initialReview={sheet === "edit" && state?.status === "seen" ? state.review : null}
+          initialRating={sheet.mode === "edit" ? sheet.shown.rating : null}
+          initialReview={sheet.mode === "edit" ? sheet.shown.review : null}
           onCancel={() => setSheet(null)}
           onSave={saveSeen}
-          // Only while the card shows the title as Seen: after an edit refused because the title left Seen elsewhere,
-          // there is no rating or review left to remove.
-          onRemove={sheet === "edit" && state?.status === "seen" ? removeSeen : undefined}
+          // Only while the card shows the title Seen with the rating and review this sheet opened with. After an edit
+          // refused because the title changed elsewhere, there is either nothing left to remove (it left Seen) or a
+          // rating and review this sheet never showed (Seen again elsewhere), so Remove goes.
+          onRemove={
+            sheet.mode === "edit" && showsAsOpened(state, sheet.shown)
+              ? () => removeSeen(sheet.shown)
+              : undefined
+          }
         />
       )}
     </Screen>
