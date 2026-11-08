@@ -6,8 +6,11 @@
 // for the screen. Every check (the title, the rating, the review, the undo's
 // compare-and-set) lives in core.
 //
-// Server actions from one page run one at a time, in order, so an Undo always
-// reaches the server after the sort it undoes.
+// Server actions from one page run one at a time, in order, so on a title card
+// an Undo always reaches the server after the sort it undoes. Discover sends
+// its sorts and its mode and filters through routes instead (src/app/api/deck/
+// sort and choice, issue 106), which call the functions here. Its Undo waits
+// for the sort's answer before it is sent.
 
 import {
   getTitleState,

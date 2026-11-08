@@ -51,17 +51,12 @@ import {
   normalizeDeckChoice,
   type DeckChoice,
 } from "@/core/filters";
+import { latestSave } from "@/core/latest-save";
 import { toTitleId } from "@/core/title-id";
+import type { ChoiceSaveResult } from "@/app/api/deck/choice/route";
 import type { HiddenResponse } from "@/app/api/deck/hidden/route";
 import type { DeckResponse } from "@/app/api/deck/route";
-import {
-  markSeenAction,
-  saveDeckChoiceAction,
-  sortDeckCardAction,
-  undoSortAction,
-  type DeckActionResult,
-  type SortKind,
-} from "./actions";
+import { markSeenAction, undoSortAction, type DeckActionResult, type SortKind } from "./actions";
 
 /** How long the Undo toast stays up. An error notice stays until dismissed or the next sort. */
 const TOAST_MS = 4500;
@@ -206,6 +201,7 @@ export function useDeck(): DeckState {
  * changed on another device shows after a reload.
  */
 export function startDeck(userId: string, settingsKey: string, savedChoice: DeckChoice) {
+  hookPageExit();
   if (state.userId !== userId) {
     reset(userId, settingsKey, savedChoice);
   } else if (!rebase(settingsKey, state.choice)) {
@@ -298,29 +294,45 @@ export function chooseDeck(next: DeckChoice) {
   const choice = normalizeDeckChoice(next);
   if (!rebase(state.settingsKey, choice)) return;
   void fill();
-  void saveChoice(choice);
+  saveChoice(choice);
 }
 
-/** Each save's number, in the order sent. The latest one sent decides what the deck shows. */
-let lastSaveSent = 0;
+/** Each choice's number, in the order made. The latest one made decides what the deck shows. */
+let lastSaveMade = 0;
 let lastSaveConfirmed = 0;
 
+interface ChoiceSave {
+  choice: DeckChoice;
+  seq: number;
+  gen: number;
+}
+
 /**
- * Saves a choice to the profile. Saves run in order (server actions from one
- * page run one at a time). Only the latest save sent can roll the deck back:
- * if it fails, the deck goes back to the last choice the profile confirmed and
- * says so. An older save's failure is ignored, since a newer save follows it
- * and decides what the profile holds.
+ * Choice saves: one on its way at a time, and only the newest choice waits
+ * behind it (core's latestSave), so a run of quick changes ends with the last
+ * one saved. When the page goes away, the waiting choice leaves at once
+ * (flushSaves, issue 106).
  */
-async function saveChoice(choice: DeckChoice) {
-  const gen = generation;
-  const seq = ++lastSaveSent;
-  let result: { ok: true } | { ok: false; error: string };
-  try {
-    result = await saveDeckChoiceAction(choice);
-  } catch {
-    result = { ok: false, error: "Couldn't save your mode and filters. Check your connection." };
-  }
+const choiceSaves = latestSave<ChoiceSave, ChoiceSaveResult>(
+  ({ choice }) =>
+    postSave<ChoiceSaveResult>("/api/deck/choice", { choice }).catch(
+      (): ChoiceSaveResult => ({ ok: false, error: "Couldn't save your mode and filters. Check your connection." }),
+    ),
+  settleChoice,
+);
+
+/** Saves a choice to the profile, behind any save on its way. */
+function saveChoice(choice: DeckChoice) {
+  choiceSaves.save({ choice, seq: ++lastSaveMade, gen: generation });
+}
+
+/**
+ * A choice save came back. Only the latest choice made can roll the deck
+ * back: if its save fails, the deck goes back to the last choice the profile
+ * confirmed and says so. An older save's failure is ignored, since a newer
+ * save follows it and decides what the profile holds.
+ */
+function settleChoice({ choice, seq, gen }: ChoiceSave, result: ChoiceSaveResult) {
   if (gen !== generation) return;
   if (result.ok) {
     if (seq > lastSaveConfirmed) {
@@ -329,9 +341,53 @@ async function saveChoice(choice: DeckChoice) {
     }
     return;
   }
-  if (seq !== lastSaveSent) return;
+  if (seq !== lastSaveMade) return;
   showNotice(result.error);
   if (state.settingsKey !== null && rebase(state.settingsKey, profileChoice)) void fill();
+}
+
+/**
+ * Sends one save to its route. keepalive lets the request finish after the
+ * page is gone (a reload, a closed home-screen app), so a save already sent
+ * is never lost with the page (issue 106). Rejects on a network failure or a
+ * reply that is not JSON, which each caller turns into its error notice.
+ */
+async function postSave<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+    keepalive: true,
+  });
+  return (await res.json()) as T;
+}
+
+/**
+ * The page is going away, or may be about to (hidden: iOS can close a
+ * home-screen app in the background without another event). Sorts never wait,
+ * so the only thing left to send is a choice queued behind another choice
+ * save. It leaves now. If the page lives on, its answer is handled as usual.
+ */
+export function flushSaves() {
+  choiceSaves.flush();
+}
+
+let exitHooked = false;
+
+/**
+ * Listens once, for the life of the page, for it going away. Not tied to
+ * Discover being on screen: a choice save can still be waiting after a switch
+ * to another tab. pagehide and a hidden visibilitychange are the events iOS
+ * fires reliably for a home-screen app. beforeunload is not.
+ */
+function hookPageExit() {
+  if (exitHooked || typeof window === "undefined") return;
+  exitHooked = true;
+  window.addEventListener("pagehide", flushSaves);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushSaves();
+  });
 }
 
 /**
@@ -355,6 +411,8 @@ function reset(userId: string, settingsKey: string, savedChoice: DeckChoice) {
   fetchEpoch++;
   lastSort = null;
   clearTimeout(toastTimer);
+  // A choice still waiting was the last user's.
+  choiceSaves.clear();
   saving.clear();
   undoingKey = null;
   preloaded.clear();
@@ -515,7 +573,8 @@ export function sortCard(kind: Exclude<SortKind, "seen">, card: DeckPageCard) {
   set({ queue: removeCard(state.queue, card) });
   preload();
 
-  const pending = sortDeckCardAction(kind, toTitleId(card))
+  // Sent now, never queued, so a reload or a closed app right after the tap can't drop it (issue 106).
+  const pending = postSave<DeckActionResult>("/api/deck/sort", { kind, title: toTitleId(card) })
     .catch((): DeckActionResult => ({ ok: false, error: "Couldn't save. Check your connection." }))
     .then((result) => {
       if (gen !== generation) return result;
