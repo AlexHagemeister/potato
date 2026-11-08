@@ -14,6 +14,7 @@ import {
   genresFor,
   isDefaultFilterChoice,
   normalizeFilterChoice,
+  sameFilterChoice,
   toDeckFilters,
   type FilterChoice,
 } from "./choice";
@@ -183,6 +184,16 @@ describe("query params", () => {
       choice({ type: "movie", genres: ["horror"] }),
     );
     expect(filterChoiceFromParams({})).toEqual(choice({}));
+  });
+
+  test("sameFilterChoice is true exactly for choices that filter the same way", () => {
+    const a = choice({ type: "tv", genres: ["scifi", "drama"], era: "recent" });
+    const b = choice({ type: "tv", genres: ["drama", "scifi", "drama"], era: "recent" });
+    expect(sameFilterChoice(a, b)).toBe(true);
+    expect(sameFilterChoice(a, filterChoiceFromParams(new URLSearchParams(filterChoiceToParams(a))))).toBe(true);
+    expect(sameFilterChoice(a, choice({ type: "tv", genres: ["scifi"], era: "recent" }))).toBe(false);
+    expect(sameFilterChoice(choice({ onMyServices: true }), choice({}))).toBe(false);
+    expect(sameFilterChoice(choice({ minRating: "8" }), choice({}))).toBe(false);
   });
 });
 

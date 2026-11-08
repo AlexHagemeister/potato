@@ -34,8 +34,11 @@ export function ModePicker({ value, onChange }: { value: DiscoveryMode; onChange
     if (mode !== value) onChange(mode);
   }
 
+  // Not `relative`: the menu is placed against the header's control group (deck.tsx), so its right edge sits at
+  // the screen's right margin. Anchored to this button instead, a wider Filters button pushed the 256 px menu
+  // off the left edge (issue 68).
   return (
-    <div ref={root} data-slot="mode" className="relative shrink-0">
+    <div ref={root} data-slot="mode" className="shrink-0">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}

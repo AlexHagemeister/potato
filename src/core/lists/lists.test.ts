@@ -3,7 +3,7 @@ import { MemoryRatingsStore } from "../imdb/ratings";
 import type { TitleRecord } from "../library/types";
 import type { DetailsCore } from "../tmdb";
 import type { Candidate } from "../types";
-import { createTitleInfoLookup, toListRow } from "./lists";
+import { createTitleInfoLookup, listFromParam, toListRow } from "./lists";
 
 const record: TitleRecord = {
   mediaType: "movie",
@@ -24,6 +24,18 @@ const info = {
   year: 1999,
   posterPath: "/poster.jpg",
 } as DetailsCore;
+
+describe("listFromParam", () => {
+  test("names each list, and anything else opens the Watchlist", () => {
+    expect(listFromParam("seen")).toBe("seen");
+    expect(listFromParam("passed")).toBe("passed");
+    expect(listFromParam("watchlist")).toBe("watchlist");
+    expect(listFromParam("skipped")).toBe("watchlist");
+    expect(listFromParam(undefined)).toBe("watchlist");
+    expect(listFromParam(null)).toBe("watchlist");
+    expect(listFromParam(["seen"])).toBe("watchlist");
+  });
+});
 
 describe("toListRow", () => {
   test("carries the row's identity, status, rating, review, and time, plus title, year, and a thumbnail poster", () => {

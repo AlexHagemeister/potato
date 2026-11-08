@@ -1,7 +1,6 @@
 import { filterChoiceFromParams, toDeckFilters } from "@/core/filters";
 import { getAllLists } from "@/core/lists";
 import { getUserSettings } from "@/core/settings/user-settings";
-import { LIST_STATUSES, type ListStatus } from "@/core/types";
 import { getCurrentUserForRequest } from "@/lib/current-user";
 import { SignedOutScreen } from "../_shell/signed-out";
 import { ListsScreen } from "./lists-screen";
@@ -11,12 +10,9 @@ export default async function ListsPage({ searchParams }: PageProps<"/lists">) {
   // Checked here too, not only in the shell layout, which a tab tap does not re-run.
   if (!user) return <SignedOutScreen />;
 
-  // ?list=seen keeps the chosen list across a reload. Anything else opens the Watchlist.
-  // The filter parameters (type, genre, era, mine) keep the filters the same way.
-  const params = await searchParams;
-  const { list } = params;
-  const initialList = (LIST_STATUSES as readonly unknown[]).includes(list) ? (list as ListStatus) : "watchlist";
-  const filters = filterChoiceFromParams(params);
+  // The filter parameters (type, genre, era, imdb, mine) keep the filters across a reload. The list (?list=) is
+  // read by the screen from the address, since a tab tap changes it without a server render.
+  const filters = filterChoiceFromParams(await searchParams);
 
   const [result, settings] = await Promise.all([
     getAllLists(user.id, { filters: toDeckFilters(filters, new Date()) }),
@@ -31,7 +27,6 @@ export default async function ListsPage({ searchParams }: PageProps<"/lists">) {
   return (
     <ListsScreen
       lists={result.value}
-      initialList={initialList}
       filters={filters}
       hasServices={settings.value.providerIds.length > 0}
     />

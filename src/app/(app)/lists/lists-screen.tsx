@@ -1,10 +1,18 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
-import { DEFAULT_FILTER_CHOICE, filterChoiceToParams, isDefaultFilterChoice, type FilterChoice } from "@/core/filters";
+import { useSearchParams } from "next/navigation";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  DEFAULT_FILTER_CHOICE,
+  filterChoiceFromParams,
+  filterChoiceToParams,
+  isDefaultFilterChoice,
+  sameFilterChoice,
+  type FilterChoice,
+} from "@/core/filters";
 import type { ActionOutcome, TitleRecord } from "@/core/library/types";
-import type { ListRow, ListRowsPage } from "@/core/lists";
+import { listFromParam, type ListRow, type ListRowsPage } from "@/core/lists";
 import { formatTitleKey } from "@/core/title-id";
 import type { ListStatus, TitleId } from "@/core/types";
 import { FilterControl } from "../_components/filter-control";
@@ -59,6 +67,15 @@ type Refill = {
   jobs: Partial<Record<ListStatus, { cursor: string; have: number; want: number }>>;
 };
 
+/**
+ * Where the list's scroll position is kept, in the history entry's state. It is written as the screen is left by a
+ * link (a row's card, a tab), so Back, and a reload, land on the same rows.
+ */
+const SCROLL_KEY = "potatoListsScroll";
+
+/** Space between the Undo toast's top edge and a row it is kept clear of. */
+const TOAST_CLEARANCE = 12;
+
 /** The address for a list and filters, so a reload reopens both. */
 function listsUrl(status: ListStatus, filters: FilterChoice): string {
   const params = new URLSearchParams(filterChoiceToParams(filters));
@@ -77,6 +94,43 @@ async function call<T>(action: () => Promise<ActionResult<T>>, outage = SAVE_FAI
     return await action();
   } catch {
     return { ok: false, error: outage };
+  }
+}
+
+/** How long a filter load may take before it counts as failed, so a dead connection can't leave it hanging. */
+const FILTER_TIMEOUT_MS = 15_000;
+
+/** The action, or a rejection once FILTER_TIMEOUT_MS passes. */
+function timed<T>(action: () => Promise<T>): () => Promise<T> {
+  return () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("timed out")), FILTER_TIMEOUT_MS);
+    });
+    return Promise.race([action(), timeout]).finally(() => clearTimeout(timer));
+  };
+}
+
+/**
+ * Writes the address for a list and filters, so Back from a card and a reload reopen both. Next's router takes the
+ * new address without a server render, so it works offline. The rows on screen are this screen's own state, not the
+ * router's copy of the page.
+ */
+function writeAddress(status: ListStatus, filters: FilterChoice) {
+  window.history.replaceState(null, "", listsUrl(status, filters));
+}
+
+/**
+ * Sets one key in the history entry's state. Next's own state rides along (it carries `__NA`), so Next passes the
+ * write straight through and the address doesn't change.
+ */
+function keepHistoryState(key: string, value: number) {
+  const state = window.history.state as Record<string, unknown> | null;
+  if (!state || state[key] === value) return;
+  try {
+    window.history.replaceState({ ...state, [key]: value }, "");
+  } catch {
+    // Safari limits history writes. Losing the position is harmless.
   }
 }
 
@@ -114,46 +168,89 @@ interface Toast {
   id: number;
   message: string;
   undo?: () => Promise<void>;
+  /** The row the toast is about (the one edited, or the one now in a moved row's place), kept clear of it. */
+  keep?: string;
 }
 
 type Sheet = { mode: "markSeen" | "edit"; row: ListRow };
 
 export function ListsScreen({
   lists: fromServer,
-  initialList,
   filters: filtersFromServer,
   hasServices,
 }: {
   lists: Record<ListStatus, ListRowsPage>;
-  initialList: ListStatus;
-  /** The filters the server loaded `lists` with (from the address). */
+  /** The filters the server loaded `lists` with (from the address it rendered). */
   filters: FilterChoice;
   hasServices: boolean;
 }) {
+  // The address names the list and the filters (issue 67). This screen writes it directly (writeAddress), so the
+  // router's copy of the page, which Back restores, can be older than the address. Its rows are used only when
+  // they were loaded under the address's filters. Otherwise the screen loads the rows for the address.
+  const searchParams = useSearchParams();
+  const addressList = listFromParam(searchParams.get("list"));
+  const addressFilters = filterChoiceFromParams(searchParams);
+  const serverFits = sameFilterChoice(filtersFromServer, addressFilters);
+
   const [lists, setLists] = useState(() => toLists(fromServer));
-  const [filters, setFilters] = useState(filtersFromServer);
+  // The filters the rows on screen were loaded under. A failed filter load falls back to them.
+  const [loaded, setLoaded] = useState(filtersFromServer);
+  // The filters the label shows: `loaded`, or the ones a running filter load is for.
+  const [filters, setFilters] = useState(addressFilters);
   const filtersRef = useRef(filters);
   useEffect(() => {
     filtersRef.current = filters;
   }, [filters]);
-  const [filtering, setFiltering] = useState(false);
-  // A navigation back to this tab brings new server data: start from it.
-  const [synced, setSynced] = useState(fromServer);
+  const [active, setActive] = useState(addressList);
+  const activeRef = useRef(active);
+  useEffect(() => {
+    activeRef.current = active;
+  }, [active]);
+  // A filter load to run (see the effect below): for a filter change, or on mount for the address's filters when
+  // the router's copy has rows for other filters. While it is set, the rows stay dimmed. If it fails, the screen
+  // goes back to `fallback`, the filters of the rows it still shows.
+  const [due, setDue] = useState<{ filters: FilterChoice; fallback: FilterChoice } | null>(() =>
+    serverFits ? null : { filters: addressFilters, fallback: filtersFromServer },
+  );
+  const filtering = due !== null;
+  const filteringRef = useRef(filtering);
+  useEffect(() => {
+    filteringRef.current = filtering;
+  }, [filtering]);
+  // A link on this screen was tapped, so a navigation away may be under way. A filter load that settles meanwhile
+  // must not write the address: Next would take that write as a navigation and drop the one the tap started.
+  const leaving = useRef(false);
+  // A reload a stale write asked for while a filter load ran. It runs if that load fails.
+  const reloadWanted = useRef(false);
   const [refill, setRefill] = useState<Refill | null>(null);
   // Counts list loads, so a slower, older load never overwrites a newer one,
-  // or the server data a navigation brought in meanwhile.
+  // or the server data a navigation brought in meanwhile. `restarts` counts the times the screen starts over.
   const loadSeq = useRef(0);
+  const [restarts, setRestarts] = useState(0);
   useEffect(() => {
     loadSeq.current++;
-  }, [synced]);
-  if (fromServer !== synced) {
-    setSynced(fromServer);
-    setLists(toLists(fromServer));
-    setFilters(filtersFromServer);
-    setFiltering(false);
-    setRefill(null);
+    leaving.current = false;
+  }, [restarts]);
+  // The server data and address last seen. New server data (a refresh after a change on a card, the Lists tab
+  // while on Lists, Back between two Lists entries) or an address this screen didn't write (the Lists tab while on
+  // Lists, when Next reuses its copy of the page) starts the screen over on the list and filters the address names.
+  const addressKey = searchParams.toString();
+  const [seen, setSeen] = useState({ server: fromServer, address: addressKey });
+  if (fromServer !== seen.server || addressKey !== seen.address) {
+    setSeen({ server: fromServer, address: addressKey });
+    const newServer = fromServer !== seen.server;
+    const sameFilters = sameFilterChoice(addressFilters, filters);
+    // This screen's own writes name the list and filters it already shows.
+    if (newServer || addressList !== active || !sameFilters) setActive(addressList);
+    if (newServer || !sameFilters) {
+      setLists(toLists(fromServer));
+      setLoaded(filtersFromServer);
+      setFilters(addressFilters);
+      setRefill(null);
+      setDue(serverFits ? null : { filters: addressFilters, fallback: filtersFromServer });
+      setRestarts((n) => n + 1);
+    }
   }
-  const [active, setActive] = useState(initialList);
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -204,7 +301,68 @@ export function ListsScreen({
   }, [toast]);
 
   const toastSeq = useRef(0);
-  const show = (message: string, undo?: () => Promise<void>) => setToast({ id: ++toastSeq.current, message, undo });
+  const show = (message: string, undo?: () => Promise<void>, keep?: string) =>
+    setToast({ id: ++toastSeq.current, message, undo, keep });
+
+  // The toast sits over the bottom of the list (issue 68). The spacer below the list leaves room to scroll any
+  // row clear of it, and the row the toast is about is scrolled clear as it appears, so a saved rating or the
+  // next row's button is never left under it.
+  const panel = useRef<HTMLElement>(null);
+  const toastEl = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const main = panel.current?.closest("main");
+    if (!toast?.keep || !main || !toastEl.current) return;
+    const row = [...main.querySelectorAll<HTMLElement>("li[data-title-key]")].find((li) => li.dataset.titleKey === toast.keep);
+    if (!row) return;
+    const overlap = row.getBoundingClientRect().bottom - (toastEl.current.getBoundingClientRect().top - TOAST_CLEARANCE);
+    if (overlap <= 0) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    main.scrollBy({ top: overlap, behavior: reduce ? "auto" : "smooth" });
+  }, [toast]);
+
+  // Back to this screen (or a reload) puts the list where it was, once rows for the address show: at once when the
+  // router's copy fits the address, or when the load for the address settles. The position is saved when a scroll
+  // ends and when a link is tapped, so it is always the latest. (A write while the page unloads for a reload is not
+  // kept, so it can't wait until then.) Rows added with Show more aren't reloaded, so a position past them clamps.
+  const scrollDue = useRef<number | null | undefined>(undefined);
+  useLayoutEffect(() => {
+    const main = panel.current?.closest("main");
+    if (!main) return;
+    if (scrollDue.current === undefined) {
+      const saved = (window.history.state as Record<string, unknown> | null)?.[SCROLL_KEY];
+      scrollDue.current = typeof saved === "number" ? saved : null;
+    }
+    if (scrollDue.current === null || filtering) return;
+    main.scrollTop = scrollDue.current;
+    scrollDue.current = null;
+  }, [lists, filtering]);
+
+  useEffect(() => {
+    const main = panel.current?.closest("main");
+    if (!main) return;
+    // A position not applied yet (rows for the address still loading) is still the one to keep.
+    const save = () => keepHistoryState(SCROLL_KEY, typeof scrollDue.current === "number" ? scrollDue.current : main.scrollTop);
+    const onClick = (e: MouseEvent) => {
+      if (!(e.target instanceof Element) || !e.target.closest("a[href]")) return;
+      save();
+      leaving.current = true;
+    };
+    // Once per scroll, after it settles: Safari limits how often history can be written.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onScroll = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (!leaving.current) save();
+      }, 250);
+    };
+    document.addEventListener("click", onClick, true);
+    main.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("click", onClick, true);
+      main.removeEventListener("scroll", onScroll);
+    };
+  }, []);
 
   /** A write failed. Say why, and reload the lists when the title changed elsewhere. */
   function failed(result: { error: string; stale?: boolean }) {
@@ -218,14 +376,17 @@ export function ListsScreen({
    * reload doesn't drop them.
    */
   async function reload() {
+    // A filter load under way brings fresh lists if it succeeds. If it fails, it runs this reload then.
+    if (filteringRef.current) {
+      reloadWanted.current = true;
+      return;
+    }
     const seq = ++loadSeq.current;
     // The latest filters, not this closure's: a write can come back stale after the filters changed.
     const using = filtersRef.current;
     const shown = lists;
     const result = await call(() => loadListsAction(using), FILTER_FAILED);
     if (seq !== loadSeq.current) return;
-    // This load replaced any filter load still running.
-    setFiltering(false);
     if (!result.ok) return;
     const fresh = toLists(result.value);
     const jobs: Refill["jobs"] = {};
@@ -238,29 +399,66 @@ export function ListsScreen({
     setRefill(Object.keys(jobs).length > 0 ? { filters: using, jobs } : null);
   }
 
-  /** New filters from the control: load all three lists under them, or keep the old ones if that fails. */
-  async function applyFilters(next: FilterChoice) {
+  /**
+   * The filter load, for a filter change or for an address the router's copy doesn't fit. Wherever `due` is set,
+   * the Filters label already shows its filters and the rows are dimmed. The address is written once the load
+   * settles: with the new filters if it loaded, or with `fallback`, whose rows still show, if it failed. So the
+   * address never names filters the rows don't have. The list in it is the one showing then, since a tab can be
+   * tapped during the load. A load that is replaced, or outlives the screen, changes nothing.
+   */
+  useEffect(() => {
+    if (!due) return;
+    let cancelled = false;
     const seq = ++loadSeq.current;
-    const previous = filters;
+    void (async () => {
+      const result = await call(timed(() => loadListsAction(due.filters)), FILTER_FAILED);
+      // A newer load, server data that fits the address, or leaving the screen took over.
+      if (cancelled || seq !== loadSeq.current) return;
+      setDue(null);
+      filteringRef.current = false;
+      const settled = result.ok ? due.filters : due.fallback;
+      if (result.ok) {
+        setLists(toLists(result.value));
+        setLoaded(due.filters);
+      } else {
+        setFilters(due.fallback);
+        // Now, not after the next render: the deferred reload below reads it.
+        filtersRef.current = due.fallback;
+      }
+      if (!leaving.current) writeAddress(activeRef.current, settled);
+      if (result.ok) {
+        reloadWanted.current = false;
+        return;
+      }
+      show(result.error);
+      if (reloadWanted.current) {
+        reloadWanted.current = false;
+        void reload();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // show and reload are recreated each render. Only a new `due` starts a load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [due]);
+
+  /** New filters from the control. If the load fails, the filters of the rows on screen come back. */
+  function applyFilters(next: FilterChoice) {
+    leaving.current = false;
     setFilters(next);
-    setFiltering(true);
     setRefill(null);
-    window.history.replaceState(null, "", listsUrl(active, next));
-    const result = await call(() => loadListsAction(next), FILTER_FAILED);
-    if (seq !== loadSeq.current) return;
-    setFiltering(false);
-    if (!result.ok) {
-      setFilters(previous);
-      window.history.replaceState(null, "", listsUrl(active, previous));
-      return failed(result);
-    }
-    setLists(toLists(result.value));
+    setDue({ filters: next, fallback: loaded });
   }
 
   function select(status: ListStatus) {
+    if (status === active) return;
+    leaving.current = false;
     setActive(status);
-    // Keeps the chosen list and filters across a reload, without a navigation.
-    window.history.replaceState(null, "", listsUrl(status, filters));
+    // During a filter load, the address is written when the load settles, with this list.
+    if (filtering) return;
+    // The rows don't depend on the list (all three are loaded), so this needs no load and works offline.
+    writeAddress(status, filters);
   }
 
   /** Undo for a move or an edit: restore the row in core, then put the screen back. */
@@ -286,9 +484,14 @@ export function ListsScreen({
     }
     const index = lists.watchlist.rows.findIndex((r) => keyOf(r) === key);
     const moved = withRecord(row, result.value.current);
+    const next = index >= 0 ? lists.watchlist.rows[index + 1] : undefined;
     setLists((prev) => insertAt(without(prev, "watchlist", key), "seen", moved, 0));
     setSheet(null);
-    show("Moved to Seen", undoer(ref, result.value, (prev) => insertAt(without(prev, "seen", key), "watchlist", row, index)));
+    show(
+      "Moved to Seen",
+      undoer(ref, result.value, (prev) => insertAt(without(prev, "seen", key), "watchlist", row, index)),
+      next && keyOf(next),
+    );
     return null;
   }
 
@@ -303,7 +506,7 @@ export function ListsScreen({
     }
     setLists((prev) => replaced(prev, "seen", withRecord(row, result.value.current)));
     setSheet(null);
-    show("Rating saved", undoer(ref, result.value, (prev) => replaced(prev, "seen", row)));
+    show("Rating saved", undoer(ref, result.value, (prev) => replaced(prev, "seen", row)), keyOf(row));
     return null;
   }
 
@@ -311,6 +514,7 @@ export function ListsScreen({
     const ref = refOf(row);
     const key = keyOf(row);
     const index = lists.passed.rows.findIndex((r) => keyOf(r) === key);
+    const next = index >= 0 ? lists.passed.rows[index + 1] : undefined;
     const putBack = (prev: Lists) => insertAt(without(prev, "watchlist", key), "passed", row, index);
     // Moves on tap, with the row's button disabled until the move saves. A failure puts the row back.
     setRowPending(key, true);
@@ -322,7 +526,7 @@ export function ListsScreen({
       return failed(result);
     }
     setLists((prev) => replaced(prev, "watchlist", withRecord(row, result.value.current)));
-    show("Moved to Watchlist", undoer(ref, result.value, putBack));
+    show("Moved to Watchlist", undoer(ref, result.value, putBack), next && keyOf(next));
   }
 
   async function showMore() {
@@ -371,6 +575,7 @@ export function ListsScreen({
       </div>
 
       <section
+        ref={panel}
         id="list-panel"
         role="tabpanel"
         aria-labelledby={`list-tab-${active}`}
@@ -433,8 +638,12 @@ export function ListsScreen({
         )}
       </section>
 
+      {/* Room to scroll the last row above the Undo toast: the toast and its gap over the tab bar, less the screen's own bottom padding. */}
+      <div aria-hidden="true" data-slot="toast-room" className="h-14" />
+
       {toast && (
         <div
+          ref={toastEl}
           role="status"
           className="fixed inset-x-4 z-40 flex min-h-12 items-center justify-between gap-3 rounded-2xl bg-surface-raised py-1 pr-1 pl-4 shadow-lg shadow-black/40"
           style={{ bottom: "calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + 0.75rem)" }}

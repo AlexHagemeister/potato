@@ -4,6 +4,7 @@ export {
   createTitleInfoLookup,
   getAllLists,
   getListRows,
+  listFromParam,
   LISTS_PAGE_SIZE,
   toListRow,
   type ListRow,

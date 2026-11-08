@@ -214,7 +214,8 @@ export function Deck({
       <div data-slot="deck-controls" className="mb-3 flex h-11 items-center justify-between gap-2">
         <h1 className={toast ? "sr-only" : "text-lg font-semibold"}>Discover</h1>
         {toast && <UndoPill message={toast.message} onUndo={() => void undoLastSort()} />}
-        <div className={`flex shrink-0 items-center gap-2 ${ready ? "" : "invisible"}`}>
+        {/* `relative`: the mode menu opens against this group, right-aligned with Filters at the screen's margin. */}
+        <div className={`relative flex shrink-0 items-center gap-2 ${ready ? "" : "invisible"}`}>
           {!toast && <ModePicker value={choice.mode} onChange={(mode) => chooseDeck({ ...choice, mode })} />}
           <FilterControl
             compact

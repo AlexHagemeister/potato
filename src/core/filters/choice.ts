@@ -210,6 +210,11 @@ export function filterChoiceToParams(choice: FilterChoice): Record<string, strin
   return out;
 }
 
+/** Whether two choices filter the same way, whatever order the genres were tapped in. */
+export function sameFilterChoice(a: FilterChoice, b: FilterChoice): boolean {
+  return JSON.stringify(normalizeFilterChoice(a)) === JSON.stringify(normalizeFilterChoice(b));
+}
+
 /** A query value as Next's searchParams or URLSearchParams give it. */
 type ParamValue = string | string[] | null | undefined;
 
