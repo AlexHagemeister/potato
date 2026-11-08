@@ -5,7 +5,7 @@
 //
 // For each listed title it hides the cached providers entry and fails the
 // providers request, which runs the client's real "refresh failed, nothing
-// cached" path. It writes nothing. A title whose details are not cached yet
+// cached" path. It adds no cache writes of its own. A title whose details are not cached yet
 // still loads its providers with the details (one request): open it once,
 // then again, to see the unknown state.
 //
