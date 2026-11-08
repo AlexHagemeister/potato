@@ -43,7 +43,9 @@ export const DETAILS_CONCURRENCY = 8;
  * cursor stays put. Fewer failures skip just those titles, so one title TMDB
  * always fails on cannot block the deck. The floor also means a page of one or
  * two titles skips them even in an outage, which only happens at the end of a
- * narrow deck.
+ * narrow deck. Under "on my services" the same rule counts a title whose
+ * availability is unknown (its providers lookup failed) as a failure, since
+ * the filter has to leave it out (issue 104).
  */
 export const DETAILS_OUTAGE_MIN_FAILURES = 3;
 

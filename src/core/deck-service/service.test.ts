@@ -398,6 +398,87 @@ describe("getDeck: on my services", () => {
   });
 });
 
+describe("getDeck: on my services during a providers outage (issue 104)", () => {
+  muteWarnings();
+
+  const netflix = provider(8, "Netflix");
+  const mine = { mode: "popular" as const, filters: { mediaTypes: ["movie" as const], onMyServices: true } };
+  /** A filtered world whose titles all stream on the user's Netflix, until a test marks some unknown. */
+  function onNetflix(pages: ReturnType<typeof range>[]): FakeWorld {
+    const w = world({ settings: { country: "US", providerIds: [8] }, lists: { "popular:movie": pages } });
+    for (const page of pages) for (const s of page) w.details[formatTitleKey(s)] = detailsFor(s, { providersByCountry: { US: emptyCountry({ flatrate: [netflix] }) } });
+    return w;
+  }
+  function markUnknown(w: FakeWorld, titles: readonly ReturnType<typeof summary>[]) {
+    for (const s of titles) w.details[formatTitleKey(s)] = detailsFor(s, { providersByCountry: null });
+  }
+  const cursorOf = (page: DeckPage) => (page as { nextCursor: string | null }).nextCursor;
+
+  test("most of a page unknown is an outage: it throws, and the same cursor deals those titles once providers are back", async () => {
+    const pages = [range("movie", 1, 20), range("movie", 21, 20), range("movie", 41, 20)];
+    const w = onNetflix(pages);
+    const { page, service } = await deck(w, mine);
+    const cursor = cursorOf(page)!;
+    // Page 2's details are cached but 15 of its providers lookups fail with nothing cached.
+    const healthy = { ...w.details };
+    markUnknown(w, pages[1].slice(5));
+    await expect(service.getDeck(USER, { ...mine, cursor })).rejects.toThrow(/unknown for 15 of 20 titles/);
+    w.details = healthy;
+    const healed = await service.getDeck(USER, { ...mine, cursor });
+    if (!healed.ok) throw new Error("expected ok");
+    expect(keysOf(cardsOf(healed.value))).toEqual(pages[1].map(formatTitleKey));
+  });
+
+  test("a few unknown titles are skipped: the rest of the page is dealt, and the cursor moves on", async () => {
+    const pages = [range("movie", 1, 20), range("movie", 21, 20)];
+    const w = onNetflix(pages);
+    markUnknown(w, [pages[0][2], pages[0][9]]);
+    const { page } = await deck(w, mine);
+    const cards = cardsOf(page);
+    expect(cards.length).toBe(18);
+    expect(keysOf(cards)).not.toContain("movie:3");
+    expect(keysOf(cards)).not.toContain("movie:10");
+    const state = decodeCursor(cursorOf(page)!);
+    if (typeof state === "string") throw new Error(state);
+    expect(state.positions.get("popular:movie")).toEqual({ page: 1, offset: 20 });
+  });
+
+  test("unknown titles and failed details count together: neither is most of the page alone, both are", async () => {
+    const w = onNetflix([range("movie", 1, 20)]);
+    markUnknown(w, range("movie", 1, 6));
+    w.failingDetails = new Set(range("movie", 7, 5).map(formatTitleKey));
+    const { service } = fakeService(w);
+    await expect(service.getDeck(USER, mine)).rejects.toThrow(/unknown for 6 of 20 titles and 5 details lookups failed/);
+  });
+
+  test("a few unknown titles never block the deck, even as the last titles left", async () => {
+    const pages = [range("movie", 1, 20), range("movie", 21, 2)];
+    const w = onNetflix(pages);
+    markUnknown(w, [pages[0][0], ...pages[1]]);
+    const { service } = fakeService(w);
+    const dealt: string[] = [];
+    let cursor: string | null = null;
+    let calls = 0;
+    do {
+      const result = await service.getDeck(USER, { ...mine, cursor });
+      if (!result.ok) throw new Error("expected ok");
+      dealt.push(...keysOf(cardsOf(result.value)));
+      cursor = cursorOf(result.value);
+    } while (cursor !== null && ++calls < 5);
+    expect(cursor).toBeNull();
+    expect(dealt).toEqual(range("movie", 2, 19).map(formatTitleKey));
+  });
+
+  test("without the filter, the same outage deals every title, each card saying its availability is unknown", async () => {
+    const w = onNetflix([range("movie", 1, 20)]);
+    markUnknown(w, range("movie", 1, 20));
+    const { page } = await deck(w, { ...mine, filters: { mediaTypes: ["movie"] } });
+    const cards = cardsOf(page);
+    expect(cards.length).toBe(20);
+    expect(cards.every((c) => c.streaming.kind === "unknown")).toBe(true);
+  });
+});
+
 describe("getDeck: failures", () => {
   muteWarnings();
 
