@@ -53,7 +53,7 @@ The filters that shape the deck also work on each list.
 
 ## Search
 
-You can search for any title at any time. A search result opens the same card you see in the deck, with the same four buttons. This covers two common moments: you saw a trailer somewhere and want the title on your Watchlist, or you just finished something and want to rate it.
+You can search for any title at any time. A search result opens the same card you see in the deck, with the same four buttons (a title you've already rated shows Edit rating instead). This covers two common moments: you saw a trailer somewhere and want the title on your Watchlist, or you just finished something and want to rate it.
 
 ## Shaping the deck
 
