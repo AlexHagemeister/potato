@@ -210,6 +210,11 @@ export function filterChoiceToParams(choice: FilterChoice): Record<string, strin
   return out;
 }
 
+/** A string that two choices share exactly when they filter the same way, so choices compare by value. */
+export function filterChoiceKey(choice: FilterChoice): string {
+  return new URLSearchParams(filterChoiceToParams(choice)).toString();
+}
+
 /** A query value as Next's searchParams or URLSearchParams give it. */
 type ParamValue = string | string[] | null | undefined;
 

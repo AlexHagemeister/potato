@@ -10,6 +10,7 @@ import {
   describeFilterChoice,
   eraBounds,
   filterChoiceFromParams,
+  filterChoiceKey,
   filterChoiceToParams,
   genresFor,
   isDefaultFilterChoice,
@@ -183,6 +184,16 @@ describe("query params", () => {
       choice({ type: "movie", genres: ["horror"] }),
     );
     expect(filterChoiceFromParams({})).toEqual(choice({}));
+  });
+
+  test("filterChoiceKey is equal exactly for choices that filter the same way", () => {
+    const a = choice({ type: "tv", genres: ["scifi", "drama"], era: "recent" });
+    const b = choice({ type: "tv", genres: ["drama", "scifi", "drama"], era: "recent" });
+    expect(filterChoiceKey(a)).toBe(filterChoiceKey(b));
+    expect(filterChoiceKey(a)).toBe(filterChoiceKey(filterChoiceFromParams(new URLSearchParams(filterChoiceToParams(a)))));
+    expect(filterChoiceKey(a)).not.toBe(filterChoiceKey(choice({ type: "tv", genres: ["scifi"], era: "recent" })));
+    expect(filterChoiceKey(choice({}))).toBe("");
+    expect(filterChoiceKey(choice({ onMyServices: true }))).not.toBe(filterChoiceKey(choice({})));
   });
 });
 

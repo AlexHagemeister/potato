@@ -28,7 +28,8 @@ export function UndoPill({ message, onUndo }: { message: string; onUndo: () => v
 export function NoticePill({ message, onDismiss }: { message: string; onDismiss: () => void }) {
   return (
     <div role="status" data-toast="notice" className={PILL}>
-      <span className="min-w-0 text-sm leading-tight">{message}</span>
+      {/* Unclamped (a notice can name a long title), so the text keeps its own padding when it wraps past 44 px. */}
+      <span className="min-w-0 py-1 text-sm leading-tight">{message}</span>
       <button type="button" aria-label="Dismiss" onClick={onDismiss} className="h-11 shrink-0 rounded-full px-3 text-sm text-muted">
         OK
       </button>
