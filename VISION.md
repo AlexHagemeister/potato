@@ -94,7 +94,7 @@ You sign in with Google. Everything you do is saved to your profile and follows 
 
 Your lists, ratings, and reviews are yours, and you can connect them to the AI assistant of your choice. The AI reads them and writes to them.
 
-The test case: you talk about a movie you just watched with your AI, then say "turn what I said into a review, I'd give it 4/5." The review appears in your Seen list, the same as if you had written it in the app.
+The test case: you talk about a movie you just watched with your AI, then say "turn what I said into a review, I'd give it 8/10." The review appears in your Seen list, the same as if you had written it in the app.
 
 ## How it feels
 

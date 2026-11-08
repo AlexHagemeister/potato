@@ -53,16 +53,22 @@ export function ratingLabel(rating: number): string {
   return `${rating} out of ${RATING_MAX}`;
 }
 
-/** A read-only row of ten stars, with the rating written after it ("8 / 10"). */
+/**
+ * A read-only rating: ten stars, then "8.5 / 10". The stars are `size` px each at most,
+ * and shrink together when the row is narrower (a 320-wide phone, a larger text size),
+ * so the number never gets pushed out.
+ */
 export function Stars({ rating, size = 13 }: { rating: number; size?: number }) {
   return (
-    <span role="img" aria-label={ratingLabel(rating)} className="inline-flex items-center gap-1.5">
-      <span className="inline-flex items-center">
+    <span role="img" aria-label={ratingLabel(rating)} className="flex max-w-full min-w-0 items-center gap-1.5">
+      <span className="flex min-w-0 items-center" style={{ width: size * STAR_COUNT }}>
         {STAR_NUMBERS.map((n) => (
-          <Star key={n} fill={starFill(rating, n)} size={size} />
+          <span key={n} className="flex min-w-0 flex-1">
+            <Star fill={starFill(rating, n)} size="100%" />
+          </span>
         ))}
       </span>
-      <span aria-hidden className="text-xs font-semibold text-foreground tabular-nums">
+      <span aria-hidden className="shrink-0 text-xs font-semibold text-foreground tabular-nums">
         {ratingText(rating)}
       </span>
     </span>

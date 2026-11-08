@@ -1,16 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { isValidRating } from "@/core/library/validate";
-import { ratingAt, starAt, stepRating, tapRating } from "./star-scale";
+import { DRAG_THRESHOLD_PX, gestureOf, ratingAt, starAt, stepRating, tapRating } from "./star-scale";
 
-const SLOT = 39; // one star's slot on a 390-wide phone
+// One star's slot on a 390-wide phone: the sheet's 358px content row over ten stars.
+const SLOT = 35.8;
 
 describe("ratingAt: the rating follows the finger in half steps", () => {
   test("the left half of a star is the half step, the right half the whole", () => {
     expect(ratingAt(1, SLOT)).toBe(0.5);
-    expect(ratingAt(19, SLOT)).toBe(0.5);
-    expect(ratingAt(20, SLOT)).toBe(1);
-    expect(ratingAt(39, SLOT)).toBe(1);
-    expect(ratingAt(40, SLOT)).toBe(1.5);
+    expect(ratingAt(SLOT / 2, SLOT)).toBe(0.5);
+    expect(ratingAt(SLOT / 2 + 1, SLOT)).toBe(1);
+    expect(ratingAt(SLOT, SLOT)).toBe(1);
+    expect(ratingAt(SLOT + 1, SLOT)).toBe(1.5);
     expect(ratingAt(7 * SLOT + 10, SLOT)).toBe(7.5);
     expect(ratingAt(7 * SLOT + 30, SLOT)).toBe(8);
     expect(ratingAt(10 * SLOT, SLOT)).toBe(10);
@@ -41,10 +42,36 @@ describe("starAt", () => {
     expect(starAt(10 * SLOT, SLOT)).toBe(10);
   });
 
-  test("clamps past either end", () => {
-    expect(starAt(-5, SLOT)).toBe(1);
+  test("the left and right edges of the stars still count", () => {
     expect(starAt(0, SLOT)).toBe(1);
-    expect(starAt(10 * SLOT + 30, SLOT)).toBe(10);
+    expect(starAt(10 * SLOT, SLOT)).toBe(10);
+  });
+
+  test("a point outside the stars names no star, so a tap there does nothing", () => {
+    expect(starAt(-1, SLOT)).toBeNull();
+    expect(starAt(-50, SLOT)).toBeNull();
+    expect(starAt(10 * SLOT + 1, SLOT)).toBeNull();
+    expect(starAt(2000, SLOT)).toBeNull();
+  });
+});
+
+describe("gestureOf: a press turns into a drag only when it moves sideways", () => {
+  test("under the threshold it is still a press, so lifting it is a tap", () => {
+    expect(gestureOf(0, 0)).toBe("press");
+    expect(gestureOf(DRAG_THRESHOLD_PX - 1, 0)).toBe("press");
+    expect(gestureOf(-(DRAG_THRESHOLD_PX - 1), DRAG_THRESHOLD_PX - 1)).toBe("press");
+  });
+
+  test("more sideways than up or down is a drag, either direction", () => {
+    expect(gestureOf(DRAG_THRESHOLD_PX, 0)).toBe("drag");
+    expect(gestureOf(-DRAG_THRESHOLD_PX, 3)).toBe("drag");
+    expect(gestureOf(20, -12)).toBe("drag");
+  });
+
+  test("more up or down than sideways is a scroll, which neither drags nor taps", () => {
+    expect(gestureOf(0, DRAG_THRESHOLD_PX)).toBe("scroll");
+    expect(gestureOf(5, -30)).toBe("scroll");
+    expect(gestureOf(10, 10)).toBe("scroll");
   });
 });
 

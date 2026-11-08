@@ -4,8 +4,23 @@
 
 import { RATING_MAX, RATING_MIN } from "@/core/library/types";
 
-/** How far a finger moves sideways before a press on the stars is a drag, not a tap. */
+/** How far a finger moves before a press on the stars is a drag (or a scroll), not a tap. */
 export const DRAG_THRESHOLD_PX = 8;
+
+/** What a press has turned into, from how far it has moved since it went down. */
+export type Gesture = "press" | "drag" | "scroll";
+
+/**
+ * A press stays a press (a tap, if it lifts now) until it moves DRAG_THRESHOLD_PX in
+ * either direction. Then it is a drag when it moved more sideways than up or down, and
+ * a scroll of the sheet otherwise, which neither drags nor taps.
+ */
+export function gestureOf(dx: number, dy: number): Gesture {
+  const ax = Math.abs(dx);
+  const ay = Math.abs(dy);
+  if (Math.max(ax, ay) < DRAG_THRESHOLD_PX) return "press";
+  return ax > ay ? "drag" : "scroll";
+}
 
 /** The rating under a point of the row, in half steps: the left half of star n is n − 0.5, the right half n. */
 export function ratingAt(x: number, slot: number): number {
@@ -13,8 +28,9 @@ export function ratingAt(x: number, slot: number): number {
   return Math.min(RATING_MAX * 2, Math.max(RATING_MIN * 2, halves)) / 2;
 }
 
-/** The star (1 to 10) under a point of the row. */
-export function starAt(x: number, slot: number): number {
+/** The star (1 to 10) a tap at this point lands on, or null when it is outside the stars. */
+export function starAt(x: number, slot: number): number | null {
+  if (!(x >= 0 && x <= RATING_MAX * slot)) return null;
   return Math.min(RATING_MAX, Math.max(1, Math.ceil(x / slot)));
 }
 
