@@ -126,7 +126,11 @@ export function StarInput({ value, onChange }: { value: number | null; onChange:
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={() => (press.current = null)}
-        onLostPointerCapture={(e) => abandon(e.pointerId)}
+        onLostPointerCapture={(e) => {
+          // Only the row's own capture ends the press. A star losing an implicit touch
+          // capture to the row would bubble up here too, and must not end the drag.
+          if (e.target === e.currentTarget) abandon(e.pointerId);
+        }}
         className="flex w-full max-w-[560px] touch-pan-y rounded-xl select-none [-webkit-touch-callout:none] group-has-[input:focus-visible]:outline-2 group-has-[input:focus-visible]:outline-offset-2 group-has-[input:focus-visible]:outline-accent"
       >
         {STAR_NUMBERS.map((n) => (
