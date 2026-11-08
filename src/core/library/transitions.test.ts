@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { SKIP_DAYS } from "../deck/constants";
 import {
   ALLOWED_MOVES,
+  cardGuardFor,
   columnsFor,
   isAllowedMove,
   planMove,
@@ -68,6 +69,26 @@ describe("REPLACEABLE: which row a card button or removeTitle may replace (issue
     // A copy: changing the error can't change the rule.
     const refused = seenRefused();
     expect(refused.code === "wrong_state" && refused.expected).not.toBe(REPLACEABLE);
+  });
+});
+
+describe("cardGuardFor: a Discover card's tap never moves a title already on a list (issue 83)", () => {
+  const sorts = [{ status: "passed" }, { status: "skipped" }, { status: "watchlist" }] as const;
+
+  test("Pass, Skip, and Watchlist on a card shown on no list take the deck's rule", () => {
+    for (const intent of sorts) expect(cardGuardFor(intent, true)).toBe("on_no_list");
+  });
+
+  test("left out, or anything but strictly true, keeps REPLACEABLE (the title card and the AI connection)", () => {
+    for (const intent of sorts) {
+      for (const shown of [undefined, false, null, "true", 1, {}]) expect(cardGuardFor(intent, shown)).toBe("replaceable");
+    }
+  });
+
+  test("Seen it always keeps REPLACEABLE, so a stale card's rating still moves a title off another list", () => {
+    for (const shown of [undefined, false, true]) {
+      expect(cardGuardFor({ status: "seen", rating: 4 }, shown)).toBe("replaceable");
+    }
   });
 });
 

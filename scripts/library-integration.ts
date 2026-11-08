@@ -33,6 +33,7 @@ const lib = await import("../src/core/library");
 const lists = await import("../src/core/lists");
 const { PostgresCacheStore } = await import("../src/core/cache");
 const { SKIP_DAYS } = await import("../src/core/deck/constants");
+const { rowVisible } = await import("../src/core/deck/build-deck");
 type TitleRecord = import("../src/core/library").TitleRecord;
 type TitleId = import("../src/core/types").TitleId;
 
@@ -282,6 +283,115 @@ try {
       }
     }
     console.log(`        (${refused} of 30 Passes landed after the Seen write and were refused)`);
+  });
+
+  // Issue 83, option A: a Discover card always showed its title on no list (shownOnNoList). If the title was put on
+  // a list, or skipped, on another device while the card was on screen, the card's tap changes nothing and says
+  // where the title is. The earlier choice wins.
+  const DECK = { shownOnNoList: true };
+  const STATUS_OF = { pass: "passed", skip: "skipped", watchlist: "watchlist" } as const;
+  /** Puts a fresh title where another device would: on a list, skipped until later, or Seen with a review. */
+  async function sortedElsewhere(on: "watchlist" | "passed" | "skipped" | "seen"): Promise<TitleId> {
+    const ref = fresh();
+    if (on === "seen") unwrap(await lib.markSeen(A, ref, { rating: 4, review: "Elsewhere." }, { now: tick() }));
+    else unwrap(await sorts[on === "passed" ? "pass" : on === "skipped" ? "skip" : "watchlist"](ref, {}));
+    return ref;
+  }
+
+  await check("a deck tap on a title sorted elsewhere changes nothing and names where it is (issue 83)", async () => {
+    for (const on of ["watchlist", "passed", "skipped", "seen"] as const) {
+      for (const kind of Object.keys(sorts) as (keyof typeof sorts)[]) {
+        const ref = await sortedElsewhere(on);
+        const elsewhere = await state(A, ref);
+        const label = `${on}, ${kind}`;
+        const r = await sorts[kind](ref, DECK);
+        assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: on, expected: [] } }, label);
+        assert.deepEqual(await state(A, ref), elsewhere, `${label}: the row written elsewhere survives exactly`);
+      }
+    }
+  });
+
+  await check("a deck tap on a title on no list sorts it, and undo deletes the row", async () => {
+    for (const kind of Object.keys(sorts) as (keyof typeof sorts)[]) {
+      const ref = fresh();
+      const out = await actThenUndo(ref, () => sorts[kind](ref, DECK));
+      assert.equal(out.previous, null);
+      assert.equal(out.current?.status, STATUS_OF[kind], kind);
+    }
+  });
+
+  await check("a deck tap on a returned Skip sorts it (the deck deals it again), and undo restores the Skip", async () => {
+    for (const kind of Object.keys(sorts) as (keyof typeof sorts)[]) {
+      const ref = fresh();
+      const skipped = unwrap(await lib.skipTitle(A, ref, { now: tick() })).current!;
+      // Exactly at its return time, and later.
+      for (const late of [0, 60_000]) {
+        const now = new Date(skipped.skipUntil!.getTime() + late);
+        const write = () =>
+          kind === "pass"
+            ? lib.passTitle(A, ref, { now, ...DECK })
+            : kind === "skip"
+              ? lib.skipTitle(A, ref, { now, ...DECK })
+              : lib.watchlistTitle(A, ref, { now, ...DECK });
+        const out = await actThenUndo(ref, write);
+        assert.equal(out.previous?.status, "skipped", `${kind}, +${late} ms`);
+        assert.equal(out.current?.status, STATUS_OF[kind], `${kind}, +${late} ms`);
+      }
+    }
+  });
+
+  await check("the deck tap's SQL guard agrees with the deck's hiding rule (rowVisible) row by row", async () => {
+    // A Skip a moment before its return time is still hidden, so the tap refuses it.
+    const cases: { on: "none" | "watchlist" | "passed" | "skipped" | "seen"; offsetMs: number }[] = [
+      { on: "none", offsetMs: 0 },
+      { on: "watchlist", offsetMs: 0 },
+      { on: "passed", offsetMs: 0 },
+      { on: "seen", offsetMs: 0 },
+      { on: "skipped", offsetMs: -SKIP_DAYS * 86_400_000 },
+      { on: "skipped", offsetMs: -1 },
+      { on: "skipped", offsetMs: 0 },
+      { on: "skipped", offsetMs: 1 },
+    ];
+    for (const { on, offsetMs } of cases) {
+      const ref = on === "none" ? fresh() : await sortedElsewhere(on);
+      const row = await state(A, ref);
+      // For a Skip, the offset is from its return time.
+      const now = row?.skipUntil ? new Date(row.skipUntil.getTime() + offsetMs) : tick();
+      const visible = rowVisible(ref, row, now);
+      const r = await lib.passTitle(A, ref, { now, ...DECK });
+      const label = `${on}, ${offsetMs} ms`;
+      assert.equal(r.ok, visible, `${label}: the tap goes ahead exactly when the deck may show the title`);
+      if (!r.ok) assert.deepEqual(r.error, { code: "wrong_state", status: on, expected: [] }, label);
+    }
+  });
+
+  await check("two devices at the same instant: a refused deck tap names the list, never not_found, and the list wins", async () => {
+    // The phone's Discover card shows a title on no list. Another device adds it to the Watchlist while the phone's
+    // Pass is in flight. Whichever lands first, the title ends on the Watchlist.
+    let refused = 0;
+    for (let i = 0; i < 30; i++) {
+      const ref = fresh();
+      const [, pass] = await Promise.all([lib.watchlistTitle(A, ref, { now: tick() }), sorts.pass(ref, DECK)]);
+      assert.equal((await state(A, ref))?.status, "watchlist", `round ${i}`);
+      if (!pass.ok) {
+        refused++;
+        assert.deepEqual(pass.error, { code: "wrong_state", status: "watchlist", expected: [] }, `round ${i}: ${JSON.stringify(pass.error)}`);
+      }
+    }
+    console.log(`        (${refused} of 30 deck Passes landed after the Watchlist write and were refused)`);
+  });
+
+  await check("Seen it ignores shownOnNoList: it still moves a title off another list, and still refuses a Seen one", async () => {
+    for (const on of ["watchlist", "passed", "skipped"] as const) {
+      const ref = await sortedElsewhere(on);
+      const out = await actThenUndo(ref, () => lib.markSeen(A, ref, { rating: 3 }, { now: tick(), ...DECK } as object));
+      assert.equal(out.current?.status, "seen", on);
+    }
+    const ref = await sortedElsewhere("seen");
+    const elsewhere = await state(A, ref);
+    const r = await lib.markSeen(A, ref, { rating: 1 }, { now: tick(), ...DECK } as object);
+    assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "seen", expected: NOT_SEEN } });
+    assert.deepEqual(await state(A, ref), elsewhere);
   });
 
   await check("markSeen still moves a title from no list or any other list, and undo restores the exact row", async () => {

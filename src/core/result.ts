@@ -27,7 +27,9 @@ export type CoreError =
    * from the wrong list, a rating edit on a title that is not seen, or an undo
    * whose row has changed since the action it would undo. `status` is where
    * the title is now. `expected` lists the statuses that would have worked
-   * (empty when the action needed no row at all).
+   * (empty when the action needed the title on no list: a Discover card's
+   * Pass, Skip, or Watchlist, issue 83, where a Skip whose return time has
+   * passed also counts as on no list).
    */
   | { code: "wrong_state"; status: TitleStatus; expected: TitleStatus[] }
   /**
