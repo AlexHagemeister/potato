@@ -2,16 +2,19 @@
 // and when to ask the deck service for another page. Pure functions over an
 // immutable value, so the Discover screen, a future native app, and tests
 // share one set of paging rules (CLAUDE.md architecture rule 3). It runs in
-// the browser, so it may import only pure modules: today that is types and
-// formatTitleKey from ../title-id. Never import server-only code here.
+// the browser, so it may import only pure modules: today that is types,
+// formatTitleKey from ../title-id, and the deck engine's hiding rule for one
+// row (rowVisible, pure, which the card screen also runs in the browser).
+// Never import server-only code here.
 //
 // The paging rules come from DeckPage (src/core/deck-service/types.ts):
 // keep calling while nextCursor is not null, even when a page has no cards,
 // and drop any card already dealt, by (media type, TMDB ID).
 
+import { rowVisible } from "../deck/build-deck";
 import type { DeckPageCard } from "../deck-service/types";
 import { formatTitleKey, toTitleId } from "../title-id";
-import type { TitleId } from "../types";
+import type { TitleId, TitleStatus } from "../types";
 
 /** Ask for another page when fewer cards than this are queued. */
 export const QUEUE_LOW_WATER = 5;
@@ -245,4 +248,43 @@ export function returnToFront(queue: DeckQueue, card: DeckPageCard): DeckQueue {
   const key = titleKey(card);
   const dealt = queue.dealt.has(key) ? queue.dealt : new Set([...queue.dealt, key]);
   return { ...queue, dealt, cards: [card, ...queue.cards.filter((c) => titleKey(c) !== key)] };
+}
+
+/** A title's row as the deck's hiding rule reads it. skipUntil may be a string once it has crossed JSON. */
+export interface UndoneRow {
+  status: TitleStatus;
+  skipUntil?: Date | string | null;
+}
+
+/**
+ * Where an undone card goes, at the Undo tap, once the sort's outcome is
+ * known (issue 54). An Undo puts the title back to its row before the sort:
+ * `restored` (null when it had none). The card goes back on top only if the
+ * deck may show that row now, by the deck's own hiding rule (rowVisible).
+ * Otherwise it stays out (keepOutAfterUndo). That happens when the card was
+ * stale: the title was put on a list elsewhere while it was on screen, then
+ * sorted here and undone.
+ */
+export function afterUndo(queue: DeckQueue, card: DeckPageCard, restored: UndoneRow | null, now: Date): DeckQueue {
+  return rowVisible(card, restored, now) ? returnToFront(queue, card) : keepOutAfterUndo(queue, card, restored, now);
+}
+
+/**
+ * Takes an undone card out of the queue if the row the Undo restores keeps it
+ * out of the deck: a title on a list never returns to the deck (VISION
+ * invariant 3), and neither does one skipped until later. It stays in dealt,
+ * so a later page can't deal it again. When the row is one the deck shows,
+ * nothing changes, and the same queue comes back.
+ *
+ * It never puts a card back. When the Undo was tapped before the sort's save
+ * settled, the card went back on top at the tap. Once the save settles, this
+ * takes it out again if it must. Something may have taken the card out
+ * meanwhile (a settings change refreshed the queue, so its streaming data is
+ * stale), and that must stand.
+ */
+export function keepOutAfterUndo(queue: DeckQueue, card: DeckPageCard, restored: UndoneRow | null, now: Date): DeckQueue {
+  if (rowVisible(card, restored, now)) return queue;
+  const key = titleKey(card);
+  const out = dropTitles(queue, [key]);
+  return out.dealt.has(key) ? out : { ...out, dealt: new Set([...out.dealt, key]) };
 }

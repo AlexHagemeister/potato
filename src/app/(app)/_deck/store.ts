@@ -23,10 +23,12 @@ import { useSyncExternalStore } from "react";
 import {
   addPage,
   afterRefusal,
+  afterUndo,
   deckInputChange,
   dropTitles,
   emptyQueue,
   forgetTitle,
+  keepOutAfterUndo,
   needsMore,
   queuedTitles,
   refreshQueue,
@@ -91,6 +93,8 @@ interface LastSort {
   id: number;
   card: DeckPageCard;
   pending: Promise<DeckActionResult>;
+  /** The sort's result once its save settles. Its outcome says what an Undo restores. */
+  settled: DeckActionResult | null;
 }
 
 export type DeckView =
@@ -485,7 +489,11 @@ export function dismissNotice(id: number) {
 function sorted(kind: SortKind, card: DeckPageCard, pending: Promise<DeckActionResult>) {
   if (state.notice) set({ notice: null });
   const id = showToast(DONE_LABEL[kind]);
-  lastSort = { id, card, pending };
+  const sort: LastSort = { id, card, pending, settled: null };
+  lastSort = sort;
+  void pending.then((result) => {
+    sort.settled = result;
+  });
   void fill();
 }
 
@@ -571,7 +579,16 @@ export async function markCardSeen(card: DeckPageCard, rating: number, review: s
   return null;
 }
 
-/** Undoes the last sort: the card comes back on top at once, and core restores its previous state. */
+/**
+ * Undoes the last sort: core restores the title's previous state, and the
+ * card comes back on top at once, unless that state keeps it out of the deck
+ * (issue 54). The sort's outcome names the state: when the title was on a
+ * list before the sort (the card was stale: it was put on a list elsewhere
+ * while on screen), the Undo puts it back on that list, and the card stays
+ * out of the deck (core's afterUndo, VISION invariant 3). If the sort's save
+ * hasn't settled yet, the card comes back on top and leaves again once it
+ * settles, if it must (core's keepOutAfterUndo, which never puts it back).
+ */
 export async function undoLastSort() {
   const sort = lastSort;
   if (!sort) return;
@@ -581,13 +598,24 @@ export async function undoLastSort() {
   const key = titleKey(sort.card);
   touch(key);
   undoingKey = key;
-  set({ toast: null, undoing: true, queue: returnToFront(state.queue, sort.card) });
+  const known = sort.settled?.ok ? sort.settled.outcome : null;
+  const queue = known ? afterUndo(state.queue, sort.card, known.previous, new Date()) : returnToFront(state.queue, sort.card);
+  set({ toast: null, undoing: true, queue });
 
   let undone: DeckActionResult;
   try {
     const done = await sort.pending;
     // A failed sort already put the card back and said so.
     if (!done.ok) return;
+    if (!known && gen === generation) {
+      // Only ever takes the card out: a settings change may have refreshed the queue since the tap.
+      const out = keepOutAfterUndo(state.queue, sort.card, done.outcome.previous, new Date());
+      if (out !== state.queue) {
+        set({ queue: out });
+        preload();
+        void fill();
+      }
+    }
     undone = await undoSortAction(toTitleId(sort.card), done.outcome);
   } catch {
     undone = { ok: false, error: "Couldn't undo. Check your connection." };

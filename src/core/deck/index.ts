@@ -7,6 +7,7 @@ export {
   forYouLock,
   isForYouUnlocked,
   matchesFilters,
+  rowVisible,
   type ActivePool,
   type DeckCard,
   type DeckInput,

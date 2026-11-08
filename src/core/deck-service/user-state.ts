@@ -2,7 +2,7 @@
 // no clock of its own), so the card screen can apply it to an action's outcome
 // in the browser, and getCard applies it on the server.
 
-import { createVisibilityCheck } from "../deck/build-deck";
+import { rowVisible } from "../deck/build-deck";
 import type { TitleId, TitleStatus } from "../types";
 import type { CardUserState } from "./types";
 
@@ -17,16 +17,13 @@ export interface UserStateRow {
 /**
  * The card's user state for a title's row at `now`. A skip that has run out
  * puts the title back in the deck, so the card shows it as untouched (null),
- * as Search does. The rule is the deck's own (createVisibilityCheck), so the
+ * as Search does. The rule is the deck's own (rowVisible), so the
  * deck, Search, and the card always agree. A skip whose return time does not
  * parse stays hidden in the deck, so it stays "skipped" here.
  */
 export function cardUserState(ref: TitleId, row: UserStateRow | null, now: Date): CardUserState | null {
   if (!row) return null;
-  if (row.status === "skipped") {
-    const visible = createVisibilityCheck([{ mediaType: ref.mediaType, tmdbId: ref.tmdbId, status: row.status, skipUntil: row.skipUntil }], now);
-    if (visible(ref)) return null;
-  }
+  if (row.status === "skipped" && rowVisible(ref, row, now)) return null;
   return { status: row.status, rating: row.rating, review: row.review, skipUntil: returnDate(row.skipUntil) };
 }
 
