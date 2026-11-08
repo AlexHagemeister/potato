@@ -83,3 +83,8 @@ State lives in GitHub. Do not create status, progress, or tracking files in the 
 Lasting quirks discovered during the build go here, one line each, with the date.
 
 - 2026-11-07: `.env.local` points at the production database. `.env.development.local` overrides only the database variables, pointing them at `potato_dev`. The Next dev server loads both and the dev file wins, so a new worktree needs both copied. Any other local database tool or script takes its connection from `.env.development.local`, never from `.env.local`.
+- 2026-11-07: Walk as your own test user, never the shared one: open `/api/dev/login?as=<slug>` (for example `?as=pr90`; 1 to 24 lowercase letters, digits, and inner dashes) to sign in as `dev-test-<slug>@example.com`, created on first use. Plain `/api/dev/login` is the shared user other agents may be using.
+- 2026-11-07: `bun run dev:user show <slug>` counts that user's rows in each list (potato_dev only, read only).
+- 2026-11-07: `bun run dev:user reset <slug>` deletes that user's title rows and settings so a walk starts clean, and keeps it signed in. It refuses any database but potato_dev, and the shared user needs `--shared` in place of a slug.
+- 2026-11-07: `bun run dev:user seed <slug>` writes two real titles to each list (Watchlist, Passed, Seen with ratings and a review, Skipped), creating the user if needed. It overwrites that user's rows for those eight titles and keeps its other rows. Run `reset` first for exactly those eight rows.
+- 2026-11-07: `bun run dev:user delete <slug>` deletes the user and everything it owns. Run it when your walk is done.
