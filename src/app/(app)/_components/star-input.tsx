@@ -2,7 +2,7 @@
 
 import { useRef, useState, type ChangeEvent, type KeyboardEvent, type PointerEvent } from "react";
 import { RATING_MAX, RATING_MIN } from "@/core/library/types";
-import { gestureOf, ratingAt, starAt, stepRating, tapRating, type Gesture } from "./star-scale";
+import { gestureOf, moveIsPressed, ratingAt, starAt, stepRating, tapRating, type Gesture } from "./star-scale";
 import { ratingLabel, ratingText, Star, STAR_COUNT, STAR_NUMBERS, starFill } from "./stars";
 
 /** A press on the stars in progress: where it went down, what it has turned into, and the rating a drag last set. */
@@ -59,9 +59,18 @@ export function StarInput({ value, onChange }: { value: number | null; onChange:
     }
   }
 
+  /** Ends a press that will get no pointerup: a drag keeps the rating it reached and says it. */
+  function abandon(pointerId: number) {
+    const p = press.current;
+    if (!p || p.pointerId !== pointerId) return;
+    press.current = null;
+    if (p.gesture === "drag" && p.dragged !== null) announce(p.dragged);
+  }
+
   function onPointerMove(e: PointerEvent<HTMLDivElement>) {
     const p = press.current;
     if (!p || p.pointerId !== e.pointerId) return;
+    if (!moveIsPressed(e.pointerType, e.buttons)) return abandon(e.pointerId);
     if (p.gesture === "press") p.gesture = gestureOf(e.clientX - p.downX, e.clientY - p.downY);
     if (p.gesture !== "drag") return;
     const at = measure(e.clientX);
@@ -117,6 +126,7 @@ export function StarInput({ value, onChange }: { value: number | null; onChange:
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={() => (press.current = null)}
+        onLostPointerCapture={(e) => abandon(e.pointerId)}
         className="flex w-full max-w-[560px] touch-pan-y rounded-xl select-none [-webkit-touch-callout:none] group-has-[input:focus-visible]:outline-2 group-has-[input:focus-visible]:outline-offset-2 group-has-[input:focus-visible]:outline-accent"
       >
         {STAR_NUMBERS.map((n) => (

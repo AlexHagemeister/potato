@@ -22,6 +22,16 @@ export function gestureOf(dx: number, dy: number): Gesture {
   return ax > ay ? "drag" : "scroll";
 }
 
+/**
+ * Whether a pointer move still belongs to a press. A mouse that moves with no button
+ * down has lifted without a pointerup reaching the stars (lost capture, a release
+ * outside the window), so its press is over. Touch and pen moves only come while in
+ * contact, so they always belong to the press.
+ */
+export function moveIsPressed(pointerType: string, buttons: number): boolean {
+  return pointerType !== "mouse" || buttons !== 0;
+}
+
 /** The rating under a point of the row, in half steps: the left half of star n is n − 0.5, the right half n. */
 export function ratingAt(x: number, slot: number): number {
   const halves = Math.ceil((x / slot) * 2);

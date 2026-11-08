@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { isValidRating } from "@/core/library/validate";
-import { DRAG_THRESHOLD_PX, gestureOf, ratingAt, starAt, stepRating, tapRating } from "./star-scale";
+import { DRAG_THRESHOLD_PX, gestureOf, moveIsPressed, ratingAt, starAt, stepRating, tapRating } from "./star-scale";
 
 // One star's slot on a 390-wide phone: the sheet's 358px content row over ten stars.
 const SLOT = 35.8;
@@ -72,6 +72,22 @@ describe("gestureOf: a press turns into a drag only when it moves sideways", () 
     expect(gestureOf(0, DRAG_THRESHOLD_PX)).toBe("scroll");
     expect(gestureOf(5, -30)).toBe("scroll");
     expect(gestureOf(10, 10)).toBe("scroll");
+  });
+});
+
+describe("moveIsPressed: a mouse moving with no button down has ended its press", () => {
+  test("a mouse with no button down is not pressing", () => {
+    expect(moveIsPressed("mouse", 0)).toBe(false);
+  });
+
+  test("a mouse with a button down is pressing", () => {
+    expect(moveIsPressed("mouse", 1)).toBe(true);
+  });
+
+  test("touch and pen moves always belong to the press", () => {
+    expect(moveIsPressed("touch", 1)).toBe(true);
+    expect(moveIsPressed("touch", 0)).toBe(true);
+    expect(moveIsPressed("pen", 0)).toBe(true);
   });
 });
 
