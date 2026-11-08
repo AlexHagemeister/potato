@@ -53,7 +53,7 @@ Before any work, orient from the record:
   1. It invokes the `code-review` skill at `high` effort on the PR number, with `--comment`, so findings land on the PR as comments.
   2. It reads VISION.md and comments on any invariant the PR fights.
   3. The builder fixes each finding or answers it in the PR thread with a reason.
-  4. A fresh reviewer re-checks the fixes.
+  4. A fresh reviewer re-checks only the fixes. It reads the diff since the last review, confirms each blocking finding is fixed (in the running app when the finding was seen there), and checks that the changed code broke nothing nearby. It does not rerun the full `code-review` skill. Why: full re-reviews re-read code that was already checked and took 10 to 20 minutes a round (Alex, 2026-11-07).
   5. After three rounds without a clean review, label the PR `needs-alex` and move on to other work.
 - **Merge** with a squash merge once the review is clean and CI is green. Delete the branch.
 - **Before handing the milestone to Alex,** a fresh subagent reviews the whole codebase against VISION.md, and its findings go through the same fix loop.
