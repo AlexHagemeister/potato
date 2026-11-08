@@ -10,6 +10,7 @@
     "lint": "eslint",
     "test": "bun test --no-env-file",
     "test:db": "bun --no-env-file scripts/library-integration.ts",
+    "dev:user": "bun --no-env-file scripts/dev-user.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "bun --no-env-file scripts/migrate.ts dev",
     "db:migrate:prod": "bun --no-env-file scripts/migrate.ts prod",
