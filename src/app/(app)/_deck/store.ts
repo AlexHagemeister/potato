@@ -57,7 +57,7 @@ import type { DeckResponse } from "@/app/api/deck/route";
 import {
   markSeenAction,
   saveDeckChoiceAction,
-  sortCardAction,
+  sortDeckCardAction,
   undoSortAction,
   type DeckActionResult,
   type SortKind,
@@ -502,8 +502,9 @@ function sorted(kind: SortKind, card: DeckPageCard, pending: Promise<DeckActionR
  * behind it. If the write fails, the card comes back on top with an error
  * notice. If the settings changed meanwhile, the card's streaming data is
  * stale, so the deck deals it again later with fresh data instead. If the
- * title was marked Seen elsewhere, core refuses (issue 74): the card stays
- * gone and a notice says why.
+ * title was put on a list, or skipped, elsewhere while the card was on
+ * screen, core refuses (issues 74 and 83): the card stays gone and a notice
+ * says where the title is.
  */
 export function sortCard(kind: Exclude<SortKind, "seen">, card: DeckPageCard) {
   const gen = generation;
@@ -514,7 +515,7 @@ export function sortCard(kind: Exclude<SortKind, "seen">, card: DeckPageCard) {
   set({ queue: removeCard(state.queue, card) });
   preload();
 
-  const pending = sortCardAction(kind, toTitleId(card))
+  const pending = sortDeckCardAction(kind, toTitleId(card))
     .catch((): DeckActionResult => ({ ok: false, error: "Couldn't save. Check your connection." }))
     .then((result) => {
       if (gen !== generation) return result;
@@ -524,8 +525,9 @@ export function sortCard(kind: Exclude<SortKind, "seen">, card: DeckPageCard) {
         // Only this sort's own Undo goes away. A newer sort keeps its toast.
         if (lastSort?.card === card) dropUndo();
         if (result.stale) {
-          // The title was marked Seen elsewhere and core kept it Seen (issue 74). It is on a list, so the card
-          // stays out of the deck (VISION invariant 3), even if an Undo tapped meanwhile put it back on top.
+          // The title was sorted elsewhere and core left it there (issues 74 and 83). It is on a list or skipped
+          // until later, so the card stays out of the deck (VISION invariant 3), even if an Undo tapped meanwhile
+          // put it back on top.
           set({ queue: removeCard(state.queue, card) });
           showNotice(result.error);
           void fill();

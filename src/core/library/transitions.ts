@@ -49,6 +49,34 @@ export function seenRefused(): CoreError {
 }
 
 /**
+ * Which rows a card write may replace (Alex's ruling on issue 83, option A).
+ *
+ * - `replaceable`: any row but a Seen one (REPLACEABLE). The title card uses
+ *   it: it shows the list the title is on, so a tap there is a knowing move.
+ *   So does any caller that says nothing, such as the future AI connection.
+ * - `on_no_list`: only a row the deck may show (core's rowVisible): no row at
+ *   all, or a Skip whose return time has passed, since a returned Skip is
+ *   dealt again. A Discover card always showed the title on no list, so a row
+ *   on any list, or a Skip that hasn't returned yet, means the card went
+ *   stale while on screen: the title was sorted on another device or in
+ *   another tab. The earlier choice wins, and the tap changes nothing
+ *   (VISION invariant 3: the deck respects decisions already made).
+ */
+export type CardGuard = "replaceable" | "on_no_list";
+
+/**
+ * The guard for one card write. Pass, Skip, and Watchlist use `on_no_list`
+ * only when the caller says it showed the title on no list (strictly
+ * `shownOnNoList: true`). Seen it always uses `replaceable`: it records a
+ * rating the user typed on purpose, and Watchlist to Seen is a move the lists
+ * offer anyway, so a stale card's Seen it still moves a title off another
+ * list. It still never replaces a Seen row.
+ */
+export function cardGuardFor(intent: CardIntent, shownOnNoList: unknown): CardGuard {
+  return intent.status !== "seen" && shownOnNoList === true ? "on_no_list" : "replaceable";
+}
+
+/**
  * Checks what a removal says the user was shown. The review is kept exactly as
  * given, not normalized the way a write stores one: it is compared with the
  * stored row, which may hold text no write would store today (a blank review
