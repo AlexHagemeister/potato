@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { SKIP_DAYS } from "../deck/constants";
-import { ALLOWED_MOVES, CARD_SEEN_FROM, columnsFor, isAllowedMove, planMove, planRatingReviewPatch } from "./transitions";
+import {
+  ALLOWED_MOVES,
+  cardWriteFrom,
+  cardWriteRefused,
+  columnsFor,
+  isAllowedMove,
+  planMove,
+  planRatingReviewPatch,
+} from "./transitions";
 import type { MoveRequest } from "./types";
 
 const now = new Date("2026-11-06T12:00:00.000Z");
@@ -37,10 +45,6 @@ describe("columnsFor: every card action sets all four status columns", () => {
     }
   });
 
-  test("a card's Seen it moves a title from no list or another list, never from Seen (issue 65)", () => {
-    expect([...CARD_SEEN_FROM].sort()).toEqual(["passed", "skipped", "watchlist"]);
-  });
-
   test("seen needs a valid rating", () => {
     for (const rating of [undefined, 0, 5.5, 3.3, "4"]) {
       expect(columnsFor({ status: "seen", rating }, now)).toMatchObject({ ok: false, error: { code: "invalid_rating" } });
@@ -49,6 +53,41 @@ describe("columnsFor: every card action sets all four status columns", () => {
 
   test("seen rejects a bad review", () => {
     expect(columnsFor({ status: "seen", rating: 3, review: 42 }, now)).toMatchObject({ ok: false, error: { code: "invalid_review" } });
+  });
+});
+
+describe("cardWriteFrom: which row a card button may replace (issues 65 and 74)", () => {
+  const sorted = (s: readonly string[]) => [...s].sort();
+
+  test("Seen it replaces any row but a Seen one, whatever the card showed", () => {
+    for (const seenShown of [false, true]) {
+      expect(sorted(cardWriteFrom("seen", seenShown))).toEqual(["passed", "skipped", "watchlist"]);
+    }
+  });
+
+  test("Pass, Skip, and Watchlist refuse a Seen row unless the card showed the title as Seen", () => {
+    for (const intent of ["passed", "skipped", "watchlist"] as const) {
+      expect(sorted(cardWriteFrom(intent, false))).toEqual(["passed", "skipped", "watchlist"]);
+      expect(sorted(cardWriteFrom(intent, true))).toEqual(["passed", "seen", "skipped", "watchlist"]);
+    }
+  });
+
+  test("every allowed set holds every status but Seen, so a refusal always means the row is Seen", () => {
+    for (const intent of ["passed", "skipped", "watchlist", "seen"] as const) {
+      for (const seenShown of [false, true]) {
+        for (const status of ["passed", "skipped", "watchlist"] as const) {
+          expect(cardWriteFrom(intent, seenShown)).toContain(status);
+        }
+      }
+    }
+  });
+
+  test("the refusal says the title is Seen and lists what would have worked, from the allowed set alone", () => {
+    const allowed = cardWriteFrom("passed", false);
+    expect(cardWriteRefused(allowed)).toEqual({ code: "wrong_state", status: "seen", expected: [...allowed] });
+    // A copy: changing the error can't change the rule.
+    const refused = cardWriteRefused(allowed);
+    expect(refused.code === "wrong_state" && refused.expected).not.toBe(allowed);
   });
 });
 

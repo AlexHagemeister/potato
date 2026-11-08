@@ -22,10 +22,18 @@ import { sql, type SQL } from "drizzle-orm";
 import { getDb } from "@/db/client";
 import { FOREIGN_KEY_VIOLATION, pgErrorCode } from "../pg-error";
 import { fail, ok, validateUserId, type Result } from "../result";
-import type { TitleId } from "../types";
+import type { TitleId, TitleStatus } from "../types";
 import { recordFromJson } from "./rows";
-import { CARD_SEEN_FROM, columnsFor, planMove, planRatingReviewPatch, type CardIntent, type StatusColumns } from "./transitions";
-import type { ActionOptions, ActionOutcome, MoveRequest, RatingReviewPatch, TitleRecord, UndoInput } from "./types";
+import {
+  cardWriteFrom,
+  cardWriteRefused,
+  columnsFor,
+  planMove,
+  planRatingReviewPatch,
+  type CardIntent,
+  type StatusColumns,
+} from "./transitions";
+import type { ActionOptions, ActionOutcome, MoveRequest, RatingReviewPatch, SortOptions, TitleRecord, UndoInput } from "./types";
 import { parseTitleRecord, validateTitleRef } from "./validate";
 
 type Outcome = Result<ActionOutcome>;
@@ -88,14 +96,18 @@ function conflict(before: TitleRecord | null, expected: TitleRecord["status"][])
  * so writing a status moves the title off whatever list it was on (VISION
  * invariant 3). created_at keeps the first time the user acted on the title.
  *
- * A Seen write changes an existing row only while it is not Seen yet
- * (CARD_SEEN_FROM). On a Seen row it writes nothing and returns no row. The
+ * It changes an existing row only while the row's status is in `allowed`
+ * (cardWriteFrom). Otherwise it writes nothing and returns no row. The
  * condition sits in ON CONFLICT DO UPDATE, which Postgres checks against the
  * row it has locked, so it holds even against a write landing at the same
  * instant.
  */
-function upsertWrite(userId: string, ref: TitleId, c: StatusColumns, now: Date): SQL {
-  const guard = c.status === "seen" ? sql`where t.status <> 'seen'` : sql``;
+function upsertWrite(userId: string, ref: TitleId, c: StatusColumns, now: Date, allowed: readonly TitleStatus[]): SQL {
+  const statuses = sql.join(
+    allowed.map((s) => sql`${s}`),
+    sql`, `,
+  );
+  const guard = sql`where t.status in (${statuses})`;
   return sql`
     insert into title_status as t
       (user_id, media_type, tmdb_id, status, rating, review, skip_until, created_at, updated_at)
@@ -112,40 +124,49 @@ function upsertWrite(userId: string, ref: TitleId, c: StatusColumns, now: Date):
     returning t.*`;
 }
 
-async function cardAction(userId: unknown, ref: unknown, intent: CardIntent, options: ActionOptions): Promise<Outcome> {
+async function cardAction(userId: unknown, ref: unknown, intent: CardIntent, options: SortOptions): Promise<Outcome> {
   const ids = checkIds(userId, ref);
   if (!ids.ok) return ids;
   const now = options.now ?? new Date();
   const columns = columnsFor(intent, now);
   if (!columns.ok) return columns;
+  // Strictly true: anything else a caller sends keeps the guard.
+  const allowed = cardWriteFrom(columns.value.status, options.seenShown === true);
   const { userId: u, ref: r } = ids.value;
   return guardUser(async () => {
-    const { before, written } = await withPrevious(u, r, upsertWrite(u, r, columns.value, now));
-    // Only a guarded Seen write can leave no row: the title is Seen already.
-    if (!written) return conflict(before, [...CARD_SEEN_FROM]);
+    const { before, written } = await withPrevious(u, r, upsertWrite(u, r, columns.value, now, allowed));
+    // No row back means the guard refused the row it locked, which can only be a Seen row.
+    if (!written) return fail(cardWriteRefused(allowed));
     return ok({ previous: before, current: written });
   });
 }
 
-/** Pass: the title goes to the Passed list. */
-export function passTitle(userId: string, ref: TitleId, options: ActionOptions = {}): Promise<Outcome> {
+/**
+ * Pass: the title goes to the Passed list. On a Seen title it refuses with
+ * wrong_state unless `options.seenShown` says the caller showed the title as
+ * Seen (cardWriteFrom, issue 74). Watchlist and Skip work the same way.
+ */
+export function passTitle(userId: string, ref: TitleId, options: SortOptions = {}): Promise<Outcome> {
   return cardAction(userId, ref, { status: "passed" }, options);
 }
 
-/** Watchlist: the title goes to the Watchlist. */
-export function watchlistTitle(userId: string, ref: TitleId, options: ActionOptions = {}): Promise<Outcome> {
+/** Watchlist: the title goes to the Watchlist. A Seen title needs `seenShown`, as for passTitle. */
+export function watchlistTitle(userId: string, ref: TitleId, options: SortOptions = {}): Promise<Outcome> {
   return cardAction(userId, ref, { status: "watchlist" }, options);
 }
 
-/** Skip: no list. The title returns to the deck SKIP_DAYS from now (VISION invariant 1). */
-export function skipTitle(userId: string, ref: TitleId, options: ActionOptions = {}): Promise<Outcome> {
+/**
+ * Skip: no list. The title returns to the deck SKIP_DAYS from now (VISION
+ * invariant 1). A Seen title needs `seenShown`, as for passTitle.
+ */
+export function skipTitle(userId: string, ref: TitleId, options: SortOptions = {}): Promise<Outcome> {
   return cardAction(userId, ref, { status: "skipped" }, options);
 }
 
 /**
  * Seen it: the title goes to the Seen list with this rating (required) and an
  * optional review (left out, null, or blank means none). It moves a title
- * that is on no list or on another list (CARD_SEEN_FROM). A title already
+ * that is on no list or on another list (cardWriteFrom). A title already
  * Seen is left exactly as it is and the result is wrong_state, because its
  * review may have been written elsewhere (another device, the AI connection)
  * and the caller has not shown it. To change a Seen title's rating or

@@ -493,7 +493,9 @@ function sorted(kind: SortKind, card: DeckPageCard, pending: Promise<DeckActionR
  * Pass, Skip, or Watchlist. The next card shows at once and the write runs
  * behind it. If the write fails, the card comes back on top with an error
  * notice. If the settings changed meanwhile, the card's streaming data is
- * stale, so the deck deals it again later with fresh data instead.
+ * stale, so the deck deals it again later with fresh data instead. If the
+ * title was marked Seen elsewhere, core refuses (issue 74): the card stays
+ * gone and a notice says why.
  */
 export function sortCard(kind: Exclude<SortKind, "seen">, card: DeckPageCard) {
   const gen = generation;
@@ -513,7 +515,13 @@ export function sortCard(kind: Exclude<SortKind, "seen">, card: DeckPageCard) {
       if (!result.ok) {
         // Only this sort's own Undo goes away. A newer sort keeps its toast.
         if (lastSort?.card === card) dropUndo();
-        if (state.settingsKey === settingsKey) {
+        if (result.stale) {
+          // The title was marked Seen elsewhere and core kept it Seen (issue 74). It is on a list, so the card
+          // stays out of the deck (VISION invariant 3), even if an Undo tapped meanwhile put it back on top.
+          set({ queue: removeCard(state.queue, card) });
+          showNotice(result.error);
+          void fill();
+        } else if (state.settingsKey === settingsKey) {
           set({ queue: returnToFront(state.queue, card) });
           showNotice(result.error);
         } else {
@@ -534,9 +542,10 @@ export function sortCard(kind: Exclude<SortKind, "seen">, card: DeckPageCard) {
  * fails. Resolves to that error, or null once saved (the card has left).
  *
  * If the title was marked Seen somewhere else meanwhile, core saves nothing
- * and keeps the rating and review there (issue 65). The card leaves the deck,
- * since the title is on a list, and a notice says why. Resolves to null so the
- * sheet closes.
+ * and keeps the rating and review there (issue 65). The card leaves the deck
+ * behind the sheet, since the title is on a list (VISION invariant 3). The
+ * sheet stays open with the message, so a review the user typed is still
+ * there to copy (issue 74). Cancel closes it.
  */
 export async function markCardSeen(card: DeckPageCard, rating: number, review: string | null): Promise<string | null> {
   const gen = generation;
@@ -550,13 +559,12 @@ export async function markCardSeen(card: DeckPageCard, rating: number, review: s
   }
   touch(key);
   if (!result.ok && !result.stale) return result.error;
-  if (gen !== generation) return null;
+  if (gen !== generation) return result.ok ? null : result.error;
   set({ queue: removeCard(state.queue, card) });
   if (!result.ok) {
     preload();
-    showNotice(result.error);
     void fill();
-    return null;
+    return result.error;
   }
   preload();
   sorted("seen", card, Promise.resolve(result));

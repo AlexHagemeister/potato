@@ -118,7 +118,11 @@ export function TitleScreen({ card }: { card: Card }) {
   // getCard has already applied core's rules (an expired skip is null).
   const [state, setState] = useState<CardUserState | null>(card.userState);
   const [busy, setBusy] = useState(false);
-  const [seenOpen, setSeenOpen] = useState(false);
+  // The rating sheet, and what it was opened for: "mark" (Seen it on a title not Seen) or "edit" (a Seen title's
+  // rating). Fixed at open, so a refusal that shows the title's true state behind the sheet can't turn the next
+  // Save into an edit of a review the user was never shown.
+  const [sheet, setSheet] = useState<"mark" | "edit" | null>(null);
+  const seenOpen = sheet !== null;
   const [toast, setToast] = useState<Toast | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const seq = useRef(0);
@@ -154,7 +158,7 @@ export function TitleScreen({ card }: { card: Card }) {
   async function onTap(kind: SortKind) {
     if (busy) return;
     if (kind === "seen") {
-      setSeenOpen(true);
+      setSheet(state?.status === "seen" ? "edit" : "mark");
       return;
     }
     const before = state;
@@ -164,7 +168,8 @@ export function TitleScreen({ card }: { card: Card }) {
     setBusy(true);
     let result: DeckActionResult;
     try {
-      result = await sortCardAction(kind, ref);
+      // Moving a Seen title off the Seen list is allowed only from a card that shows it as Seen (issue 74).
+      result = await sortCardAction(kind, ref, before?.status === "seen");
     } catch {
       result = { ok: false, error: "Couldn't save. Check your connection." };
     }
@@ -172,6 +177,7 @@ export function TitleScreen({ card }: { card: Card }) {
     if (result.ok) done(kind, result.outcome);
     else {
       setState(before);
+      if (result.stale) showTrueState(result);
       fail(result.error);
     }
   }
@@ -180,18 +186,35 @@ export function TitleScreen({ card }: { card: Card }) {
     // A Seen title's rating is edited the way the Lists tab edits it: core changes it only while the title is
     // still Seen. Seen it on any other title moves it only while it is not Seen yet (issue 65). Either way, a
     // rating or review written elsewhere (another device) is never silently overwritten.
-    if (state?.status === "seen") return editSeen(rating, review);
+    if (sheet === "edit") return editSeen(rating, review);
     let result: DeckActionResult;
     try {
       result = await markSeenAction(ref, rating, review === "" ? null : review);
     } catch {
       result = { ok: false, error: "Couldn't save. Check your connection." };
     }
-    if (!result.ok && result.stale) return reloadStale();
-    if (!result.ok) return result.error;
-    setSeenOpen(false);
+    if (!result.ok) {
+      // Marked Seen elsewhere: the card behind the sheet shows that now, and the sheet stays open with the
+      // message, so a review the user typed is still there to copy. Cancel closes it.
+      if (result.stale) showTrueState(result);
+      return result.error;
+    }
+    setSheet(null);
     done("seen", result.outcome);
     return null;
+  }
+
+  /**
+   * A write refused because the title changed elsewhere: show where it is now, from the row the refusal carries.
+   * If the row couldn't be read, reload the card from the server instead.
+   */
+  function showTrueState(result: { current?: ActionOutcome["current"] }) {
+    changed.current = true;
+    if (result.current === undefined) {
+      router.refresh();
+      return;
+    }
+    setState(cardUserState(ref, result.current, new Date()));
   }
 
   async function editSeen(rating: number, review: string): Promise<string | null> {
@@ -202,7 +225,7 @@ export function TitleScreen({ card }: { card: Card }) {
       return "Couldn't save. Check your connection.";
     }
     if (result.ok) {
-      setSeenOpen(false);
+      setSheet(null);
       done("seen", result.value);
       return null;
     }
@@ -213,7 +236,7 @@ export function TitleScreen({ card }: { card: Card }) {
   function reloadStale(): null {
     // The title moved since this card loaded. Reload it from the server: page.tsx keys this screen on the
     // title's state, so the screen starts over with where the title is now.
-    setSeenOpen(false);
+    setSheet(null);
     router.refresh();
     return null;
   }
@@ -276,13 +299,13 @@ export function TitleScreen({ card }: { card: Card }) {
 
       {seenOpen && (
         <RatingSheet
-          heading={state?.status === "seen" ? "Edit rating" : "Mark as seen"}
+          heading={sheet === "edit" ? "Edit rating" : "Mark as seen"}
           title={card.title}
           subtitle={[card.year, card.mediaType === "movie" ? "Movie" : "Series"].filter(Boolean).join(" · ")}
           posterUrl={card.posterUrl}
-          initialRating={state?.status === "seen" ? state.rating : null}
-          initialReview={state?.status === "seen" ? state.review : null}
-          onCancel={() => setSeenOpen(false)}
+          initialRating={sheet === "edit" && state?.status === "seen" ? state.rating : null}
+          initialReview={sheet === "edit" && state?.status === "seen" ? state.review : null}
+          onCancel={() => setSheet(null)}
           onSave={saveSeen}
         />
       )}
