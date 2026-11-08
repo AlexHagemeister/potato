@@ -31,7 +31,7 @@ import {
   columnsFor,
   planMove,
   planRatingReviewPatch,
-  planRatingReviewRemoval,
+  planShownRatingReview,
   REPLACEABLE,
   seenRefused,
   type CardGuard,
@@ -254,26 +254,59 @@ async function guardedUpdate(userId: string, ref: TitleId, expected: TitleRecord
   return written ? ok({ previous: before, current: written }) : conflict(before, [expected]);
 }
 
+/** A SQL condition: the row is Seen with exactly the rating and review the caller showed, compared as stored. */
+function seenAsShown(shown: { rating: number; review: string | null }): SQL {
+  return sql`status = 'seen' and rating = ${shown.rating} and review is not distinct from ${shown.review}::text`;
+}
+
+/**
+ * The refusal when a write guarded by seenAsShown changed nothing. Still Seen
+ * means the rating or review is not the one shown: say that (stale_value), not
+ * "wrong state".
+ */
+function shownRefused(before: TitleRecord | null): Outcome {
+  if (before?.status === "seen") return fail({ code: "stale_value", status: "seen" });
+  return conflict(before, ["seen"]);
+}
+
 /**
  * Edits the rating, the review, or both, on a Seen title, at any time (VISION:
  * Your lists). An absent field stays as it is. A null or blank review clears it.
+ *
+ * `shown` is the rating and review the caller showed the user when they began
+ * the edit (issue 103). The edit goes ahead only while the row is Seen with
+ * exactly that rating and review, compared as stored (the review is not
+ * trimmed). If either changed since (another device, the AI connection),
+ * nothing changes and the result is stale_value. If the title is no longer
+ * Seen, the result is wrong_state, or not_found when it is on no list. So an
+ * edit never overwrites a rating or review the user did not see. The check is
+ * the same one removeRatingReview makes.
  */
 export async function updateRatingReview(
   userId: string,
   ref: TitleId,
   patch: RatingReviewPatch,
+  shown: ShownRatingReview,
   options: ActionOptions = {},
 ): Promise<Outcome> {
   const ids = checkIds(userId, ref);
   if (!ids.ok) return ids;
   const planned = planRatingReviewPatch(patch);
   if (!planned.ok) return planned;
+  const was = planShownRatingReview(shown);
+  if (!was.ok) return was;
   const now = options.now ?? new Date();
   const sets: SQL[] = [];
   if (planned.value.rating !== undefined) sets.push(sql`rating = ${planned.value.rating}`);
   if ("review" in planned.value) sets.push(sql`review = ${planned.value.review ?? null}`);
   sets.push(sql`updated_at = ${now.toISOString()}`);
-  return guardedUpdate(ids.value.userId, ids.value.ref, "seen", sql.join(sets, sql`, `));
+  const { userId: u, ref: r } = ids.value;
+  const { before, written } = await withPrevious(
+    u,
+    r,
+    sql`update title_status set ${sql.join(sets, sql`, `)} where ${pk(u, r)} and ${seenAsShown(was.value)} returning *`,
+  );
+  return written ? ok({ previous: before, current: written }) : shownRefused(before);
 }
 
 /**
@@ -348,21 +381,15 @@ export async function removeTitle(userId: string, ref: TitleId): Promise<Outcome
 export async function removeRatingReview(userId: string, ref: TitleId, shown: ShownRatingReview): Promise<Outcome> {
   const ids = checkIds(userId, ref);
   if (!ids.ok) return ids;
-  const planned = planRatingReviewRemoval(shown);
+  const planned = planShownRatingReview(shown);
   if (!planned.ok) return planned;
   const { userId: u, ref: r } = ids.value;
-  const { rating, review } = planned.value;
   const { before, written: deleted } = await withPrevious(
     u,
     r,
-    sql`delete from title_status
-        where ${pk(u, r)} and status = 'seen' and rating = ${rating} and review is not distinct from ${review}::text
-        returning *`,
+    sql`delete from title_status where ${pk(u, r)} and ${seenAsShown(planned.value)} returning *`,
   );
-  if (deleted) return ok({ previous: deleted, current: null });
-  // Still Seen, so the rating or review is not the one shown: say that, not "wrong state".
-  if (before?.status === "seen") return fail({ code: "stale_value", status: "seen" });
-  return conflict(before, ["seen"]);
+  return deleted ? ok({ previous: deleted, current: null }) : shownRefused(before);
 }
 
 /** Parses one side of an undo input. Null stays null. */

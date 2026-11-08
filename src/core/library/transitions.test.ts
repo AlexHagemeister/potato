@@ -5,9 +5,10 @@ import {
   cardGuardFor,
   columnsFor,
   isAllowedMove,
+  isChangedElsewhere,
   planMove,
   planRatingReviewPatch,
-  planRatingReviewRemoval,
+  planShownRatingReview,
   REPLACEABLE,
   seenRefused,
 } from "./transitions";
@@ -92,35 +93,35 @@ describe("cardGuardFor: a Discover card's tap never moves a title already on a l
   });
 });
 
-describe("planRatingReviewRemoval: what a removal says the user was shown (issue 43)", () => {
+describe("planShownRatingReview: what an edit or a removal says the user was shown (issues 43 and 103)", () => {
   test("keeps a valid rating and review as they are", () => {
-    expect(planRatingReviewRemoval({ rating: 4.5, review: "Loved it." })).toEqual({ ok: true, value: { rating: 4.5, review: "Loved it." } });
+    expect(planShownRatingReview({ rating: 4.5, review: "Loved it." })).toEqual({ ok: true, value: { rating: 4.5, review: "Loved it." } });
   });
 
   test("a review left out or null means none was shown", () => {
     for (const shown of [{ rating: 3 }, { rating: 3, review: null }]) {
-      expect(planRatingReviewRemoval(shown)).toEqual({ ok: true, value: { rating: 3, review: null } });
+      expect(planShownRatingReview(shown)).toEqual({ ok: true, value: { rating: 3, review: null } });
     }
   });
 
   test("keeps a shown review exactly, blank or long, so it compares with the stored row as it is", () => {
     for (const review of ["", "   ", " Padded. ", "x".repeat(20_000)]) {
-      expect(planRatingReviewRemoval({ rating: 3, review })).toEqual({ ok: true, value: { rating: 3, review } });
+      expect(planShownRatingReview({ rating: 3, review })).toEqual({ ok: true, value: { rating: 3, review } });
     }
   });
 
   test("rejects a review with a NUL character, which no stored review can hold", () => {
-    expect(planRatingReviewRemoval({ rating: 3, review: "a\u0000b" })).toMatchObject({ ok: false, error: { code: "invalid_review" } });
+    expect(planShownRatingReview({ rating: 3, review: "a\u0000b" })).toMatchObject({ ok: false, error: { code: "invalid_review" } });
   });
 
   test("needs the rating that was shown: a Seen title always has one", () => {
     for (const shown of [{}, { review: "Text." }, { rating: 0 }, { rating: 4.2 }, { rating: "4" }, null, undefined, "x", 4]) {
-      expect(planRatingReviewRemoval(shown)).toMatchObject({ ok: false, error: { code: "invalid_rating" } });
+      expect(planShownRatingReview(shown)).toMatchObject({ ok: false, error: { code: "invalid_rating" } });
     }
   });
 
   test("rejects a review that is not text", () => {
-    expect(planRatingReviewRemoval({ rating: 2, review: 42 })).toMatchObject({ ok: false, error: { code: "invalid_review" } });
+    expect(planShownRatingReview({ rating: 2, review: 42 })).toMatchObject({ ok: false, error: { code: "invalid_review" } });
   });
 });
 
@@ -187,5 +188,29 @@ describe("planRatingReviewPatch", () => {
 
   test("validates the rating", () => {
     expect(planRatingReviewPatch({ rating: 0 })).toMatchObject({ ok: false, error: { code: "invalid_rating" } });
+  });
+});
+
+describe("isChangedElsewhere: which refusals mean the title changed since the caller read it", () => {
+  test("wrong_state, not_found, and stale_value do", () => {
+    expect(isChangedElsewhere({ code: "wrong_state", status: "watchlist", expected: ["seen"] })).toBe(true);
+    expect(isChangedElsewhere(seenRefused())).toBe(true);
+    expect(isChangedElsewhere({ code: "not_found" })).toBe(true);
+    expect(isChangedElsewhere({ code: "stale_value", status: "seen" })).toBe(true);
+  });
+
+  test("bad input and an unknown user do not", () => {
+    for (const error of [
+      { code: "invalid_user" },
+      { code: "unknown_user" },
+      { code: "invalid_rating", rating: 6 },
+      { code: "invalid_review", message: "too long" },
+      { code: "invalid_title", message: "bad id" },
+      { code: "invalid_move", message: "no" },
+      { code: "empty_patch" },
+      { code: "invalid_snapshot", message: "bad" },
+    ] as const) {
+      expect(isChangedElsewhere(error)).toBe(false);
+    }
   });
 });

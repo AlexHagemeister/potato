@@ -29,8 +29,9 @@ const EVERY_STATUS = Object.keys({ watchlist: 0, passed: 0, skipped: 0, seen: 0 
  * sits open. So no card button (Pass, Skip, Watchlist, Seen it) and no
  * removeTitle ever replaces or deletes a Seen row, whatever the caller says it
  * showed. A Seen title changes only through the calls that name what the user
- * saw: updateRatingReview edits the rating and review, and removeRatingReview
- * takes them off the Seen list (Alex's ruling on issue 43: removing them is a
+ * saw, and only while the row still holds exactly that: updateRatingReview
+ * edits the rating and review (issue 103), and removeRatingReview takes them
+ * off the Seen list (Alex's ruling on issue 43: removing them is a
  * deliberate step, never one stray tap). Undo (restoreTitleState) can also
  * take a title off the Seen list, but only by naming the Seen row's exact
  * rating and review, as the action it undoes returned them.
@@ -46,6 +47,26 @@ export const REPLACEABLE: readonly TitleStatus[] = EVERY_STATUS.filter((s) => s 
  */
 export function seenRefused(): CoreError {
   return { code: "wrong_state", status: "seen", expected: [...REPLACEABLE] };
+}
+
+/**
+ * Whether a refused write means the title changed since the caller read it
+ * (another device, the AI connection), rather than bad input or an unknown
+ * user. Every write that names what the caller showed refuses this way when
+ * that no longer holds:
+ *
+ * - wrong_state: the title is on another list than the write needs (a list
+ *   move from the wrong list, a rating edit on a title no longer Seen, a card
+ *   write on a Seen title, a Discover card's tap on a title already on a list,
+ *   an undo of a row that moved).
+ * - not_found: the title is on no list now.
+ * - stale_value: the title is still Seen, with another rating or review.
+ *
+ * Nothing was written. Read the title again to show where it is now
+ * (readChangedElsewhere).
+ */
+export function isChangedElsewhere(error: CoreError): boolean {
+  return error.code === "wrong_state" || error.code === "not_found" || error.code === "stale_value";
 }
 
 /**
@@ -77,13 +98,14 @@ export function cardGuardFor(intent: CardIntent, shownOnNoList: unknown): CardGu
 }
 
 /**
- * Checks what a removal says the user was shown. The review is kept exactly as
+ * Checks the rating and review an edit or a removal says the user was shown
+ * (updateRatingReview and removeRatingReview). The review is kept exactly as
  * given, not normalized the way a write stores one: it is compared with the
  * stored row, which may hold text no write would store today (a blank review
  * put back by an undo), and the caller echoes the stored value. Left out or
  * null means no review was shown.
  */
-export function planRatingReviewRemoval(shown: unknown): Result<{ rating: number; review: string | null }> {
+export function planShownRatingReview(shown: unknown): Result<{ rating: number; review: string | null }> {
   const s = typeof shown === "object" && shown !== null ? (shown as Record<string, unknown>) : {};
   const rating = validateRating(s.rating);
   if (!rating.ok) return rating;

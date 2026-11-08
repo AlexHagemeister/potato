@@ -25,6 +25,7 @@ import {
 } from "@/core/library";
 import type { TitleId, TitleStatus } from "@/core/types";
 import { getCurrentUserForRequest } from "@/lib/current-user";
+import { ALREADY_SEEN, COPY_REVIEW, STALE_SEEN } from "./stale-copy";
 
 export type SortKind = "pass" | "skip" | "watchlist" | "seen";
 
@@ -40,14 +41,12 @@ export type DeckActionResult =
  * A card write refused because the title is Seen already, marked elsewhere (issues 65 and 74). One message per
  * button, each true for that tap. A Seen title always has a rating but may have no review.
  */
-const ALREADY_SEEN = "you already marked this Seen somewhere else";
 const STALE_SORT: Record<Exclude<SortKind, "seen">, string> = {
   pass: `Not passed: ${ALREADY_SEEN}, so it stays on your Seen list.`,
   skip: `Not skipped: ${ALREADY_SEEN}, so it stays on your Seen list.`,
   watchlist: `Not added to your Watchlist: ${ALREADY_SEEN}, so it stays on your Seen list.`,
 };
-const STALE_SEEN = `Not saved: ${ALREADY_SEEN}, and the rating there stays.`;
-const STALE_SEEN_TYPED = `${STALE_SEEN} Copy your review if you want to keep it.`;
+const STALE_SEEN_TYPED = `${STALE_SEEN} ${COPY_REVIEW}`;
 
 /**
  * A Discover card's tap refused because the title was put on a list, or skipped, elsewhere while the card was on
