@@ -26,6 +26,10 @@ export default async function ListsPage({ searchParams }: PageProps<"/lists">) {
 
   return (
     <ListsScreen
+      userId={user.id}
+      // New for each server render. Back restores the router's copy of a render, which keeps its id, so the screen
+      // can tell a fresh render from a restored copy (issue 76).
+      renderId={crypto.randomUUID()}
       lists={result.value}
       filters={filters}
       hasServices={settings.value.providerIds.length > 0}
