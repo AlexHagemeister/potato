@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { Card, CardUserState } from "@/core/deck-service/types";
 import { cardUserState } from "@/core/deck-service/user-state";
-import type { ActionOutcome } from "@/core/library/types";
+import type { ActionOutcome, TitleRecord } from "@/core/library/types";
 import type { TitleId, TitleStatus } from "@/core/types";
 import { RatingSheet } from "../../../_components/rating-sheet";
 import { Stars } from "../../../_components/stars";
@@ -14,6 +14,7 @@ import { DeckButtons } from "../../../_deck/deck-buttons";
 import { NoticePill, UndoPill } from "../../../_components/toast-pills";
 import { Screen } from "../../../_shell/screen";
 import { editRatingAction, removeRatingAction } from "../../../lists/actions";
+import { applyTitleChange } from "../../../lists/shown";
 
 // The full card for one title, opened from Search or Lists. The same card and
 // the same four buttons as the deck, except on a Seen title, which shows only
@@ -158,7 +159,7 @@ export function TitleScreen({ card }: { card: Card }) {
   const [toast, setToast] = useState<Toast | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const seq = useRef(0);
-  /** A save or undo landed on this screen. */
+  /** A change landed that the Lists rows kept for Back couldn't take: refresh the screen Back shows (landed). */
   const changed = useRef(false);
   /** A stale refusal couldn't read where the title is now: reload the card once the rating sheet closes. */
   const refreshOnClose = useRef(false);
@@ -168,14 +169,34 @@ export function TitleScreen({ card }: { card: Card }) {
     router.refresh();
   }, [sheet, router]);
 
-  // Back restores the previous screen from the router's cache. If this card changed the title, that copy is
-  // stale (a Lists row still on its old list), so once the next screen is up, refresh it from the server.
+  /** Back has taken this card off the screen. A save can still settle after that (issue 93). */
+  const gone = useRef(false);
+
+  // Back restores the previous screen from the router's cache. If this card changed the title in a way the Lists
+  // rows kept for Back couldn't take, that copy is stale, so once the next screen is up, refresh it from the server.
+  // A save still under way does that when it settles (landed).
   useEffect(() => {
     const flag = changed;
+    gone.current = false;
     return () => {
+      gone.current = true;
       if (flag.current) setTimeout(() => router.refresh(), 0);
     };
   }, [router]);
+
+  /**
+   * A write landed, or a refusal read where the title is now: `record` is the title's row as the server holds it.
+   * The Lists rows kept for Back take it at once (issues 93 and 110), whether or not this card is still on screen, so
+   * Back to Lists shows the title where it is now, and an Edit tapped there opens on what this card saved. No server
+   * refresh follows then: one that read before a Lists save made right after Back, and arrived after it, would put
+   * the old row back. Only a title the kept rows don't show (not loaded, or on no list) needs the refresh. Search
+   * fetches afresh on every visit.
+   */
+  function landed(record: TitleRecord | null) {
+    if (applyTitleChange(ref, record)) return;
+    changed.current = true;
+    if (gone.current) router.refresh();
+  }
 
   useEffect(() => {
     if (!toast) return;
@@ -184,7 +205,7 @@ export function TitleScreen({ card }: { card: Card }) {
   }, [toast]);
 
   function done(kind: SortKind, outcome: ActionOutcome) {
-    changed.current = true;
+    landed(outcome.current);
     // The write carries the title's true row, so a reload queued by an earlier refusal is no longer needed. It would
     // start the screen over and drop the Undo toast shown below.
     refreshOnClose.current = false;
@@ -259,12 +280,13 @@ export function TitleScreen({ card }: { card: Card }) {
    * until the sheet closes, and a later successful write cancels it (done, removeSeen).
    */
   function showTrueState(result: { current?: ActionOutcome["current"] }, sheetStaysOpen = false) {
-    changed.current = true;
     if (result.current === undefined) {
-      if (sheetStaysOpen) refreshOnClose.current = true;
+      changed.current = true;
+      if (sheetStaysOpen && !gone.current) refreshOnClose.current = true;
       else router.refresh();
       return;
     }
+    landed(result.current);
     setState(cardUserState(ref, result.current, new Date()));
   }
 
@@ -301,7 +323,7 @@ export function TitleScreen({ card }: { card: Card }) {
     }
     if (result.ok) {
       setSheet(null);
-      changed.current = true;
+      landed(result.value.current);
       refreshOnClose.current = false; // as in done(): the true row is here, and a reload would drop the Undo toast
       setState(cardUserState(ref, result.value.current, new Date()));
       setNotice(null);
@@ -332,6 +354,7 @@ export function TitleScreen({ card }: { card: Card }) {
     }
     setBusy(false);
     if (result.ok) {
+      landed(result.outcome.current);
       setState(cardUserState(ref, result.outcome.current, new Date()));
       setNotice(null);
     } else {

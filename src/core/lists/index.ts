@@ -12,3 +12,4 @@ export {
   type ListRowsPage,
   type TitleInfoLookup,
 } from "./lists";
+export { applyTitleRecord } from "./apply-record";

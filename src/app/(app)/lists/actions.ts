@@ -35,7 +35,7 @@ export type ActionResult<T> =
 
 const SIGNED_OUT = "You're signed out. Sign in again to save.";
 const STALE = "This title changed somewhere else. Your lists are up to date now.";
-const NOT_REMOVED_CHANGED = "Not removed: the rating or review changed somewhere else. Open Edit rating to see it.";
+const NOT_REMOVED_CHANGED = "Not removed: the rating or review changed since you opened this. Open Edit rating to see it.";
 const NOT_REMOVED_GONE = "Not removed: this title changed somewhere else and isn't on your Seen list now.";
 
 /*
@@ -80,7 +80,7 @@ function editRefused(current: TitleRecord | null | undefined, typed: boolean): s
     const reopen = typed
       ? `${COPY_REVIEW} Then cancel and open Edit rating again to see the new one.`
       : "Cancel and open Edit rating again to see the new one.";
-    return `Not saved: your rating or review changed somewhere else. ${reopen}`;
+    return `Not saved: your rating or review changed since you opened this. ${reopen}`;
   }
   return withCopy(`Not saved: this title left your Seen list somewhere else. ${whereNow(current)}`, typed);
 }
