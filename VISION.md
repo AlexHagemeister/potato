@@ -125,7 +125,7 @@ Each invariant carries its reason. Work items cite them by number.
 ## Constraints
 
 - **Non-commercial.** The movie data, the IMDb ratings, and the hosting are all free on terms that allow personal, non-commercial use only. Charging money for Potato requires different data licenses and a different hosting plan.
-- **Attribution.** The data providers require credit inside the app: TMDB for movie data, and JustWatch for streaming availability. The credits are mandatory, not decoration.
+- **Attribution.** The data providers require credit inside the app: TMDB for movie data, JustWatch for streaming availability, and IMDb for its ratings. The credits are mandatory, not decoration.
 
 # Possibility space
 
