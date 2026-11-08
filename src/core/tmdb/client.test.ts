@@ -58,7 +58,7 @@ describe("getTitleDetails", () => {
     expect(d?.title).toBe("The Matrix");
     expect(d?.imdbId).toBe("tt0133093");
     expect(d?.trailerYouTubeKey).toBe("anniv1");
-    expect(d?.providersByCountry.US.flatrate[0].name).toBe("YouTube TV");
+    expect(d?.providersByCountry?.US.flatrate[0].name).toBe("YouTube TV");
   });
 
   test("series use the tv path", async () => {
@@ -96,7 +96,7 @@ describe("getTitleDetails", () => {
     const d = await client.getTitleDetails("movie", 603);
     expect(calls.map((c) => c.path)).toEqual(["/movie/603", "/movie/603/watch/providers"]);
     expect(d?.title).toBe("The Matrix");
-    expect(d?.providersByCountry.US.flatrate.map((p) => p.id)).toEqual([8]);
+    expect(d?.providersByCountry?.US.flatrate.map((p) => p.id)).toEqual([8]);
   });
 
   test("stale providers whose refresh fails: the card still shows, with the stale providers", async () => {
@@ -111,6 +111,31 @@ describe("getTitleDetails", () => {
       expect(d?.title).toBe("The Matrix");
       expect(d?.providersByCountry).toEqual(first!.providersByCountry);
     }
+  });
+
+  test("providers refresh fails with nothing cached: availability is unknown (null), never {} (issue 30)", async () => {
+    for (const failure of [status(503), reset, timeout, notFound]) {
+      // Details are cached; the providers entry is gone (never kept), as when it was evicted.
+      const inner = new MemoryCacheStore();
+      const noProviders: CacheStore = {
+        get: (key) => inner.get(key),
+        set: async (key, data, expiresAt) => {
+          if (!key.includes(":providers:")) await inner.set(key, data, expiresAt);
+        },
+      };
+      const { client, calls } = setup({ "/movie/603": json(matrixDetails), "/movie/603/watch/providers": failure }, noProviders);
+      await client.getTitleDetails("movie", 603);
+      const d = await quietly(() => client.getTitleDetails("movie", 603));
+      expect(calls.map((c) => c.path).slice(0, 2)).toEqual(["/movie/603", "/movie/603/watch/providers"]);
+      expect(d?.title).toBe("The Matrix");
+      expect(d?.providersByCountry).toBeNull();
+    }
+  });
+
+  test("a title TMDB lists nowhere is known: {} (streams nowhere), not null", async () => {
+    const { client } = setup({ "/movie/603": json({ ...matrixDetails, "watch/providers": { results: {} } }) });
+    const d = await client.getTitleDetails("movie", 603);
+    expect(d?.providersByCountry).toEqual({});
   });
 
   test("cache miss after the details TTL refetches everything", async () => {
@@ -603,7 +628,7 @@ describe("expired details", () => {
     advance(TMDB_TTL_MS.details + 1);
     const d = await quietly(() => client.getTitleDetails("movie", 603));
     expect(d?.title).toBe("The Matrix");
-    expect(d?.providersByCountry.US.flatrate.map((p) => p.id)).toEqual([2528]);
+    expect(d?.providersByCountry?.US.flatrate.map((p) => p.id)).toEqual([2528]);
     const ids = await quietly(() => client.resolveImdbIds([{ mediaType: "movie", tmdbId: 603 }]));
     expect(ids.get("movie:603")).toBe("tt0133093");
     expect(calls.length).toBeGreaterThan(1); // the refetch was attempted

@@ -3,7 +3,6 @@
 // addressed by (media type, TMDB ID) (rule 1).
 
 import type { CacheEntry, CacheStore } from "../cache/cache-store";
-import { PostgresCacheStore } from "../cache/postgres-cache-store";
 import { mapWithConcurrency } from "../concurrency";
 import { formatTitleKey } from "../title-id";
 import type { Candidate, MediaType, TitleId } from "../types";
@@ -198,11 +197,15 @@ export function createTmdbClient(options: TmdbClientOptions) {
     return { core: normalized, providers: freshProviders };
   }
 
-  /** Everything a card shows. Null when TMDB has no such title. */
+  /**
+   * Everything a card shows. Null when TMDB has no such title. Its
+   * providersByCountry is null when availability is unknown (a failed
+   * refresh with nothing cached), never `{}`, which means it streams nowhere.
+   */
   async function getTitleDetails(mediaType: MediaType, tmdbId: number): Promise<TitleDetails | null> {
     const loaded = await loadDetails({ mediaType, tmdbId }, true);
     if (!loaded) return null;
-    return { ...loaded.core, providersByCountry: loaded.providers ?? {} };
+    return { ...loaded.core, providersByCountry: loaded.providers ?? null };
   }
 
   /**
@@ -458,18 +461,10 @@ export function createTmdbClient(options: TmdbClientOptions) {
 }
 
 /** A client using TMDB_API_READ_TOKEN from the environment. */
-export function createTmdbClientFromEnv(cache: CacheStore): TmdbClient {
+export function createTmdbClientFromEnv(cache: CacheStore, fetchFn?: FetchFn): TmdbClient {
   const token = process.env.TMDB_API_READ_TOKEN;
   if (!token) throw new Error("TMDB_API_READ_TOKEN is not set");
-  return createTmdbClient({ token, cache });
-}
-
-let appClient: TmdbClient | undefined;
-
-/** The app's TMDB client: environment token, Postgres cache (tmdb_cache). Created on first use. */
-export function getTmdb(): TmdbClient {
-  appClient ??= createTmdbClientFromEnv(new PostgresCacheStore());
-  return appClient;
+  return createTmdbClient({ token, cache, fetch: fetchFn });
 }
 
 function poolParams(pool: DiscoverPool): Params {

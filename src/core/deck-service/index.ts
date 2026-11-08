@@ -6,7 +6,7 @@
 import { PostgresRatingsStore } from "../imdb/postgres";
 import { getTitleState, getTitleStatesFor, getTopRatedSeen, getUserSettings, getUserTitleStates } from "../library";
 import { ok, type Result } from "../result";
-import { getTmdb } from "../tmdb/client";
+import { getTmdb } from "../tmdb/app-client";
 import type { TitleId } from "../types";
 import { createDeckService, type DeckLibrary, type DeckService } from "./service";
 import type { Card, DeckPage, DeckRequest } from "./types";

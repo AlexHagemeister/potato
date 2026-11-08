@@ -84,7 +84,7 @@ async function run(label: string, request: DeckRequest): Promise<DeckPage> {
   );
   const rated = page.cards.filter((c) => c.imdb.kind === "rated").length;
   console.log(
-    `  IMDb rated on ${rated}/${page.cards.length}; on my services ${page.cards.filter((c) => c.streaming.onMyServices).length}/${page.cards.length}; ` +
+    `  IMDb rated on ${rated}/${page.cards.length}; on my services ${page.cards.filter((c) => c.streaming.kind === "known" && c.streaming.onMyServices).length}/${page.cards.length}; ` +
       `movies ${page.cards.filter((c) => c.mediaType === "movie").length}; first: ` +
       page.cards
         .slice(0, 4)
@@ -151,7 +151,7 @@ try {
     const trimmed = {
       ...c,
       synopsis: c.synopsis.length > 90 ? `${c.synopsis.slice(0, 90)}...` : c.synopsis,
-      streaming: { ...c.streaming, providers: c.streaming.providers.slice(0, 4) },
+      streaming: c.streaming.kind === "known" ? { ...c.streaming, providers: c.streaming.providers.slice(0, 4) } : c.streaming,
     };
     console.log(`getCard ${ref.mediaType}:${ref.tmdbId} in ${ms} ms:\n${JSON.stringify(trimmed, null, 2)}`);
   }

@@ -10,7 +10,7 @@ import { createTmdbClientFromEnv, type TitleDetails } from "../src/core/tmdb";
 const COUNTRY = "US";
 
 function describeTitle(d: TitleDetails): string {
-  const providers = d.providersByCountry[COUNTRY];
+  const providers = d.providersByCountry?.[COUNTRY];
   const names = (list: { name: string }[] | undefined) => (list?.length ? list.map((p) => p.name).join(", ") : "none");
   return [
     `${d.title} (${d.year ?? "?"}) [${d.mediaType}:${d.tmdbId}]`,
@@ -23,7 +23,7 @@ function describeTitle(d: TitleDetails): string {
     `  ${COUNTRY} subscription: ${names(providers?.flatrate)}`,
     `  ${COUNTRY} rent: ${names(providers?.rent)}`,
     `  ${COUNTRY} buy: ${names(providers?.buy)}`,
-    `  countries with data: ${Object.keys(d.providersByCountry).length}`,
+    `  countries with data: ${d.providersByCountry ? Object.keys(d.providersByCountry).length : "unknown (lookup failed)"}`,
   ].join("\n");
 }
 

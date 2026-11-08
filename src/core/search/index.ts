@@ -4,7 +4,7 @@
 
 import { getUserTitleStates } from "../library";
 import type { Result } from "../result";
-import { getTmdb } from "../tmdb/client";
+import { getTmdb } from "../tmdb/app-client";
 import { createSearchService, type SearchService } from "./service";
 import type { SearchPage } from "./types";
 
