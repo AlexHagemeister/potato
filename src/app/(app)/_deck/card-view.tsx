@@ -88,7 +88,7 @@ function Streaming({ streaming }: { streaming: Card["streaming"] }) {
       </h3>
       {streaming.kind === "unknown" && (
         <p className="text-muted" data-availability="unknown">
-          Streaming info isn&apos;t available right now. Check back later.
+          Streaming info isn&apos;t available right now.
         </p>
       )}
       {streaming.kind === "known" && providers.length === 0 && (

@@ -393,7 +393,7 @@ describe("getDeck: on my services", () => {
 
     const all = cardsOf((await deck(make(), { mode: "popular", filters: { mediaTypes: ["tv"] } })).page);
     const byKey = new Map(all.map((c) => [formatTitleKey(c), c.streaming]));
-    expect(byKey.get("tv:2")).toEqual({ kind: "unknown", country: "GB", attribution: JUSTWATCH_ATTRIBUTION });
+    expect(byKey.get("tv:2") as unknown).toEqual({ kind: "unknown", country: "GB", attribution: JUSTWATCH_ATTRIBUTION, providers: [] }); // providers: [] only for pre-#30 bundles
     expect(byKey.get("tv:3")).toMatchObject({ kind: "known", providers: [], onMyServices: false });
   });
 });
@@ -768,7 +768,7 @@ describe("getCard", () => {
     w.details["movie:603"] = detailsFor(s, { providersByCountry: null });
     const result = await fakeService(w).service.getCard(USER, { mediaType: "movie", tmdbId: 603 });
     if (!result.ok) throw new Error("expected ok");
-    expect(result.value.streaming).toEqual({ kind: "unknown", country: "US", attribution: JUSTWATCH_ATTRIBUTION });
+    expect(result.value.streaming as unknown).toEqual({ kind: "unknown", country: "US", attribution: JUSTWATCH_ATTRIBUTION, providers: [] }); // providers: [] only for pre-#30 bundles, outside the type
   });
 
   test("IMDb: none without a mapping or a dataset row, unavailable when the lookup fails or the table is empty", async () => {

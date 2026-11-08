@@ -8,7 +8,7 @@ import { userSettings } from "@/db/schema";
 import { FOREIGN_KEY_VIOLATION, pgErrorCode } from "../pg-error";
 import { fail, ok, validateUserId, type Result } from "../result";
 import { isDiscoveryMode, normalizeDeckChoice, type DeckChoice } from "../filters";
-import { getTmdb } from "../tmdb/client";
+import { getTmdb } from "../tmdb/app-client";
 import type { WatchRegion } from "../tmdb/types";
 
 /** Largest value a Postgres integer holds. */

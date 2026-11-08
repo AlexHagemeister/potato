@@ -6,7 +6,7 @@ import { logoUrl } from "../tmdb/images";
 import type { CountryProviders, TitleDetails, WatchProvider } from "../tmdb/types";
 import type { ImdbRating } from "../types";
 import { JUSTWATCH_ATTRIBUTION } from "./constants";
-import type { Card, CardImdb, CardProvider, CardStreaming, CardUserState, StreamingOffer } from "./types";
+import type { Card, CardImdb, CardProvider, CardStreaming, CardUserState, StreamingOffer, UnknownStreaming } from "./types";
 
 type OfferKind = keyof Omit<CountryProviders, "link">;
 
@@ -42,7 +42,15 @@ export function streamingFor(
   country: string,
   userProviderIds: readonly number[],
 ): CardStreaming {
-  if (details.providersByCountry === null) return { kind: "unknown", country, attribution: JUSTWATCH_ATTRIBUTION };
+  if (details.providersByCountry === null) {
+    const unknown: UnknownStreaming = { kind: "unknown", country, attribution: JUSTWATCH_ATTRIBUTION };
+    // Old app bundles (built before issue 30, for example a home-screen app left
+    // open across a deploy) read `providers` without checking `kind`, and would
+    // crash on this card. An empty list keeps them working: they show their old
+    // "not streaming" line. It stays out of the type, so new code can't read it.
+    // Harmless to keep; safe to drop once no pre-#30 bundle can be running.
+    return Object.assign(unknown, { providers: [] });
+  }
   const listing = details.providersByCountry[country];
   const mine = new Set(userProviderIds);
   const byId = new Map<number, { provider: WatchProvider; offers: StreamingOffer[]; streams: boolean }>();

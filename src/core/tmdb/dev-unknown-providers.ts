@@ -14,7 +14,7 @@
 // explicit opt-in variable set only on the dev server's command line.
 
 import { DEV_DATABASE_NAME, databaseNameFromUrl } from "../auth/dev-user";
-import type { CacheEntry, CacheStore } from "../cache/cache-store";
+import type { CacheStore } from "../cache/cache-store";
 import { formatTitleKey, parseTitleKey } from "../title-id";
 import type { FetchFn } from "./http";
 
@@ -65,20 +65,13 @@ export function withUnknownProviders(
   cache: CacheStore,
   fetchFn: FetchFn,
 ): { cache: CacheStore; fetch: FetchFn } {
-  const hidden = (key: string) => key.includes(":providers:") && titles.has(providersTitle(key) ?? "");
+  const hidden = (key: string) => titles.has(providersTitle(key) ?? "");
+  const getMany = cache.getMany?.bind(cache);
   return {
     cache: {
       get: async (key) => (hidden(key) ? null : cache.get(key)),
-      getMany: async (keys) => {
-        const visible = keys.filter((k) => !hidden(k));
-        if (cache.getMany) return cache.getMany(visible);
-        const out = new Map<string, CacheEntry>();
-        for (const k of visible) {
-          const entry = await cache.get(k);
-          if (entry) out.set(k, entry);
-        }
-        return out;
-      },
+      // Without getMany on the store, the client falls back to get per key, which hides the same entries.
+      ...(getMany && { getMany: (keys: readonly string[]) => getMany(keys.filter((k) => !hidden(k))) }),
       set: (key, data, expiresAt) => cache.set(key, data, expiresAt),
     },
     fetch: async (input, init) => {
