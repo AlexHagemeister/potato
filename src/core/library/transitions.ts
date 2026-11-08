@@ -31,7 +31,9 @@ const EVERY_STATUS = Object.keys({ watchlist: 0, passed: 0, skipped: 0, seen: 0 
  * showed. A Seen title changes only through the calls that name what the user
  * saw: updateRatingReview edits the rating and review, and removeRatingReview
  * takes them off the Seen list (Alex's ruling on issue 43: removing them is a
- * deliberate step, never one stray tap).
+ * deliberate step, never one stray tap). Undo (restoreTitleState) can also
+ * take a title off the Seen list, but only by naming the Seen row's exact
+ * rating and review, as the action it undoes returned them.
  *
  * The SQL guards and the refusal's `expected` are both built from this.
  */
@@ -47,17 +49,23 @@ export function seenRefused(): CoreError {
 }
 
 /**
- * Checks what a removal says the user was shown, and normalizes it the way a
- * write stores it (a blank review is no review), so it compares equal to the
- * stored row.
+ * Checks what a removal says the user was shown. The review is kept exactly as
+ * given, not normalized the way a write stores one: it is compared with the
+ * stored row, which may hold text no write would store today (a blank review
+ * put back by an undo), and the caller echoes the stored value. Left out or
+ * null means no review was shown.
  */
 export function planRatingReviewRemoval(shown: unknown): Result<{ rating: number; review: string | null }> {
   const s = typeof shown === "object" && shown !== null ? (shown as Record<string, unknown>) : {};
   const rating = validateRating(s.rating);
   if (!rating.ok) return rating;
-  const review = validateReview(s.review);
-  if (!review.ok) return review;
-  return ok({ rating: rating.value, review: review.value });
+  const review = s.review ?? null;
+  if (review !== null && typeof review !== "string") {
+    return fail({ code: "invalid_review", message: "review must be a string or null" });
+  }
+  // Postgres text cannot hold a NUL character, so no stored review has one, and the parameter would fail.
+  if (review?.includes("\u0000")) return fail({ code: "invalid_review", message: "review contains a NUL character" });
+  return ok({ rating: rating.value, review });
 }
 
 /** The four card buttons, as row writes. */

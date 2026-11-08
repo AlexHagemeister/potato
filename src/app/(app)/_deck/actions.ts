@@ -62,6 +62,7 @@ function messageFor(error: CoreError, undo: boolean): string {
     case "invalid_review":
       return "That review can't be saved. Try shortening it.";
     case "wrong_state":
+    case "stale_value":
     case "not_found":
       if (undo) return "Couldn't undo: this title changed since.";
       break;

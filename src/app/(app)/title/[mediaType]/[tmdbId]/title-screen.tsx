@@ -276,7 +276,12 @@ export function TitleScreen({ card }: { card: Card }) {
       return null;
     }
     if (!result.stale) return result.error;
-    return reloadStale();
+    // Changed elsewhere since the sheet opened: close it, show where the title is now, and say why nothing was
+    // removed. The sheet doesn't stay open, since its rating and review are no longer the stored ones.
+    setSheet(null);
+    showTrueState(result);
+    fail(result.error);
+    return null;
   }
 
   function reloadStale(): null {

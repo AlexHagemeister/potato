@@ -76,10 +76,20 @@ describe("planRatingReviewRemoval: what a removal says the user was shown (issue
     expect(planRatingReviewRemoval({ rating: 4.5, review: "Loved it." })).toEqual({ ok: true, value: { rating: 4.5, review: "Loved it." } });
   });
 
-  test("a review left out, null, or blank means none was shown, as a write would have stored it", () => {
-    for (const shown of [{ rating: 3 }, { rating: 3, review: null }, { rating: 3, review: "" }, { rating: 3, review: "  " }]) {
+  test("a review left out or null means none was shown", () => {
+    for (const shown of [{ rating: 3 }, { rating: 3, review: null }]) {
       expect(planRatingReviewRemoval(shown)).toEqual({ ok: true, value: { rating: 3, review: null } });
     }
+  });
+
+  test("keeps a shown review exactly, blank or long, so it compares with the stored row as it is", () => {
+    for (const review of ["", "   ", " Padded. ", "x".repeat(20_000)]) {
+      expect(planRatingReviewRemoval({ rating: 3, review })).toEqual({ ok: true, value: { rating: 3, review } });
+    }
+  });
+
+  test("rejects a review with a NUL character, which no stored review can hold", () => {
+    expect(planRatingReviewRemoval({ rating: 3, review: "a\u0000b" })).toMatchObject({ ok: false, error: { code: "invalid_review" } });
   });
 
   test("needs the rating that was shown: a Seen title always has one", () => {

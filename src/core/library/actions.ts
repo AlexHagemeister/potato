@@ -23,6 +23,7 @@ import { getDb } from "@/db/client";
 import { FOREIGN_KEY_VIOLATION, pgErrorCode } from "../pg-error";
 import { fail, ok, validateUserId, type Result } from "../result";
 import type { TitleId, TitleStatus } from "../types";
+import { getTitleState } from "./queries";
 import { recordFromJson } from "./rows";
 import {
   columnsFor,
@@ -272,23 +273,32 @@ export async function removeTitle(userId: string, ref: TitleId): Promise<Outcome
     r,
     sql`delete from title_status where ${pk(u, r)} and ${statusIn(sql`status`, REPLACEABLE)} returning *`,
   );
-  // Nothing deleted, though a row was there: the guard refused the row it locked, which can only be a Seen row.
-  if (!deleted && before) return fail(seenRefused());
+  if (!deleted && before) {
+    // Nothing deleted, though the snapshot had a row. Either the guard refused a Seen row, or the row changed
+    // between the snapshot and the delete: marked Seen (refused too) or deleted (already removed).
+    if (before.status === "seen") return fail(seenRefused());
+    const now = await getTitleState(u, r);
+    if (!now.ok) return now;
+    if (now.value?.status === "seen") return fail(seenRefused());
+  }
   return ok({ previous: deleted, current: null });
 }
 
 /**
  * Removes a Seen title's rating and review, the one deliberate way to take a
- * title off the Seen list (Alex's ruling on issue 43, VISION invariants 6 and
+ * title off the Seen list other than undoing the action that put it there
+ * (Alex's ruling on issue 43, VISION invariants 6 and
  * 7). The row is deleted, so the title is on no list: it can come back to the
  * deck, and any card button sorts it from there.
  *
  * `shown` is the rating and review the caller showed the user before they
  * chose to remove them. The delete goes ahead only while the row is Seen with
- * exactly that rating and review. If either changed since (another device, the
- * AI connection), or the title is no longer Seen, nothing changes and the
- * result is wrong_state, or not_found when the title is on no list. So a
- * removal never erases a rating or review the user did not see.
+ * exactly that rating and review, compared as stored (the review is not
+ * trimmed). If either changed since (another device, the AI connection),
+ * nothing changes and the result is stale_value. If the title is no longer
+ * Seen, the result is wrong_state, or not_found when it is on no list. So a
+ * removal never erases a rating or review the user did not see. Undo can also
+ * take a title off the Seen list, under the same check (restoreTitleState).
  *
  * Undo (restoreTitleState) puts the row back exactly.
  */
@@ -306,7 +316,10 @@ export async function removeRatingReview(userId: string, ref: TitleId, shown: Sh
         where ${pk(u, r)} and status = 'seen' and rating = ${rating} and review is not distinct from ${review}::text
         returning *`,
   );
-  return deleted ? ok({ previous: deleted, current: null }) : conflict(before, ["seen"]);
+  if (deleted) return ok({ previous: deleted, current: null });
+  // Still Seen, so the rating or review is not the one shown: say that, not "wrong state".
+  if (before?.status === "seen") return fail({ code: "stale_value", status: "seen" });
+  return conflict(before, ["seen"]);
 }
 
 /** Parses one side of an undo input. Null stays null. */
@@ -321,10 +334,13 @@ function parseSide(input: unknown, ref: TitleId): Result<TitleRecord | null> {
  *
  * It is a compare-and-set: it changes the row only while the row is still the
  * outcome's `current` (same status and updated_at, or still absent when
- * `current` is null). If the title changed since (another device, a later
- * edit, the AI connection), nothing changes and the result is wrong_state
- * (the row is somewhere else) or not_found (the row is gone). So a stale undo
- * never discards a newer change.
+ * `current` is null). When `current` is Seen, the row must also still hold
+ * exactly its rating and review, so an undo built by hand can't take a title
+ * off the Seen list without naming what it erases (issue 43). If the title
+ * changed since (another device, a later edit, the AI connection), nothing
+ * changes and the result is wrong_state (the row is somewhere else),
+ * stale_value (still Seen, with another rating or review), or not_found (the
+ * row is gone). So a stale undo never discards a newer change.
  *
  * The result is itself an outcome, so passing it back redoes the action.
  */
@@ -345,8 +361,19 @@ export async function restoreTitleState(userId: string, ref: TitleId, undo: Undo
   // The action made no change (removing a title that had no row): nothing to undo.
   if (!p && !c) return ok({ previous: null, current: null });
 
-  // Only the row the action left behind may be changed.
-  const isCurrent = c ? sql`status = ${c.status} and updated_at = ${c.updatedAt.toISOString()}` : null;
+  // Only the row the action left behind may be changed. A Seen row must also still hold the exact rating and
+  // review the action returned, so an undo input built by hand can't erase ones the caller never named (issue 43).
+  const isCurrent = c
+    ? c.status === "seen"
+      ? sql`status = 'seen' and updated_at = ${c.updatedAt.toISOString()}
+            and rating = ${c.rating} and review is not distinct from ${c.review}::text`
+      : sql`status = ${c.status} and updated_at = ${c.updatedAt.toISOString()}`
+    : null;
+  /** The refusal when the row is no longer the action's `current`. */
+  const refused = (before: TitleRecord | null, current: TitleRecord): Outcome =>
+    before?.status === "seen" && current.status === "seen" && before.updatedAt.getTime() === current.updatedAt.getTime()
+      ? fail({ code: "stale_value", status: "seen" })
+      : conflict(before, [current.status]);
 
   return guardUser(async () => {
     if (!p && c && isCurrent) {
@@ -356,7 +383,7 @@ export async function restoreTitleState(userId: string, ref: TitleId, undo: Undo
         r,
         sql`delete from title_status where ${pk(u, r)} and ${isCurrent} returning *`,
       );
-      return written ? ok({ previous: written, current: null }) : conflict(before, [c.status]);
+      return written ? ok({ previous: written, current: null }) : refused(before, c);
     }
 
     if (p && !c) {
@@ -392,6 +419,6 @@ export async function restoreTitleState(userId: string, ref: TitleId, undo: Undo
           where ${pk(u, r)} and ${isCurrent}
           returning *`,
     );
-    return written ? ok({ previous: before, current: written }) : conflict(before, [c!.status]);
+    return written ? ok({ previous: before, current: written }) : refused(before, c!);
   });
 }

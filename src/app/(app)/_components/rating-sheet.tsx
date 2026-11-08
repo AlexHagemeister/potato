@@ -1,9 +1,17 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { REVIEW_MAX_LENGTH } from "@/core/library/types";
 import { Poster } from "./poster";
 import { StarInput } from "./star-input";
+
+/**
+ * How long the removal's Remove button ignores taps after the confirmation opens (issue 43). Longer than a double
+ * tap (iOS counts taps up to about 300 ms apart), shorter than reading the question. This, not where the buttons
+ * sit, is what stops a double tap on "Remove rating and review" from confirming: the trigger can sit anywhere on
+ * screen, depending on the phone, the scroll, the title's length, and the text size.
+ */
+export const REMOVE_ARM_MS = 600;
 
 export interface RatingSheetProps {
   /** "Mark as seen" or "Edit rating". */
@@ -36,9 +44,43 @@ export function RatingSheet(props: RatingSheetProps) {
   const [error, setError] = useState<string | null>(null);
   // The removal's confirmation is up.
   const [confirming, setConfirming] = useState(false);
+  // When the confirmation opened (performance.now()), for the REMOVE_ARM_MS gate.
+  const confirmOpenedAt = useRef(0);
+  const keepRef = useRef<HTMLButtonElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  function openConfirm() {
+    confirmOpenedAt.current = performance.now();
+    setConfirming(true);
+  }
+
+  function closeConfirm() {
+    if (!pending) setConfirming(false);
+  }
+
+  // Keep, the safe answer, takes focus when the confirmation opens, so VoiceOver reads the question and Enter keeps.
+  // When it closes, focus goes back to the trigger, once the sheet behind is no longer inert.
+  const wasConfirming = useRef(false);
+  useEffect(() => {
+    if (confirming) keepRef.current?.focus();
+    else if (wasConfirming.current) triggerRef.current?.focus();
+    wasConfirming.current = confirming;
+  }, [confirming]);
+
+  // Escape closes the confirmation, unless the removal is already on its way.
+  useEffect(() => {
+    if (!confirming || pending) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setConfirming(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [confirming, pending]);
 
   async function remove() {
     if (!props.onRemove || pending) return;
+    // A tap this soon after the confirmation opened is the second half of a double tap on the trigger.
+    if (performance.now() - confirmOpenedAt.current < REMOVE_ARM_MS) return;
     setPending(true);
     setError(null);
     let message: string | null;
@@ -80,7 +122,10 @@ export function RatingSheet(props: RatingSheetProps) {
       aria-labelledby="rating-sheet-heading"
       className="sheet-in fixed inset-0 z-50 flex flex-col bg-background"
     >
-      <header className="grid shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b border-hairline px-2 pt-[env(safe-area-inset-top)]">
+      {/* Inert behind the removal's confirmation, so VoiceOver and the keyboard can't reach Save or Cancel there. */}
+      <header
+        inert={confirming}
+        className="grid shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b border-hairline px-2 pt-[env(safe-area-inset-top)]">
         {/* Disabled while saving: the save can't be called back, so Cancel would hide its result. */}
         <button
           type="button"
@@ -103,7 +148,9 @@ export function RatingSheet(props: RatingSheetProps) {
         </button>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-5 pb-[calc(env(safe-area-inset-bottom)+1.5rem)]">
+      <div
+        inert={confirming}
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-5 pb-[calc(env(safe-area-inset-bottom)+1.5rem)]">
         <div className="mb-6 flex items-center gap-3">
           <Poster url={props.posterUrl} title={props.title} width={48} />
           <div className="min-w-0">
@@ -136,10 +183,11 @@ export function RatingSheet(props: RatingSheetProps) {
 
         {props.onRemove && (
           // Set well apart from Save and the stars, and it only opens a confirmation: removing takes two
-          // deliberate taps in two different places (issue 43).
+          // deliberate taps (issue 43).
           <button
+            ref={triggerRef}
             type="button"
-            onClick={() => setConfirming(true)}
+            onClick={openConfirm}
             disabled={pending}
             className="mx-auto mt-12 block h-11 px-4 text-sm font-medium text-red-400 disabled:text-muted"
           >
@@ -149,7 +197,7 @@ export function RatingSheet(props: RatingSheetProps) {
       </div>
 
       {confirming && (
-        <div className="fixed inset-0 z-10 flex flex-col justify-end bg-black/60" onClick={() => !pending && setConfirming(false)}>
+        <div className="fixed inset-0 z-10 flex flex-col justify-end bg-black/60" onClick={closeConfirm}>
           <div
             role="alertdialog"
             aria-modal="true"
@@ -164,8 +212,18 @@ export function RatingSheet(props: RatingSheetProps) {
             <p id="remove-rating-body" className="mt-2 px-2 text-center text-sm text-muted">
               Your stars and review for {props.title} will be deleted, and it leaves your Seen list.
             </p>
-            {/* The confirming button sits at the bottom of the screen, nowhere near the tap that opened this. */}
+            {/* Keep comes first, nearer the trigger, and Remove sits last, at the bottom edge. Layout alone can't keep
+                Remove out from under the trigger on every phone, so Remove also ignores taps for REMOVE_ARM_MS. */}
             <div className="mt-5 flex flex-col gap-2">
+              <button
+                ref={keepRef}
+                type="button"
+                onClick={closeConfirm}
+                disabled={pending}
+                className="h-14 rounded-2xl bg-surface-raised font-semibold text-accent disabled:text-muted"
+              >
+                Keep
+              </button>
               <button
                 type="button"
                 onClick={() => void remove()}
@@ -173,14 +231,6 @@ export function RatingSheet(props: RatingSheetProps) {
                 className="h-14 rounded-2xl bg-surface-raised font-semibold text-red-400 disabled:text-muted"
               >
                 {pending ? "Removing…" : "Remove"}
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirming(false)}
-                disabled={pending}
-                className="h-14 rounded-2xl bg-surface-raised font-semibold text-accent disabled:text-muted"
-              >
-                Keep
               </button>
             </div>
           </div>

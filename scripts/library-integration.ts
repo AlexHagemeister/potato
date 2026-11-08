@@ -308,11 +308,10 @@ try {
   console.log("Removing a rating and review (issue 43)");
 
   await check("removeRatingReview with the rating and review shown deletes the row; undo restores it exactly", async () => {
-    // From markSeen and from a Watchlist move, with and without a review. A blank shown review matches none.
+    // From markSeen and from a Watchlist move, with and without a review. A shown review left out means none.
     const cases = [
       { via: "markSeen", rating: 4.5, review: "Loved it.", shown: "Loved it." },
       { via: "markSeen", rating: 0.5, review: null, shown: null },
-      { via: "markSeen", rating: 3, review: null, shown: "" },
       { via: "markSeen", rating: 2, review: null, shown: undefined },
       { via: "move", rating: 5, review: "Again.", shown: "Again." },
     ] as const;
@@ -356,15 +355,34 @@ try {
       { rating: 5, review: "elsewhere." },
     ]) {
       const r = await lib.removeRatingReview(A, ref, shown);
-      assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "seen", expected: ["seen"] } }, JSON.stringify(shown));
+      // Its own code: the title is Seen as expected, but not with what was shown.
+      assert.deepEqual(r, { ok: false, error: { code: "stale_value", status: "seen" } }, JSON.stringify(shown));
       assert.deepEqual(await state(A, ref), before, JSON.stringify(shown));
     }
-    // A shown review that is null never matches a stored one, and a shown one never matches none.
+    // A shown review that is null never matches a stored one, and a shown one never matches none. A blank shown
+    // review is compared as it is, so it doesn't match none either.
     const bare = fresh();
     unwrap(await lib.markSeen(A, bare, { rating: 3 }, { now: tick() }));
-    const r = await lib.removeRatingReview(A, bare, { rating: 3, review: "Something." });
-    assert.equal(!r.ok && r.error.code, "wrong_state");
+    for (const review of ["Something.", "", "  "]) {
+      const r = await lib.removeRatingReview(A, bare, { rating: 3, review });
+      assert.equal(!r.ok && r.error.code, "stale_value", JSON.stringify(review));
+    }
     assert.equal((await state(A, bare))?.status, "seen");
+  });
+
+  await check("a Seen row whose stored review is blank (put back by an undo) can be removed by showing it as stored", async () => {
+    // No write stores a blank review, but restoreTitleState puts back whatever the undo carries.
+    const ref = fresh();
+    unwrap(await lib.markSeen(A, ref, { rating: 3, review: "Placeholder." }, { now: tick() }));
+    const removed = unwrap(await lib.removeRatingReview(A, ref, { rating: 3, review: "Placeholder." }));
+    const blank = JSON.parse(JSON.stringify(removed));
+    blank.previous.review = "   ";
+    unwrap(await lib.restoreTitleState(A, ref, blank));
+    assert.equal((await state(A, ref))?.review, "   ");
+    const none = await lib.removeRatingReview(A, ref, { rating: 3, review: null });
+    assert.equal(!none.ok && none.error.code, "stale_value");
+    unwrap(await lib.removeRatingReview(A, ref, { rating: 3, review: "   " }));
+    assert.equal(await rowCount(A, ref), 0);
   });
 
   await check("two devices: a removal shown an older review never erases a newer one written elsewhere", async () => {
@@ -373,7 +391,7 @@ try {
     unwrap(await lib.updateRatingReview(A, ref, { rating: 4, review: "Rewatched, better." }, { now: tick() })); // elsewhere
     const after = await state(A, ref);
     const r = await lib.removeRatingReview(A, ref, { rating: 3, review: "First take." });
-    assert.equal(!r.ok && r.error.code, "wrong_state");
+    assert.equal(!r.ok && r.error.code, "stale_value");
     assert.deepEqual(await state(A, ref), after);
   });
 
@@ -432,6 +450,55 @@ try {
       assert.deepEqual(await lib.removeTitle(A, ref), { ok: false, error: { code: "wrong_state", status: "seen", expected: NOT_SEEN } });
       assert.deepEqual(await state(A, ref), before);
     }
+  });
+
+  await check("two removeTitle calls at the same instant both succeed: a row that vanished is not called Seen", async () => {
+    for (let i = 0; i < 20; i++) {
+      const ref = fresh();
+      unwrap(await lib.watchlistTitle(A, ref, { now: tick() }));
+      const both = await Promise.all([lib.removeTitle(A, ref), lib.removeTitle(A, ref)]);
+      for (const r of both) assert.ok(r.ok, `round ${i}: ${JSON.stringify(r)}`);
+      assert.equal(both.filter((r) => r.ok && r.value.previous !== null).length, 1, `round ${i}: exactly one deleted the row`);
+      assert.equal(await rowCount(A, ref), 0, `round ${i}`);
+    }
+  });
+
+  await check("an undo built by hand can't take a title off the Seen list without its exact rating and review", async () => {
+    // markSeen on a new title: undo deletes the row. Forge the current side with another rating or review.
+    const made = fresh();
+    const seen = JSON.parse(JSON.stringify(unwrap(await lib.markSeen(A, made, { rating: 4, review: "Mine." }, { now: tick() }))));
+    const before = await state(A, made);
+    for (const forged of [{ rating: 3 }, { review: "Other." }, { review: null }]) {
+      const r = await lib.restoreTitleState(A, made, { ...seen, current: { ...seen.current, ...forged } });
+      assert.deepEqual(r, { ok: false, error: { code: "stale_value", status: "seen" } }, JSON.stringify(forged));
+      assert.deepEqual(await state(A, made), before, JSON.stringify(forged));
+    }
+    // Watchlist to Seen: undo moves the row back to Watchlist. Same check.
+    const moved = fresh();
+    unwrap(await lib.watchlistTitle(A, moved, { now: tick() }));
+    const move = JSON.parse(
+      JSON.stringify(unwrap(await lib.moveTitle(A, moved, { from: "watchlist", to: "seen", rating: 5, review: "Yes." }, { now: tick() }))),
+    );
+    const movedBefore = await state(A, moved);
+    const r = await lib.restoreTitleState(A, moved, { ...move, current: { ...move.current, review: "No." } });
+    assert.deepEqual(r, { ok: false, error: { code: "stale_value", status: "seen" } });
+    assert.deepEqual(await state(A, moved), movedBefore);
+    // The real undo values still work.
+    unwrap(await lib.restoreTitleState(A, made, seen));
+    assert.equal(await rowCount(A, made), 0);
+    unwrap(await lib.restoreTitleState(A, moved, move));
+    assert.equal((await state(A, moved))?.status, "watchlist");
+  });
+
+  await check("a removal, its undo, and the redo (the undo's result passed back) all pass the Seen value check", async () => {
+    const ref = fresh();
+    unwrap(await lib.markSeen(A, ref, { rating: 2.5, review: "Meh." }, { now: tick() }));
+    const before = await state(A, ref);
+    const removed = unwrap(await lib.removeRatingReview(A, ref, { rating: 2.5, review: "Meh." }));
+    const undone = unwrap(await lib.restoreTitleState(A, ref, JSON.parse(JSON.stringify(removed))));
+    assert.deepEqual(await state(A, ref), before);
+    unwrap(await lib.restoreTitleState(A, ref, JSON.parse(JSON.stringify(undone))));
+    assert.equal(await rowCount(A, ref), 0);
   });
 
   await check("markSeen with no review on a title that was not seen writes no review", async () => {
