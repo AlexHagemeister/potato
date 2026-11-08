@@ -8,7 +8,7 @@ import { titleIdError, type TitleId } from "../title-id";
 import type { TitleStatus } from "../types";
 import { RATING_MAX, RATING_MIN, REVIEW_MAX_LENGTH, type TitleRecord } from "./types";
 
-/** True for 0.5 to 5 in half steps, the scale title_status_rating_scale_check enforces. */
+/** True for 0.5 to 10 in half steps, the scale title_status_rating_scale_check enforces. */
 export function isValidRating(rating: unknown): rating is number {
   return (
     typeof rating === "number" &&
@@ -76,7 +76,7 @@ export function parseTitleRecord(input: unknown, ref: TitleId): Result<TitleReco
 
   let rating: number | null = null;
   if (status === "seen") {
-    if (!isValidRating(r.rating)) return bad("a seen state needs a rating from 0.5 to 5 in half steps");
+    if (!isValidRating(r.rating)) return bad(`a seen state needs a rating from ${RATING_MIN} to ${RATING_MAX} in half steps`);
     rating = r.rating;
   } else if (r.rating !== null && r.rating !== undefined) {
     return bad("only a seen state carries a rating");

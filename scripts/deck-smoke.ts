@@ -110,8 +110,8 @@ try {
 
   await run("for you before 10 ratings", { mode: "for_you" });
   const seen: [("movie" | "tv"), number, number][] = [
-    ["movie", 603, 5], ["movie", 27205, 4.5], ["movie", 157336, 5], ["movie", 155, 4.5], ["movie", 680, 4],
-    ["movie", 550, 4], ["movie", 278, 5], ["tv", 1396, 5], ["tv", 66732, 4], ["tv", 95396, 4.5],
+    ["movie", 603, 10], ["movie", 27205, 9], ["movie", 157336, 10], ["movie", 155, 9], ["movie", 680, 8],
+    ["movie", 550, 8], ["movie", 278, 10], ["tv", 1396, 10], ["tv", 66732, 8], ["tv", 95396, 9],
   ];
   for (const [mediaType, tmdbId, rating] of seen) must(await lib.markSeen(userId, { mediaType, tmdbId }, { rating }));
   const seeds = must(await lib.getTopRatedSeen(userId, ["movie", "tv"], 5));

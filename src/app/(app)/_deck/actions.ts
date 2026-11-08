@@ -70,7 +70,7 @@ function messageFor(error: CoreError, undo: boolean): string {
     case "unknown_user":
       return SIGNED_OUT;
     case "invalid_rating":
-      return "Pick a rating from half a star to 5 stars.";
+      return "Pick a rating from half a star to 10 stars.";
     case "invalid_review":
       return "That review can't be saved. Try shortening it.";
     case "wrong_state":

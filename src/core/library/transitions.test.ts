@@ -49,7 +49,7 @@ describe("columnsFor: every card action sets all four status columns", () => {
   });
 
   test("seen needs a valid rating", () => {
-    for (const rating of [undefined, 0, 5.5, 3.3, "4"]) {
+    for (const rating of [undefined, 0, 10.5, 3.3, "4"]) {
       expect(columnsFor({ status: "seen", rating }, now)).toMatchObject({ ok: false, error: { code: "invalid_rating" } });
     }
   });
@@ -188,6 +188,8 @@ describe("planRatingReviewPatch", () => {
 
   test("validates the rating", () => {
     expect(planRatingReviewPatch({ rating: 0 })).toMatchObject({ ok: false, error: { code: "invalid_rating" } });
+    expect(planRatingReviewPatch({ rating: 10.5 })).toMatchObject({ ok: false, error: { code: "invalid_rating" } });
+    expect(planRatingReviewPatch({ rating: 10 })).toEqual({ ok: true, value: { rating: 10 } });
   });
 });
 
@@ -203,7 +205,7 @@ describe("isChangedElsewhere: which refusals mean the title changed since the ca
     for (const error of [
       { code: "invalid_user" },
       { code: "unknown_user" },
-      { code: "invalid_rating", rating: 6 },
+      { code: "invalid_rating", rating: 10.5 },
       { code: "invalid_review", message: "too long" },
       { code: "invalid_title", message: "bad id" },
       { code: "invalid_move", message: "no" },

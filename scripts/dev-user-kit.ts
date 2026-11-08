@@ -89,10 +89,10 @@ export const SEED_ROWS: readonly SeedRow[] = [
     mediaType: "movie",
     tmdbId: 155, // The Dark Knight
     status: "seen",
-    rating: 4.5,
+    rating: 9,
     review: "Seed review from the walk kit.",
   },
-  { mediaType: "tv", tmdbId: 1668, status: "seen", rating: 3.5, review: null }, // Friends
+  { mediaType: "tv", tmdbId: 1668, status: "seen", rating: 7, review: null }, // Friends
   { mediaType: "movie", tmdbId: 680, status: "skipped", rating: null, review: null }, // Pulp Fiction
   { mediaType: "tv", tmdbId: 66732, status: "skipped", rating: null, review: null }, // Stranger Things
 ];

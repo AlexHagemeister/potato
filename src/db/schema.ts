@@ -116,7 +116,7 @@ export const titleStatus = pgTable(
     mediaType: text("media_type", { enum: MEDIA_TYPES }).notNull(),
     tmdbId: integer("tmdb_id").notNull(),
     status: text("status", { enum: TITLE_STATUSES }).notNull(),
-    rating: numeric("rating", { precision: 2, scale: 1, mode: "number" }),
+    rating: numeric("rating", { precision: 3, scale: 1, mode: "number" }),
     review: text("review"),
     reviewVisibility: text("review_visibility", { enum: REVIEW_VISIBILITIES })
       .notNull()
@@ -134,10 +134,10 @@ export const titleStatus = pgTable(
       "title_status_status_check",
       sql`${t.status} in ('watchlist', 'passed', 'seen', 'skipped')`,
     ),
-    // The rating scale lives in this one constraint: 0.5 to 5 in half steps.
+    // The rating scale lives in this one constraint: 0.5 to 10 in half steps.
     check(
       "title_status_rating_scale_check",
-      sql`${t.rating} is null or (${t.rating} between 0.5 and 5 and ${t.rating} * 2 = trunc(${t.rating} * 2))`,
+      sql`${t.rating} is null or (${t.rating} between 0.5 and 10 and ${t.rating} * 2 = trunc(${t.rating} * 2))`,
     ),
     check(
       "title_status_rating_iff_seen_check",
