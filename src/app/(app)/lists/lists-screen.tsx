@@ -140,20 +140,34 @@ function toLists(pages: Record<ListStatus, ListRowsPage>): Lists {
   return out;
 }
 
-/** The rows on screen, and the filters they were loaded under. */
-type Shown = { filters: FilterChoice; lists: Lists };
+/** The rows on screen, the filters they were loaded under, and whose they are. */
+type Shown = { userId: string; filters: FilterChoice; lists: Lists };
 
 /*
  * The rows the screen shows live here, at module scope, not in the component (issue 76). Back from a card mounts
  * the screen again from the router's copy of the page, which holds the rows of its server render and none of this
  * screen's changes since: an edited rating, Seen it, + Watchlist, an Undo, a filter change. So the screen takes its
  * rows from the server only for a render it hasn't shown yet. For a render it has shown (a copy Back restored), it
- * takes the rows it showed last, here. A save that settles after the screen is gone still lands here, and a screen
- * mounted meanwhile shows it. A reload starts the module over, from a fresh server render.
+ * takes the rows it showed last, here. A save that settles after the screen is gone still lands here, and so does
+ * the reload a stale save asks for, so Back shows them. A reload of the page starts the module over, from a fresh
+ * server render. The rows belong to one user: another user's render starts them over, as in the deck's store.
  */
 let shownNow: Shown | null = null;
-/** The server renders of the page already shown. Each fresh one replaces the rows above. */
+/** The server renders of the page already shown, oldest first. Each fresh one replaces the rows above. */
 const shownRenders = new Set<string>();
+/**
+ * How many render ids to keep. Back can restore only renders still in the browser's history, and a home-screen app
+ * can stay open for days. A render forgotten here would show its server copy on Back, as before issue 76.
+ */
+const MAX_SHOWN_RENDERS = 50;
+
+/** Notes a fresh render as shown, and starts the rows over from it. */
+function seedShown(renderId: string, from: Shown) {
+  if (shownNow && shownNow.userId !== from.userId) shownRenders.clear();
+  shownRenders.add(renderId);
+  while (shownRenders.size > MAX_SHOWN_RENDERS) shownRenders.delete(shownRenders.values().next().value as string);
+  setShown(from);
+}
 const shownListeners = new Set<() => void>();
 
 function subscribeShown(listener: () => void) {
@@ -211,11 +225,14 @@ interface Toast {
 type Sheet = { mode: "markSeen" | "edit"; row: ListRow };
 
 export function ListsScreen({
+  userId,
   renderId,
   lists: fromServer,
   filters: filtersFromServer,
   hasServices,
 }: {
+  /** The signed-in user. The rows kept for Back belong to one user (see shownNow). */
+  userId: string;
   /** Names this server render. Back restores a render with the id it had (see shownNow). */
   renderId: string;
   lists: Record<ListStatus, ListRowsPage>;
@@ -233,16 +250,16 @@ export function ListsScreen({
 
   // The rows: the server's for a render not shown yet, else the ones this screen showed last (issue 76).
   const fromRender = useMemo<Shown>(
-    () => ({ filters: filtersFromServer, lists: toLists(fromServer) }),
-    [filtersFromServer, fromServer],
+    () => ({ userId, filters: filtersFromServer, lists: toLists(fromServer) }),
+    [userId, filtersFromServer, fromServer],
   );
   const stored = useSyncExternalStore(subscribeShown, getShown, getServerShown);
-  const shown = stored !== null && shownRenders.has(renderId) ? stored : fromRender;
+  const restored = stored !== null && stored.userId === userId && shownRenders.has(renderId);
+  const shown = restored ? stored : fromRender;
   useEffect(() => {
-    if (shownRenders.has(renderId)) return;
-    shownRenders.add(renderId);
-    setShown(fromRender);
-  }, [renderId, fromRender]);
+    if (shownRenders.has(renderId) && shownNow?.userId === userId) return;
+    seedShown(renderId, fromRender);
+  }, [renderId, userId, fromRender]);
   const lists = shown.lists;
   // The filters the rows on screen were loaded under. A failed filter load falls back to them.
   const loaded = shown.filters;
@@ -283,8 +300,8 @@ export function ListsScreen({
     loadSeq.current++;
     leaving.current = false;
   }, [restarts]);
-  // A load (a reload, Show more) that settles once the screen is gone changes nothing. A save still lands, in the
-  // rows at module scope (updateLists), so Back shows it.
+  // Show more, a refill or a filter load that settles once the screen is gone changes nothing. A save still lands,
+  // in the rows at module scope (updateLists), and so does the reload a stale save asks for, so Back shows them.
   const mounted = useRef(false);
   useEffect(() => {
     mounted.current = true;
@@ -437,18 +454,23 @@ export function ListsScreen({
    * reload doesn't drop them.
    */
   async function reload() {
+    const here = mounted.current;
     // A filter load under way brings fresh lists if it succeeds. If it fails, it runs this reload then.
-    if (filteringRef.current) {
+    if (here && filteringRef.current) {
       reloadWanted.current = true;
       return;
     }
     const seq = ++loadSeq.current;
-    // The latest filters, not this closure's: a write can come back stale after the filters changed.
-    const using = filtersRef.current;
-    const before = lists;
+    // On screen: the latest filters, not this closure's, since a write can come back stale after the filters
+    // changed. After leaving (a stale save that settled late): the filters of the rows kept for Back.
+    const using = here ? filtersRef.current : shownNow?.filters;
+    const before = shownNow?.lists ?? lists;
+    if (!using) return;
     const result = await call(() => loadListsAction(using), FILTER_FAILED);
-    if (seq !== loadSeq.current || !mounted.current) return;
-    if (!result.ok) return;
+    if (seq !== loadSeq.current || !result.ok) return;
+    // The rows kept for Back can have moved on meanwhile (a fresh render, a filter load). Only rows for the same
+    // user and filters land.
+    if (!shownNow || shownNow.userId !== userId || !sameFilterChoice(shownNow.filters, using)) return;
     const fresh = toLists(result.value);
     const jobs: Refill["jobs"] = {};
     for (const { status } of TABS) {
@@ -457,7 +479,8 @@ export function ListsScreen({
       if (cursor && want > fresh[status].rows.length) jobs[status] = { cursor, have: fresh[status].rows.length, want };
     }
     updateLists(() => fresh);
-    setRefill(Object.keys(jobs).length > 0 ? { filters: using, jobs } : null);
+    // Rows past the first page are fetched again only on screen. After leaving, Back shows the first pages.
+    if (mounted.current) setRefill(Object.keys(jobs).length > 0 ? { filters: using, jobs } : null);
   }
 
   /**
@@ -479,7 +502,7 @@ export function ListsScreen({
       filteringRef.current = false;
       const settled = result.ok ? due.filters : due.fallback;
       if (result.ok) {
-        setShown({ filters: due.filters, lists: toLists(result.value) });
+        setShown({ userId, filters: due.filters, lists: toLists(result.value) });
       } else {
         setFilters(due.fallback);
         // Now, not after the next render: the deferred reload below reads it.
@@ -585,7 +608,13 @@ export function ListsScreen({
       updateLists(putBack);
       return failed(result);
     }
-    updateLists((prev) => replaced(prev, "watchlist", withRecord(row, result.value.current)));
+    // The whole move again, not only the saved record: a fresh render read before the save landed can have started
+    // the rows over meanwhile, with the title still on Passed.
+    const saved = withRecord({ ...row, status: "watchlist" }, result.value.current);
+    updateLists((prev) => {
+      const at = prev.watchlist.rows.findIndex((r) => keyOf(r) === key);
+      return insertAt(without(prev, "passed", key), "watchlist", saved, at);
+    });
     show("Moved to Watchlist", undoer(ref, result.value, putBack), next && keyOf(next));
   }
 
