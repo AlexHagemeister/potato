@@ -100,12 +100,17 @@ function conflict(before: TitleRecord | null, expected: TitleRecord["status"][])
   return fail({ code: "wrong_state", status: before.status, expected });
 }
 
-/** REPLACEABLE as a SQL list, for `status in (...)`. */
-function replaceableList(): SQL {
-  return sql.join(
-    REPLACEABLE.map((s: TitleStatus) => sql`${s}`),
+/**
+ * A SQL condition: the row's status is one of `allowed`. An empty set allows
+ * no existing row at all (only a title on no list), since `in ()` is not SQL.
+ */
+function statusIn(column: SQL, allowed: readonly TitleStatus[]): SQL {
+  if (allowed.length === 0) return sql`false`;
+  const list = sql.join(
+    allowed.map((s) => sql`${s}`),
     sql`, `,
   );
+  return sql`${column} in (${list})`;
 }
 
 /**
@@ -113,13 +118,13 @@ function replaceableList(): SQL {
  * so writing a status moves the title off whatever list it was on (VISION
  * invariant 3). created_at keeps the first time the user acted on the title.
  *
- * It changes an existing row only while the row's status is REPLACEABLE (not
- * Seen). Otherwise it writes nothing and returns no row. The condition sits
- * in ON CONFLICT DO UPDATE, which Postgres checks against the row it has
- * locked, so it holds even against a write landing at the same instant.
+ * It changes an existing row only while the row's status is in `allowed`.
+ * Otherwise it writes nothing and returns no row. The condition sits in ON
+ * CONFLICT DO UPDATE, which Postgres checks against the row it has locked, so
+ * it holds even against a write landing at the same instant.
  */
-function upsertWrite(userId: string, ref: TitleId, c: StatusColumns, now: Date): SQL {
-  const guard = sql`where t.status in (${replaceableList()})`;
+function upsertWrite(userId: string, ref: TitleId, c: StatusColumns, now: Date, allowed: readonly TitleStatus[]): SQL {
+  const guard = sql`where ${statusIn(sql`t.status`, allowed)}`;
   return sql`
     insert into title_status as t
       (user_id, media_type, tmdb_id, status, rating, review, skip_until, created_at, updated_at)
@@ -143,9 +148,12 @@ async function cardAction(userId: unknown, ref: unknown, intent: CardIntent, opt
   const columns = columnsFor(intent, now);
   if (!columns.ok) return columns;
   const { userId: u, ref: r } = ids.value;
+  // Every card write today: any row but a Seen one. Issue 83 narrows this for a deck tap (the card showed the
+  // title on no list) to no existing row at all. Its refusal must then say which list the title is on.
+  const allowed = REPLACEABLE;
   return guardUser(async () => {
-    const { before, written } = await withPrevious(u, r, upsertWrite(u, r, columns.value, now));
-    // No row back means the guard refused the row it locked, which can only be a Seen row.
+    const { before, written } = await withPrevious(u, r, upsertWrite(u, r, columns.value, now, allowed));
+    // No row back means the guard refused the row it locked, which under REPLACEABLE can only be a Seen row.
     if (!written) return fail(seenRefused());
     return ok({ previous: before, current: written });
   });
@@ -262,7 +270,7 @@ export async function removeTitle(userId: string, ref: TitleId): Promise<Outcome
   const { before, written: deleted } = await withPrevious(
     u,
     r,
-    sql`delete from title_status where ${pk(u, r)} and status in (${replaceableList()}) returning *`,
+    sql`delete from title_status where ${pk(u, r)} and ${statusIn(sql`status`, REPLACEABLE)} returning *`,
   );
   // Nothing deleted, though a row was there: the guard refused the row it locked, which can only be a Seen row.
   if (!deleted && before) return fail(seenRefused());
