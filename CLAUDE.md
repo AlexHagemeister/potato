@@ -66,6 +66,7 @@ Agents run unattended, often overnight. Triage each open question:
 
 - **Local and reversible** (naming, layout details, a library swap inside one module): decide, and record the call in the PR body.
 - **Architecturally significant** (hard to reverse, broad in reach, or in conflict with a VISION invariant): do not decide. Open an issue labeled `needs-alex` with the question, the options, and a recommendation. Then continue with other work that does not depend on the answer.
+- **Stale text goes with the change.** When Alex approves a change, the same PR updates every line it makes stale (in VISION.md, CLAUDE.md, code comments, copy, and tests) without a separate ask, and the PR body lists each one. Why: stale text misleads the next agent, and Alex counts those edits as part of the change he approved (Alex, 2026-11-08).
 - **A bug found outside the PR that caused it gets an issue** labeled `bug`. The fixing PR says `Fixes #N` and states the symptom, the root cause, and how the fix was verified. A bug caught and fixed inside its own PR before merge needs no issue: the review thread and PR body already hold it.
 - **Work noticed outside the current slice gets an issue,** so it outlives the session that noticed it. This is discovered work, not a backlog: never file issues for planned features from VISION.md.
 - **A report to the orchestrator is not a record.** Anything above that exists only in a subagent's report gets filed before the orchestrator moves on.
