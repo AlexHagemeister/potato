@@ -422,6 +422,8 @@ export function ListsScreen({
         setLoaded(due.filters);
       } else {
         setFilters(due.fallback);
+        // Now, not after the next render: the deferred reload below reads it.
+        filtersRef.current = due.fallback;
       }
       if (!leaving.current) writeAddress(activeRef.current, settled);
       if (result.ok) {
