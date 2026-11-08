@@ -8,6 +8,7 @@
 
 import {
   moveTitle,
+  removeRatingReview,
   restoreTitleState,
   updateRatingReview,
   type ActionOutcome,
@@ -77,6 +78,14 @@ export async function addToWatchlistAction(ref: TitleId): Promise<ActionResult<A
 /** Edits a Seen title's rating and review. A blank review clears it. */
 export async function editRatingAction(ref: TitleId, rating: number, review: string): Promise<ActionResult<ActionOutcome>> {
   return run((userId) => updateRatingReview(userId, ref, { rating, review }));
+}
+
+/**
+ * Removes a Seen title's rating and review, after the user confirmed it (issue 43). `rating` and `review` are what
+ * the screen showed: core removes them only while the title still has exactly those.
+ */
+export async function removeRatingAction(ref: TitleId, rating: number, review: string | null): Promise<ActionResult<ActionOutcome>> {
+  return run((userId) => removeRatingReview(userId, ref, { rating, review }));
 }
 
 /** Undoes one of the actions above, if the title has not changed since. */

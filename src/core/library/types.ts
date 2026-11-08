@@ -61,15 +61,15 @@ export interface ActionOptions {
   now?: Date;
 }
 
-/** Options for Pass, Skip, and Watchlist. */
-export interface SortOptions extends ActionOptions {
-  /**
-   * True when the caller showed the user this title as Seen, with its rating
-   * and review, before the tap. Only then may the write move a Seen title off
-   * the Seen list (cardWriteFrom, issue 74). Left out, a Seen title refuses
-   * with wrong_state, so a stale card never erases a review written elsewhere.
-   */
-  seenShown?: boolean;
+/**
+ * The rating and review a caller showed the user, as removeRatingReview takes
+ * them. The removal goes ahead only while the title's row still holds exactly
+ * these, so it never erases a rating or review the user did not see.
+ */
+export interface ShownRatingReview {
+  rating: number;
+  /** Left out, null, or blank means the caller showed no review. */
+  review?: string | null;
 }
 
 /** The two list moves VISION names (Your lists). */

@@ -25,15 +25,24 @@ import { fail, ok, validateUserId, type Result } from "../result";
 import type { TitleId, TitleStatus } from "../types";
 import { recordFromJson } from "./rows";
 import {
-  cardWriteFrom,
-  cardWriteRefused,
   columnsFor,
   planMove,
   planRatingReviewPatch,
+  planRatingReviewRemoval,
+  REPLACEABLE,
+  seenRefused,
   type CardIntent,
   type StatusColumns,
 } from "./transitions";
-import type { ActionOptions, ActionOutcome, MoveRequest, RatingReviewPatch, SortOptions, TitleRecord, UndoInput } from "./types";
+import type {
+  ActionOptions,
+  ActionOutcome,
+  MoveRequest,
+  RatingReviewPatch,
+  ShownRatingReview,
+  TitleRecord,
+  UndoInput,
+} from "./types";
 import { parseTitleRecord, validateTitleRef } from "./validate";
 
 type Outcome = Result<ActionOutcome>;
@@ -91,23 +100,26 @@ function conflict(before: TitleRecord | null, expected: TitleRecord["status"][])
   return fail({ code: "wrong_state", status: before.status, expected });
 }
 
+/** REPLACEABLE as a SQL list, for `status in (...)`. */
+function replaceableList(): SQL {
+  return sql.join(
+    REPLACEABLE.map((s: TitleStatus) => sql`${s}`),
+    sql`, `,
+  );
+}
+
 /**
  * One upsert under the composite primary key. A title has one row per user,
  * so writing a status moves the title off whatever list it was on (VISION
  * invariant 3). created_at keeps the first time the user acted on the title.
  *
- * It changes an existing row only while the row's status is in `allowed`
- * (cardWriteFrom). Otherwise it writes nothing and returns no row. The
- * condition sits in ON CONFLICT DO UPDATE, which Postgres checks against the
- * row it has locked, so it holds even against a write landing at the same
- * instant.
+ * It changes an existing row only while the row's status is REPLACEABLE (not
+ * Seen). Otherwise it writes nothing and returns no row. The condition sits
+ * in ON CONFLICT DO UPDATE, which Postgres checks against the row it has
+ * locked, so it holds even against a write landing at the same instant.
  */
-function upsertWrite(userId: string, ref: TitleId, c: StatusColumns, now: Date, allowed: readonly TitleStatus[]): SQL {
-  const statuses = sql.join(
-    allowed.map((s) => sql`${s}`),
-    sql`, `,
-  );
-  const guard = sql`where t.status in (${statuses})`;
+function upsertWrite(userId: string, ref: TitleId, c: StatusColumns, now: Date): SQL {
+  const guard = sql`where t.status in (${replaceableList()})`;
   return sql`
     insert into title_status as t
       (user_id, media_type, tmdb_id, status, rating, review, skip_until, created_at, updated_at)
@@ -124,49 +136,48 @@ function upsertWrite(userId: string, ref: TitleId, c: StatusColumns, now: Date, 
     returning t.*`;
 }
 
-async function cardAction(userId: unknown, ref: unknown, intent: CardIntent, options: SortOptions): Promise<Outcome> {
+async function cardAction(userId: unknown, ref: unknown, intent: CardIntent, options: ActionOptions): Promise<Outcome> {
   const ids = checkIds(userId, ref);
   if (!ids.ok) return ids;
   const now = options.now ?? new Date();
   const columns = columnsFor(intent, now);
   if (!columns.ok) return columns;
-  // Strictly true: anything else a caller sends keeps the guard.
-  const allowed = cardWriteFrom(columns.value.status, options.seenShown === true);
   const { userId: u, ref: r } = ids.value;
   return guardUser(async () => {
-    const { before, written } = await withPrevious(u, r, upsertWrite(u, r, columns.value, now, allowed));
+    const { before, written } = await withPrevious(u, r, upsertWrite(u, r, columns.value, now));
     // No row back means the guard refused the row it locked, which can only be a Seen row.
-    if (!written) return fail(cardWriteRefused(allowed));
+    if (!written) return fail(seenRefused());
     return ok({ previous: before, current: written });
   });
 }
 
 /**
- * Pass: the title goes to the Passed list. On a Seen title it refuses with
- * wrong_state unless `options.seenShown` says the caller showed the title as
- * Seen (cardWriteFrom, issue 74). Watchlist and Skip work the same way.
+ * Pass: the title goes to the Passed list. A Seen title is left exactly as it
+ * is and the result is wrong_state (REPLACEABLE, issues 43 and 74): a button
+ * never erases a rating or review. Watchlist and Skip work the same way. To
+ * take a Seen title off the Seen list, use removeRatingReview first.
  */
-export function passTitle(userId: string, ref: TitleId, options: SortOptions = {}): Promise<Outcome> {
+export function passTitle(userId: string, ref: TitleId, options: ActionOptions = {}): Promise<Outcome> {
   return cardAction(userId, ref, { status: "passed" }, options);
 }
 
-/** Watchlist: the title goes to the Watchlist. A Seen title needs `seenShown`, as for passTitle. */
-export function watchlistTitle(userId: string, ref: TitleId, options: SortOptions = {}): Promise<Outcome> {
+/** Watchlist: the title goes to the Watchlist. A Seen title refuses, as for passTitle. */
+export function watchlistTitle(userId: string, ref: TitleId, options: ActionOptions = {}): Promise<Outcome> {
   return cardAction(userId, ref, { status: "watchlist" }, options);
 }
 
 /**
  * Skip: no list. The title returns to the deck SKIP_DAYS from now (VISION
- * invariant 1). A Seen title needs `seenShown`, as for passTitle.
+ * invariant 1). A Seen title refuses, as for passTitle.
  */
-export function skipTitle(userId: string, ref: TitleId, options: SortOptions = {}): Promise<Outcome> {
+export function skipTitle(userId: string, ref: TitleId, options: ActionOptions = {}): Promise<Outcome> {
   return cardAction(userId, ref, { status: "skipped" }, options);
 }
 
 /**
  * Seen it: the title goes to the Seen list with this rating (required) and an
  * optional review (left out, null, or blank means none). It moves a title
- * that is on no list or on another list (cardWriteFrom). A title already
+ * that is on no list or on another list (REPLACEABLE). A title already
  * Seen is left exactly as it is and the result is wrong_state, because its
  * review may have been written elsewhere (another device, the AI connection)
  * and the caller has not shown it. To change a Seen title's rating or
@@ -237,15 +248,57 @@ export async function moveTitle(
 
 /**
  * Deletes the row, so the title is on no list and can come back to the deck.
- * This is how undo takes back the first action on a title. Removing a title
- * with no row is not an error: `previous` is null.
+ * Removing a title with no row is not an error: `previous` is null.
+ *
+ * A Seen title is left exactly as it is and the result is wrong_state
+ * (REPLACEABLE): deleting its row would erase a rating and review the caller
+ * never named. removeRatingReview is the way to take a Seen title off the
+ * Seen list.
  */
 export async function removeTitle(userId: string, ref: TitleId): Promise<Outcome> {
   const ids = checkIds(userId, ref);
   if (!ids.ok) return ids;
   const { userId: u, ref: r } = ids.value;
-  const { written: deleted } = await withPrevious(u, r, sql`delete from title_status where ${pk(u, r)} returning *`);
+  const { before, written: deleted } = await withPrevious(
+    u,
+    r,
+    sql`delete from title_status where ${pk(u, r)} and status in (${replaceableList()}) returning *`,
+  );
+  // Nothing deleted, though a row was there: the guard refused the row it locked, which can only be a Seen row.
+  if (!deleted && before) return fail(seenRefused());
   return ok({ previous: deleted, current: null });
+}
+
+/**
+ * Removes a Seen title's rating and review, the one deliberate way to take a
+ * title off the Seen list (Alex's ruling on issue 43, VISION invariants 6 and
+ * 7). The row is deleted, so the title is on no list: it can come back to the
+ * deck, and any card button sorts it from there.
+ *
+ * `shown` is the rating and review the caller showed the user before they
+ * chose to remove them. The delete goes ahead only while the row is Seen with
+ * exactly that rating and review. If either changed since (another device, the
+ * AI connection), or the title is no longer Seen, nothing changes and the
+ * result is wrong_state, or not_found when the title is on no list. So a
+ * removal never erases a rating or review the user did not see.
+ *
+ * Undo (restoreTitleState) puts the row back exactly.
+ */
+export async function removeRatingReview(userId: string, ref: TitleId, shown: ShownRatingReview): Promise<Outcome> {
+  const ids = checkIds(userId, ref);
+  if (!ids.ok) return ids;
+  const planned = planRatingReviewRemoval(shown);
+  if (!planned.ok) return planned;
+  const { userId: u, ref: r } = ids.value;
+  const { rating, review } = planned.value;
+  const { before, written: deleted } = await withPrevious(
+    u,
+    r,
+    sql`delete from title_status
+        where ${pk(u, r)} and status = 'seen' and rating = ${rating} and review is not distinct from ${review}::text
+        returning *`,
+  );
+  return deleted ? ok({ previous: deleted, current: null }) : conflict(before, ["seen"]);
 }
 
 /** Parses one side of an undo input. Null stays null. */
