@@ -12,7 +12,7 @@ export const USAGE = `Usage: bun run dev:user <command> <slug>
 Commands (potato_dev only):
   show    count the user's rows by list, and whether settings exist
   reset   delete the user's title rows and settings (sessions stay signed in)
-  seed    add two titles to each list: watchlist, passed, seen (rated, one reviewed), skipped
+  seed    write two titles to each list: watchlist, passed, seen (rated, one reviewed), skipped. Overwrites rows for those titles, keeps the rest
           (creates the user if it does not exist yet)
   delete  delete the user and everything it owns
 

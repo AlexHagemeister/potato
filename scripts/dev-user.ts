@@ -2,7 +2,7 @@
 //
 //   bun run dev:user show  <slug>   count the user's rows
 //   bun run dev:user reset <slug>   delete its title rows and settings
-//   bun run dev:user seed  <slug>   add two titles to each list
+//   bun run dev:user seed  <slug>   write two titles to each list (overwrites rows for those titles)
 //   bun run dev:user delete <slug>  delete the user and everything it owns
 //
 // <slug> names dev-test-<slug>@example.com, the user /api/dev/login?as=<slug>
