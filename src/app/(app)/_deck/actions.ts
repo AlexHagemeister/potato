@@ -23,7 +23,7 @@ import {
   type TitleRecord,
   type UndoInput,
 } from "@/core/library";
-import type { TitleId } from "@/core/types";
+import type { TitleId, TitleStatus } from "@/core/types";
 import { getCurrentUserForRequest } from "@/lib/current-user";
 
 export type SortKind = "pass" | "skip" | "watchlist" | "seen";
@@ -49,6 +49,16 @@ const STALE_SORT: Record<Exclude<SortKind, "seen">, string> = {
 const STALE_SEEN = `Not saved: ${ALREADY_SEEN}, and the rating there stays.`;
 const STALE_SEEN_TYPED = `${STALE_SEEN} Copy your review if you want to keep it.`;
 
+/**
+ * A Discover card's tap refused because the title was put on a list, or skipped, elsewhere while the card was on
+ * screen (issue 83). The notice says where it is. A Seen title keeps the button's own message above.
+ */
+const ALREADY_ON: Record<Exclude<TitleStatus, "seen">, string> = {
+  watchlist: "Already on your Watchlist.",
+  passed: "Already on your Passed list.",
+  skipped: "Already skipped. It comes back to Discover later.",
+};
+
 const SIGNED_OUT = "You're signed out. Sign in again to save.";
 
 /** Presentation only: the words the screen shows for each core error. */
@@ -71,15 +81,22 @@ function messageFor(error: CoreError, undo: boolean): string {
   return undo ? "Couldn't undo. Try again." : "Couldn't save. Try again.";
 }
 
+/** How a card write words core's wrong_state (the title is somewhere the card didn't show), and whether to read the title's row for the screen. */
+interface CardRefusal {
+  ref: TitleId;
+  /** The message for core's wrong_state, from the status the title has now. */
+  stale: (status: TitleStatus) => string;
+  /** The title card shows the row from the refusal. The deck drops the card, so it skips the read. */
+  readCurrent: boolean;
+}
+
 /**
- * Runs one write as the signed-in user. For a card write, `stale` is the message for core's wrong_state, which a
- * card write returns only when the title is Seen already. The result then carries the title's row as it is now.
- * Undo passes no `stale`: its wrong_state means its own compare-and-set refused.
+ * Runs one write as the signed-in user. For a card write, core's wrong_state means the card was stale: the title
+ * is Seen already, or, for a Discover card, on any list or skipped (issue 83). `card.stale` words it, and the
+ * result can carry the title's row as it is now. Undo passes no `card`: its wrong_state means its own
+ * compare-and-set refused.
  */
-async function run(
-  fn: (userId: string) => Promise<Result<ActionOutcome>>,
-  card: { ref: TitleId; stale: string } | null,
-): Promise<DeckActionResult> {
+async function run(fn: (userId: string) => Promise<Result<ActionOutcome>>, card: CardRefusal | null): Promise<DeckActionResult> {
   const undo = card === null;
   const user = await getCurrentUserForRequest();
   if (!user) return { ok: false, error: SIGNED_OUT };
@@ -87,8 +104,10 @@ async function run(
     const result = await fn(user.id);
     if (result.ok) return { ok: true, outcome: result.value };
     if (card && result.error.code === "wrong_state") {
+      const error = card.stale(result.error.status);
+      if (!card.readCurrent) return { ok: false, error, stale: true };
       const now = await getTitleState(user.id, card.ref).catch(() => null);
-      return { ok: false, error: card.stale, stale: true, ...(now?.ok ? { current: now.value } : {}) };
+      return { ok: false, error, stale: true, ...(now?.ok ? { current: now.value } : {}) };
     }
     return { ok: false, error: messageFor(result.error, undo) };
   } catch (err) {
@@ -97,33 +116,56 @@ async function run(
   }
 }
 
+/** One Pass, Skip, or Watchlist write in core. */
+function sortTitle(kind: Exclude<SortKind, "seen">, userId: string, ref: TitleId, shownOnNoList: boolean): Promise<Result<ActionOutcome>> {
+  const options = { shownOnNoList };
+  switch (kind) {
+    case "pass":
+      return passTitle(userId, ref, options);
+    case "skip":
+      return skipTitle(userId, ref, options);
+    case "watchlist":
+      return watchlistTitle(userId, ref, options);
+    default:
+      return Promise.resolve({ ok: false, error: { code: "invalid_move", message: `unknown sort: ${String(kind)}` } });
+  }
+}
+
 /**
- * Pass, Skip, or Watchlist on a card. Core refuses to move a Seen title, so a card never erases a rating and
- * review (issues 43 and 74). A Seen title's card shows no sort buttons, so a refusal here means the card is
- * stale: the title was marked Seen elsewhere.
+ * Pass, Skip, or Watchlist on a title card (Search, Lists). The card shows the list the title is on, so a tap
+ * moves it from there. Core refuses to move a Seen title, so a card never erases a rating and review (issues 43
+ * and 74). A Seen title's card shows no sort buttons, so a refusal here means the card is stale: the title was
+ * marked Seen elsewhere.
  */
 export async function sortCardAction(kind: Exclude<SortKind, "seen">, ref: TitleId): Promise<DeckActionResult> {
-  return run(
-    (userId) => {
-      switch (kind) {
-        case "pass":
-          return passTitle(userId, ref);
-        case "skip":
-          return skipTitle(userId, ref);
-        case "watchlist":
-          return watchlistTitle(userId, ref);
-        default:
-          return Promise.resolve({ ok: false, error: { code: "invalid_move", message: `unknown sort: ${String(kind)}` } });
-      }
-    },
-    { ref, stale: STALE_SORT[kind] ?? STALE_SORT.pass },
-  );
+  return run((userId) => sortTitle(kind, userId, ref, false), {
+    ref,
+    stale: () => STALE_SORT[kind] ?? STALE_SORT.pass,
+    readCurrent: true,
+  });
+}
+
+/**
+ * Pass, Skip, or Watchlist on a Discover card, which always shows its title on no list. If the title was put on a
+ * list, or skipped, elsewhere while the card was on screen, core leaves it where it is (Alex's ruling on issue
+ * 83: the earlier choice wins), and the notice says where it is.
+ */
+export async function sortDeckCardAction(kind: Exclude<SortKind, "seen">, ref: TitleId): Promise<DeckActionResult> {
+  return run((userId) => sortTitle(kind, userId, ref, true), {
+    ref,
+    stale: (status) => (status === "seen" ? (STALE_SORT[kind] ?? STALE_SORT.pass) : ALREADY_ON[status]),
+    readCurrent: false,
+  });
 }
 
 /** Seen it, with the rating and the optional review. Core validates both. */
 export async function markSeenAction(ref: TitleId, rating: number, review: string | null): Promise<DeckActionResult> {
   const typed = typeof review === "string" && review.trim() !== "";
-  return run((userId) => markSeen(userId, ref, { rating, review }), { ref, stale: typed ? STALE_SEEN_TYPED : STALE_SEEN });
+  return run((userId) => markSeen(userId, ref, { rating, review }), {
+    ref,
+    stale: () => (typed ? STALE_SEEN_TYPED : STALE_SEEN),
+    readCurrent: true,
+  });
 }
 
 /** Undo: puts the title back the way it was before the sort, if nothing changed it since. */

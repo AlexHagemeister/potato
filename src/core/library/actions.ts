@@ -20,18 +20,21 @@
 
 import { sql, type SQL } from "drizzle-orm";
 import { getDb } from "@/db/client";
+import { rowVisible } from "../deck/build-deck";
 import { FOREIGN_KEY_VIOLATION, pgErrorCode } from "../pg-error";
 import { fail, ok, validateUserId, type Result } from "../result";
 import type { TitleId, TitleStatus } from "../types";
 import { getTitleState } from "./queries";
 import { recordFromJson } from "./rows";
 import {
+  cardGuardFor,
   columnsFor,
   planMove,
   planRatingReviewPatch,
   planRatingReviewRemoval,
   REPLACEABLE,
   seenRefused,
+  type CardGuard,
   type CardIntent,
   type StatusColumns,
 } from "./transitions";
@@ -41,6 +44,7 @@ import type {
   MoveRequest,
   RatingReviewPatch,
   ShownRatingReview,
+  SortOptions,
   TitleRecord,
   UndoInput,
 } from "./types";
@@ -115,17 +119,29 @@ function statusIn(column: SQL, allowed: readonly TitleStatus[]): SQL {
 }
 
 /**
+ * The SQL twin of a card guard: which existing row (`t`) the write may
+ * replace. `on_no_list` is the deck's hiding rule (rowVisible) for a row that
+ * exists: only a Skip whose return time is `now` or earlier. The integration
+ * checks compare it with rowVisible row by row.
+ */
+function guardSql(guard: CardGuard, now: Date): SQL {
+  return guard === "on_no_list"
+    ? sql`t.status = 'skipped' and t.skip_until <= ${now.toISOString()}`
+    : statusIn(sql`t.status`, REPLACEABLE);
+}
+
+/**
  * One upsert under the composite primary key. A title has one row per user,
  * so writing a status moves the title off whatever list it was on (VISION
  * invariant 3). created_at keeps the first time the user acted on the title.
  *
- * It changes an existing row only while the row's status is in `allowed`.
+ * It changes an existing row only while the card guard allows that row.
  * Otherwise it writes nothing and returns no row. The condition sits in ON
  * CONFLICT DO UPDATE, which Postgres checks against the row it has locked, so
  * it holds even against a write landing at the same instant.
  */
-function upsertWrite(userId: string, ref: TitleId, c: StatusColumns, now: Date, allowed: readonly TitleStatus[]): SQL {
-  const guard = sql`where ${statusIn(sql`t.status`, allowed)}`;
+function upsertWrite(userId: string, ref: TitleId, c: StatusColumns, now: Date, cardGuard: CardGuard): SQL {
+  const guard = sql`where ${guardSql(cardGuard, now)}`;
   return sql`
     insert into title_status as t
       (user_id, media_type, tmdb_id, status, rating, review, skip_until, created_at, updated_at)
@@ -142,21 +158,43 @@ function upsertWrite(userId: string, ref: TitleId, c: StatusColumns, now: Date, 
     returning t.*`;
 }
 
-async function cardAction(userId: unknown, ref: unknown, intent: CardIntent, options: ActionOptions): Promise<Outcome> {
+/**
+ * The refusal when an `on_no_list` guard holds (issue 83): the title is on a
+ * list, or skipped until later, so the error names where it is. The
+ * statement's snapshot (`before`) says so when it saw that row. When it saw
+ * none, or a row the deck may show, the guard locked a row committed at the
+ * same instant, so one more read finds it. If that row is gone or showable
+ * again by then, the title changed twice meanwhile: nothing was saved, and
+ * the result is not_found, so the caller can try again.
+ */
+async function onNoListRefused(userId: string, ref: TitleId, before: TitleRecord | null, now: Date): Promise<Outcome> {
+  if (before && !rowVisible(ref, before, now)) return fail({ code: "wrong_state", status: before.status, expected: [] });
+  const row = await getTitleState(userId, ref);
+  if (!row.ok) return row;
+  if (row.value && !rowVisible(ref, row.value, now)) {
+    return fail({ code: "wrong_state", status: row.value.status, expected: [] });
+  }
+  return fail({ code: "not_found" });
+}
+
+async function cardAction(
+  userId: unknown,
+  ref: unknown,
+  intent: CardIntent,
+  options: SortOptions | undefined,
+): Promise<Outcome> {
   const ids = checkIds(userId, ref);
   if (!ids.ok) return ids;
-  const now = options.now ?? new Date();
+  const now = options?.now ?? new Date();
   const columns = columnsFor(intent, now);
   if (!columns.ok) return columns;
   const { userId: u, ref: r } = ids.value;
-  // Every card write today: any row but a Seen one. Issue 83 narrows this for a deck tap (the card showed the
-  // title on no list) to no existing row at all. Its refusal must then say which list the title is on.
-  const allowed = REPLACEABLE;
+  const guard = cardGuardFor(intent, options?.shownOnNoList);
   return guardUser(async () => {
-    const { before, written } = await withPrevious(u, r, upsertWrite(u, r, columns.value, now, allowed));
-    // No row back means the guard refused the row it locked, which under REPLACEABLE can only be a Seen row.
-    if (!written) return fail(seenRefused());
-    return ok({ previous: before, current: written });
+    const { before, written } = await withPrevious(u, r, upsertWrite(u, r, columns.value, now, guard));
+    if (written) return ok({ previous: before, current: written });
+    // No row back means the guard refused the row it locked. Under REPLACEABLE that can only be a Seen row.
+    return guard === "on_no_list" ? onNoListRefused(u, r, before, now) : fail(seenRefused());
   });
 }
 
@@ -165,21 +203,25 @@ async function cardAction(userId: unknown, ref: unknown, intent: CardIntent, opt
  * is and the result is wrong_state (REPLACEABLE, issues 43 and 74): a button
  * never erases a rating or review. Watchlist and Skip work the same way. To
  * take a Seen title off the Seen list, use removeRatingReview first.
+ *
+ * With `shownOnNoList: true` (a Discover card, issue 83), a title on any list,
+ * or skipped until later, is left exactly as it is too, and the result is
+ * wrong_state naming where it is.
  */
-export function passTitle(userId: string, ref: TitleId, options: ActionOptions = {}): Promise<Outcome> {
+export function passTitle(userId: string, ref: TitleId, options: SortOptions = {}): Promise<Outcome> {
   return cardAction(userId, ref, { status: "passed" }, options);
 }
 
-/** Watchlist: the title goes to the Watchlist. A Seen title refuses, as for passTitle. */
-export function watchlistTitle(userId: string, ref: TitleId, options: ActionOptions = {}): Promise<Outcome> {
+/** Watchlist: the title goes to the Watchlist. It refuses as passTitle does. */
+export function watchlistTitle(userId: string, ref: TitleId, options: SortOptions = {}): Promise<Outcome> {
   return cardAction(userId, ref, { status: "watchlist" }, options);
 }
 
 /**
  * Skip: no list. The title returns to the deck SKIP_DAYS from now (VISION
- * invariant 1). A Seen title refuses, as for passTitle.
+ * invariant 1). It refuses as passTitle does.
  */
-export function skipTitle(userId: string, ref: TitleId, options: ActionOptions = {}): Promise<Outcome> {
+export function skipTitle(userId: string, ref: TitleId, options: SortOptions = {}): Promise<Outcome> {
   return cardAction(userId, ref, { status: "skipped" }, options);
 }
 
@@ -198,6 +240,7 @@ export function markSeen(
   input: { rating: number; review?: string | null },
   options: ActionOptions = {},
 ): Promise<Outcome> {
+  // Seen it ignores shownOnNoList (cardGuardFor): from any card it moves a title off another list.
   return cardAction(userId, ref, { status: "seen", rating: input?.rating, review: input?.review }, options);
 }
 
