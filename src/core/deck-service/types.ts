@@ -119,6 +119,11 @@ export interface DeckRequest {
 /**
  * One page of the deck.
  *
+ * Each new deck (a request without a cursor) is a fresh deal: the service
+ * shuffles it with a new seed, so the same mode and filters give a different
+ * run of cards each time. The cursor carries the seed, so the pages of one
+ * deck belong together.
+ *
  * `cards` can be short, or even empty, while `nextCursor` is non-null: the
  * engine drops titles after the service has paid to look them up (top rated
  * and deep cuts gate on IMDb votes, "on my services" on availability). Keep

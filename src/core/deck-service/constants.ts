@@ -17,6 +17,25 @@ export const POOL_QUOTA = { single: 20, blend: 8 } as const;
 export const MAX_PAGES_PER_STREAM = 3;
 
 /**
+ * The shuffle: how many of a TMDB list's first pages a new deck draws from in
+ * a seeded order, before it reads the rest in TMDB's order. A page holds 20
+ * titles, so 15 pages is the top 300 of each list (per pool and media type).
+ * Every title in the window already clears its pool's TMDB-side floors, so a
+ * wide window costs variety nothing in quality. Wider means less chance of a
+ * familiar opening card, and a first card from further down the ranking.
+ */
+export const SHUFFLE_WINDOW_PAGES = 15;
+
+/**
+ * How strongly the shuffle leans toward a list's first pages: page n is drawn
+ * with weight n to the power of minus this. 0 is an even shuffle of the
+ * window. At 0.5 the first page is about four times as likely to open a deck
+ * as the fifteenth, so the best-known titles still turn up early, just not
+ * always first.
+ */
+export const SHUFFLE_FRONT_BIAS = 0.5;
+
+/**
  * With a minimum IMDb rating, the most take rounds one getDeck call runs. A
  * TMDB list summary carries no IMDb rating, so the minimum drops titles only
  * after their details are read. On narrow filters one round of POOL_QUOTA

@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { FOR_YOU_MIN_RATINGS } from "../deck/constants";
+import { isShuffleSeed, seededFrontWeightedOrder } from "../deck/shuffle";
 import { formatTitleKey } from "../title-id";
-import type { UserTitleState } from "../types";
-import type { CardStreaming, DeckPage, DeckPageCard, KnownStreaming } from "./types";
+import type { DeckFilters, UserTitleState } from "../types";
+import type { CardStreaming, DeckPage, DeckPageCard, DeckRequest, KnownStreaming } from "./types";
 import {
   FOR_YOU_SEED_COUNT,
   JUSTWATCH_ATTRIBUTION,
@@ -11,6 +12,8 @@ import {
   MIN_RATING_PAGE_TARGET,
   MIN_RATING_TAKE_ROUNDS,
   POOL_QUOTA,
+  SHUFFLE_FRONT_BIAS,
+  SHUFFLE_WINDOW_PAGES,
 } from "./constants";
 import { canonicalFilters, decodeCursor, encodeCursor } from "./cursor";
 import { NOW, detailsFor, emptyCountry, fakeService, provider, range, summary, world, type FakeWorld } from "./test-fakes";
@@ -937,5 +940,209 @@ describe("hiddenTitles", () => {
     const { service } = fakeService(world({ states }));
     const result = await service.hiddenTitles(USER, [{ mediaType: "movie", tmdbId: 2, status: "seen", extra: 1 }]);
     expect(result).toEqual({ ok: true, value: [{ mediaType: "movie", tmdbId: 2 }] });
+  });
+});
+
+describe("getDeck: a fresh deal each new deck", () => {
+  const request: DeckRequest = { mode: "popular", filters: { mediaTypes: ["movie"] } };
+  const PAGE_SIZE = 4;
+  /** A popular movie list of `pages` pages. Page n holds IDs (n - 1) * 100 + 1 and up, so an ID names its page. */
+  const listOf = (pages: number) => Array.from({ length: pages }, (_, i) => range("movie", i * 100 + 1, PAGE_SIZE));
+  const pageOfId = (tmdbId: number) => Math.floor(tmdbId / 100) + 1;
+  const order = (seed: string) => seededFrontWeightedOrder(SHUFFLE_WINDOW_PAGES, seed, "pages|popular:movie", SHUFFLE_FRONT_BIAS);
+
+  /** Pages a deck through to its end. Returns each page's cards and every list page read, in order. */
+  async function dealAll(w: FakeWorld) {
+    const { service, calls } = fakeService(w);
+    const dealt: DeckPageCard[][] = [];
+    let cursor: string | null = null;
+    let guard = 0;
+    do {
+      const result = await service.getDeck(USER, { ...request, cursor });
+      if (!result.ok) throw new Error(`expected ok, got ${JSON.stringify(result.error)}`);
+      const page = result.value;
+      if (page.kind !== "cards") throw new Error("expected cards");
+      dealt.push(page.cards);
+      cursor = page.nextCursor;
+    } while (cursor !== null && ++guard < 100);
+    expect(cursor).toBeNull();
+    return { dealt, cards: dealt.flat(), pagesRead: calls.lists.map((c) => c.page), calls };
+  }
+
+  test("reads the window's pages in the seed's order, then the rest in TMDB's order, each page and title exactly once", async () => {
+    const total = SHUFFLE_WINDOW_PAGES + 3;
+    const { cards, pagesRead } = await dealAll(world({ lists: { "popular:movie": listOf(total) }, shuffleSeed: "s1" }));
+    expect(pagesRead).toEqual([...order("s1"), total - 2, total - 1, total]);
+    expect(pagesRead.slice(0, SHUFFLE_WINDOW_PAGES)).not.toEqual(Array.from({ length: SHUFFLE_WINDOW_PAGES }, (_, i) => i + 1));
+    expect(new Set(keysOf(cards)).size).toBe(total * PAGE_SIZE);
+    expect(cards).toHaveLength(total * PAGE_SIZE);
+  });
+
+  test("the same mode and filters open on a different run of cards each time", async () => {
+    const w = world({ lists: { "popular:movie": listOf(SHUFFLE_WINDOW_PAGES) } });
+    const openings = new Set<string>();
+    const firstCards = new Set<string>();
+    for (let i = 0; i < 40; i++) {
+      w.shuffleSeed = `deal-${i}`;
+      const cards = cardsOf((await deck(w, request)).page);
+      openings.add(keysOf(cards).join(","));
+      firstCards.add(keysOf(cards)[0]);
+    }
+    expect(openings.size).toBe(40);
+    // Not only a new order of the same top titles: the opening card comes from all over the window.
+    expect(new Set([...firstCards].map((k) => pageOfId(Number(k.split(":")[1])))).size).toBeGreaterThan(8);
+  });
+
+  test("the same seed is the same deck, page for page", async () => {
+    const lists = { "popular:movie": listOf(SHUFFLE_WINDOW_PAGES + 2) };
+    const a = await dealAll(world({ lists, shuffleSeed: "s1" }));
+    const b = await dealAll(world({ lists, shuffleSeed: "s1" }));
+    expect(b.dealt.map(keysOf)).toEqual(a.dealt.map(keysOf));
+    const c = await dealAll(world({ lists, shuffleSeed: "s2" }));
+    expect(keysOf(c.cards)).not.toEqual(keysOf(a.cards));
+    expect(keysOf(c.cards).sort()).toEqual(keysOf(a.cards).sort());
+  });
+
+  test("a page's titles are dealt in the seed's order, not ranked", async () => {
+    const w = world({ lists: { "popular:movie": [range("movie", 1, 20)] }, shuffleSeed: "s1" });
+    const got = keysOf(cardsOf((await deck(w, request)).page));
+    const ranked = range("movie", 1, 20).map((s) => `movie:${s.tmdbId}`);
+    expect([...got].sort()).toEqual([...ranked].sort());
+    expect(got).not.toEqual(ranked);
+  });
+
+  test("the cursor carries the seed, so one deck keeps its deal even when new decks would get another", async () => {
+    const total = SHUFFLE_WINDOW_PAGES;
+    const w = world({ lists: { "popular:movie": listOf(total) }, shuffleSeed: "s1" });
+    const { service, calls } = fakeService(w);
+    const first = await service.getDeck(USER, request);
+    if (!first.ok || first.value.kind !== "cards") throw new Error("expected cards");
+    const cursor = first.value.nextCursor!;
+    const state = decodeCursor(cursor);
+    if (typeof state === "string") throw new Error(state);
+    expect(state.seed).toBe("s1");
+
+    w.shuffleSeed = "s2";
+    const seen = new Set(keysOf(first.value.cards));
+    let next: string | null = cursor;
+    while (next !== null) {
+      const result = await service.getDeck(USER, { ...request, cursor: next });
+      if (!result.ok || result.value.kind !== "cards") throw new Error("expected cards");
+      for (const key of keysOf(result.value.cards)) {
+        expect(seen.has(key)).toBe(false);
+        seen.add(key);
+      }
+      next = result.value.nextCursor;
+    }
+    expect(calls.lists.map((c) => c.page)).toEqual(order("s1"));
+    expect(seen.size).toBe(total * PAGE_SIZE);
+  });
+
+  test("a short list: a first page past its end costs one extra lookup, then only pages that exist are read", async () => {
+    // A seed whose order opens past page 2, with page 2 before page 1, so the test also sees the order kept.
+    const seed = Array.from({ length: 500 }, (_, i) => `short-${i}`).find((s) => {
+      const o = order(s);
+      return o[0] > 2 && o.indexOf(2) < o.indexOf(1);
+    })!;
+    const { cards, pagesRead, dealt } = await dealAll(world({ lists: { "popular:movie": listOf(2) }, shuffleSeed: seed }));
+    expect(pagesRead).toEqual([order(seed)[0], 2, 1]);
+    expect(keysOf(cards).sort()).toEqual(keysOf([...range("movie", 1, PAGE_SIZE), ...range("movie", 101, PAGE_SIZE)]).sort());
+    // One call: the miss, both real pages, and the end all fit the per-stream page budget.
+    expect(dealt).toHaveLength(1);
+  });
+
+  test("a list with nothing in it is a finished deck, not a stuck one", async () => {
+    const { page, calls } = await deck(world({ lists: { "popular:movie": [] }, shuffleSeed: "s1" }), request);
+    expect(page).toEqual({ kind: "cards", cards: [], nextCursor: null });
+    expect(calls.lists).toHaveLength(1);
+  });
+
+  test("a user who has sorted whole pages skips past them in the seed's order, within the page budget", async () => {
+    const o = order("s1");
+    const sorted = (page: number): UserTitleState[] =>
+      range("movie", (page - 1) * 100 + 1, PAGE_SIZE).map((s) => ({ mediaType: "movie", tmdbId: s.tmdbId, status: "passed" }));
+    const w = world({
+      lists: { "popular:movie": listOf(SHUFFLE_WINDOW_PAGES) },
+      states: [...sorted(o[0]), ...sorted(o[1])],
+      shuffleSeed: "s1",
+    });
+    const { page, calls } = await deck(w, request);
+    expect(calls.lists.map((c) => c.page)).toEqual(o.slice(0, MAX_PAGES_PER_STREAM));
+    expect(new Set(cardsOf(page).map((c) => pageOfId(c.tmdbId)))).toEqual(new Set([o[2]]));
+  });
+
+  test("each stream gets its own page order from the one seed", async () => {
+    const lists = { "popular:movie": listOf(SHUFFLE_WINDOW_PAGES), "popular:tv": Array.from({ length: SHUFFLE_WINDOW_PAGES }, (_, i) => range("tv", i * 100 + 1, PAGE_SIZE)) };
+    let different = 0;
+    for (const seed of ["a", "b", "c", "d", "e"]) {
+      const { calls } = await deck(world({ lists, shuffleSeed: seed }), { mode: "popular" });
+      const first = (stream: string) => calls.lists.find((c) => c.stream === stream)!.page;
+      if (first("popular:movie") !== first("popular:tv")) different++;
+    }
+    expect(different).toBeGreaterThan(0);
+  });
+
+  test("with no seed maker given, every new deck gets its own random seed", async () => {
+    const w = world({ lists: { "popular:movie": listOf(SHUFFLE_WINDOW_PAGES) }, randomSeeds: true });
+    const { service } = fakeService(w);
+    const seedsSeen = new Set<string>();
+    for (let i = 0; i < 20; i++) {
+      const result = await service.getDeck(USER, request);
+      if (!result.ok || result.value.kind !== "cards") throw new Error("expected cards");
+      const state = decodeCursor(result.value.nextCursor);
+      if (typeof state === "string") throw new Error(state);
+      expect(isShuffleSeed(state.seed)).toBe(true);
+      seedsSeen.add(state.seed!);
+    }
+    expect(seedsSeen.size).toBe(20);
+  });
+
+  test("a cursor from before the shuffle (no seed) continues its deck in ranked order", async () => {
+    const w = world({ lists: { "popular:movie": listOf(4) }, shuffleSeed: "s1" });
+    const { service, calls } = fakeService(w);
+    const first = await service.getDeck(USER, request);
+    if (!first.ok || first.value.kind !== "cards") throw new Error("expected cards");
+    const context = decodeCursor(first.value.nextCursor);
+    if (typeof context === "string") throw new Error(context);
+    calls.lists.length = 0;
+    const old = encodeCursor({ ...context, seed: null, positions: new Map([["popular:movie", { page: 2, offset: 0 }]]) });
+    expect(Buffer.from(old, "base64url").toString("utf8")).not.toContain('"r"');
+    const result = await service.getDeck(USER, { ...request, cursor: old });
+    if (!result.ok || result.value.kind !== "cards") throw new Error("expected cards");
+    expect(calls.lists.map((c) => c.page)).toEqual([2, 3, 4]);
+    expect(keysOf(result.value.cards)).toEqual(keysOf([2, 3, 4].flatMap((p) => range("movie", (p - 1) * 100 + 1, PAGE_SIZE))));
+  });
+
+  test("a cursor with a tampered seed is a typed error, with no calls", async () => {
+    const { service, calls } = fakeService(world({ lists: { "popular:movie": listOf(4) }, shuffleSeed: "s1" }));
+    const first = await service.getDeck(USER, request);
+    if (!first.ok || first.value.kind !== "cards") throw new Error("expected cards");
+    const body = JSON.parse(Buffer.from(first.value.nextCursor!, "base64url").toString("utf8"));
+    calls.lists.length = 0;
+    for (const r of ["", "a|b", "x".repeat(33), 7, null, { a: 1 }]) {
+      const cursor = Buffer.from(JSON.stringify({ ...body, r }), "utf8").toString("base64url");
+      expect(await service.getDeck(USER, { ...request, cursor })).toMatchObject({ ok: false, error: { code: "invalid_deck_query", message: "cursor is malformed" } });
+    }
+    expect(calls.lists).toHaveLength(0);
+  });
+
+  test("the blend and for you are shuffled too, and never deal a title twice", async () => {
+    const seedsOf: FakeWorld["seeds"] = [{ mediaType: "movie", tmdbId: 9001 }];
+    const lists = {
+      "popular:movie": [range("movie", 1, 20)],
+      "deep_cuts:movie": [range("movie", 101, 20)],
+      "top_rated:movie": [range("movie", 201, 20, TOP)],
+      "for_you:movie:9001": [range("movie", 301, 20)],
+    };
+    const filters: DeckFilters = { mediaTypes: ["movie"] };
+    const runs = new Set<string>();
+    for (const seed of ["a", "b", "c"]) {
+      const { page } = await deck(world({ lists, seeds: seedsOf, ratedCount: FOR_YOU_MIN_RATINGS, shuffleSeed: seed }), { filters });
+      const cards = cardsOf(page);
+      expect(new Set(keysOf(cards)).size).toBe(cards.length);
+      expect(new Set(cards.map((c) => c.source))).toEqual(new Set(["popular", "deep_cuts", "top_rated", "for_you"]));
+      runs.add(keysOf(cards).join(","));
+    }
+    expect(runs.size).toBe(3);
   });
 });

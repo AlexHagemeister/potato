@@ -64,12 +64,14 @@ You can search for any title at any time. A search result opens the same card yo
 - era (for example, recent releases only)
 - available on my streaming services
 
-**Discovery mode** decides the order the titles come in:
+**Discovery mode** decides which titles come up and what they lean toward:
 
 - popular
 - deep cuts (good titles fewer people know)
 - top rated
 - for you (based on your own ratings)
+
+Each time you choose a mode or filters, or open the app, the deck is a fresh deal: the same choice never gives the same run of cards twice.
 
 The default mode is a blend of these. "For you" needs ratings to work. Until you have rated enough titles, choosing "For you" shows an empty state that asks you to rate more titles to unlock it.
 

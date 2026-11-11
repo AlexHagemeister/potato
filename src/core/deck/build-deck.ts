@@ -2,10 +2,15 @@
 // input always gives the same output. It reads no clock, no randomness, no
 // database, and never mutates its input.
 //
+// A deck is still dealt in a fresh order each time: the caller passes a
+// shuffle seed, and the engine orders each pool from it (see shuffle.ts). The
+// same seed gives the same deck. Without a seed each pool comes out ranked by
+// its own signal.
+//
 // Bad input fails closed or throws. A malformed candidate is skipped, and a
 // malformed state row keeps its title hidden, so one bad row cannot sink the
-// deck. A bad argument (mode, now, ratedCount) is a caller bug, so it throws a
-// RangeError.
+// deck. A bad argument (mode, now, ratedCount, seed) is a caller bug, so it
+// throws a RangeError.
 
 import { tryFormatTitleKey } from "../title-id";
 import {
@@ -26,6 +31,7 @@ import {
   FOR_YOU_MIN_RATINGS,
   VOTE_THRESHOLDS,
 } from "./constants";
+import { isShuffleSeed, seededShuffle } from "./shuffle";
 
 export interface DeckInput {
   /** The user's title_status rows. Raw Drizzle rows fit as is. Rows for titles outside the pools are harmless. */
@@ -40,6 +46,14 @@ export interface DeckInput {
   ratedCount: number;
   /** Candidates per source. A missing pool counts as empty. "for_you" arrives already in taste order. */
   pools: Partial<Record<PoolName, readonly Candidate[]>>;
+  /**
+   * The shuffle seed. With one, each pool's titles are dealt in an order that
+   * depends only on the seed and the title, so a new seed is a new deal and
+   * the same seed is the same deck. Each pool keeps its own gate (the vote
+   * thresholds), so a shuffled deck holds the same titles as a ranked one.
+   * Null or missing: each pool is ranked by its own signal.
+   */
+  seed?: string | null;
 }
 
 /** A card in the deck, tagged with the pool it came from (the first pool it appeared in, for a blend). */
@@ -85,6 +99,11 @@ export function buildDeck(input: DeckInput): DeckResult {
     throw new RangeError(`buildDeck: ratedCount must be a whole number, 0 or more, got ${String(ratedCount)}`);
   }
 
+  const seed = input.seed ?? null;
+  if (seed !== null && !isShuffleSeed(seed)) {
+    throw new RangeError(`buildDeck: seed must be 1 to 32 URL-safe characters, got ${JSON.stringify(seed)}`);
+  }
+
   if (input.mode === "for_you" && !isForYouUnlocked(ratedCount)) return forYouLock(ratedCount);
 
   const hidden = hiddenKeys(input.states, input.now);
@@ -98,7 +117,8 @@ export function buildDeck(input: DeckInput): DeckResult {
       if (key === null || hidden.has(key) || !passes(c)) continue;
       entries.push(toEntry(c, pool, key));
     }
-    return orderPool(pool, entries);
+    const eligible = gatePool(pool, entries);
+    return seed === null ? rankPool(pool, eligible) : seededShuffle(eligible, seed, (e) => e.key);
   };
 
   const active = activePools(input.mode, ratedCount);
@@ -309,25 +329,42 @@ function desc(a: number, b: number): number {
 }
 
 /**
- * Orders one pool by its own signal. Sorts the freshly built entries array, never input.
- * Popular ties keep pool order (Array.prototype.sort is stable). Top rated and
- * deep cuts use a total order, so their pool order never matters.
+ * A pool's own gate: top rated needs enough votes, and a deep cut sits in the
+ * band below that with a good score. Popular and "for you" take every title.
+ * The gate holds whether the pool is then ranked or shuffled.
  */
-function orderPool(pool: PoolName, entries: Entry[]): Entry[] {
+function gatePool(pool: PoolName, entries: Entry[]): Entry[] {
+  switch (pool) {
+    case "top_rated":
+      return entries.filter(({ q }) => q.votes >= VOTE_THRESHOLDS[q.source].topRatedMin);
+
+    case "deep_cuts":
+      return entries.filter(({ q }) => {
+        const t = VOTE_THRESHOLDS[q.source];
+        return q.votes >= t.deepCutsMin && q.votes < t.topRatedMin && q.score >= DEEP_CUTS_MIN_SCORE;
+      });
+
+    case "popular":
+    case "for_you":
+      return entries;
+  }
+}
+
+/**
+ * Ranks one gated pool by its own signal, for a deck with no shuffle seed.
+ * Sorts the freshly built entries array, never input. Popular ties keep pool
+ * order (Array.prototype.sort is stable). Top rated and deep cuts use a total
+ * order, so their pool order never matters. "For you" keeps the order it
+ * arrived in.
+ */
+function rankPool(pool: PoolName, entries: Entry[]): Entry[] {
   switch (pool) {
     case "popular":
       return entries.sort((a, b) => desc(a.popularity, b.popularity));
 
     case "top_rated":
-      return entries.filter(({ q }) => q.votes >= VOTE_THRESHOLDS[q.source].topRatedMin).sort(byQuality);
-
     case "deep_cuts":
-      return entries
-        .filter(({ q }) => {
-          const t = VOTE_THRESHOLDS[q.source];
-          return q.votes >= t.deepCutsMin && q.votes < t.topRatedMin && q.score >= DEEP_CUTS_MIN_SCORE;
-        })
-        .sort(byQuality);
+      return entries.sort(byQuality);
 
     case "for_you":
       return entries;

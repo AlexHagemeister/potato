@@ -72,6 +72,10 @@ export interface FakeWorld {
   settings: { country: string; providerIds: number[] };
   rows: Record<string, CardUserState>;
   seeds: TitleId[];
+  /** The shuffle seed each new deck gets. Missing or null: decks are dealt in ranked order, as before the shuffle. */
+  shuffleSeed?: string | null;
+  /** Leave the service's own seed maker in place, so every new deck gets a random seed as in the app. */
+  randomSeeds?: boolean;
 }
 
 export function world(overrides: Partial<FakeWorld> = {}): FakeWorld {
@@ -158,7 +162,14 @@ export function fakeService(w: FakeWorld) {
     },
   };
 
-  const service = createDeckService({ tmdb, ratings, library, now: () => NOW, onStats: (s) => calls.stats.push(s) });
+  const service = createDeckService({
+    tmdb,
+    ratings,
+    library,
+    now: () => NOW,
+    ...(w.randomSeeds ? {} : { newSeed: () => w.shuffleSeed ?? null }),
+    onStats: (s) => calls.stats.push(s),
+  });
   return { service, calls };
 }
 
