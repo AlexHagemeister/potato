@@ -1,11 +1,11 @@
 // The deck's shuffle. A deck is dealt in a fresh order each time (so the same
-// mode and filters never give the same run of cards twice), yet the engine
+// mode and filters do not give the same run of cards each time), yet the engine
 // stays a pure function: the randomness is a seed the caller passes in, and
 // everything here is computed from it. The same seed gives the same order.
 //
 // No node:crypto: the deck engine is also bundled for the browser.
 
-/** A shuffle seed: 1 to 32 URL-safe characters. The deck service makes one per new deck and carries it in the cursor. */
+/** A shuffle seed: 1 to 32 URL-safe characters. A new deck takes its caller's seed or one the deck service makes, and the cursor carries it. */
 export const SHUFFLE_SEED = /^[A-Za-z0-9_-]{1,32}$/;
 
 export function isShuffleSeed(value: unknown): value is string {
