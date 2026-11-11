@@ -16,3 +16,4 @@ export {
   type VisibilityCheck,
 } from "./build-deck";
 export * from "./constants";
+export { isShuffleSeed, seededFrontWeightedOrder, seededShuffle, seededUnit, SHUFFLE_SEED } from "./shuffle";

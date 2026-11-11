@@ -52,6 +52,8 @@ const service = createDeckService({
   tmdb: getTmdb(),
   ratings: new PostgresRatingsStore(),
   library: libraryForDeck,
+  // One fixed deal, so "same call again" asks for the same pages and reads a warm cache.
+  newShuffleSeed: () => "deck-smoke",
   onStats: (s) => (lastStats = s),
 });
 

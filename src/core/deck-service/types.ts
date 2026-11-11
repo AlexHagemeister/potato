@@ -114,10 +114,24 @@ export interface DeckRequest {
    * without one.
    */
   cursor?: string | null;
+  /**
+   * The shuffle seed for a new deck: 1 to 32 URL-safe characters. Omit it and
+   * the service makes a random one. A caller that keeps its seed and sends it
+   * again without a cursor gets the same deal again (for a retry, or a
+   * refresh after a settings change). Ignored with a cursor, which carries
+   * its deck's seed.
+   */
+  shuffleSeed?: string | null;
 }
 
 /**
  * One page of the deck.
+ *
+ * Each new deck (a request without a cursor) is a fresh deal: the service
+ * shuffles it with a new seed unless the caller passes its own (see
+ * DeckRequest.shuffleSeed), so the same mode and filters give a different
+ * run of cards each time. The cursor carries the seed, so the pages of one
+ * deck belong together.
  *
  * `cards` can be short, or even empty, while `nextCursor` is non-null: the
  * engine drops titles after the service has paid to look them up (top rated

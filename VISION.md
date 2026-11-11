@@ -64,7 +64,7 @@ You can search for any title at any time. A search result opens the same card yo
 - era (for example, recent releases only)
 - available on my streaming services
 
-**Discovery mode** decides the order the titles come in:
+**Discovery mode** decides which titles come up and what they lean toward:
 
 - popular
 - deep cuts (good titles fewer people know)

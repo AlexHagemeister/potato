@@ -24,6 +24,7 @@ import {
   returnToFront,
   stalled,
   startAgain,
+  withShuffleSeed,
 } from "./index";
 
 function card(tmdbId: number, mediaType: MediaType = "movie"): DeckPageCard {
@@ -195,7 +196,7 @@ describe("afterUndo (issue 54)", () => {
   });
 
   test("a listed title that keepOnTop names after a refresh is no longer kept on top", () => {
-    const refreshed = refreshQueue(returnToFront(sortedAway(), card(1)));
+    const refreshed = refreshQueue(returnToFront(sortedAway(), card(1)), false);
     expect(refreshed.keepOnTop).toBe("movie:1");
     const q = afterUndo(refreshed, card(1), { status: "passed" }, now);
     expect(q.keepOnTop).toBeNull();
@@ -227,7 +228,7 @@ describe("keepOutAfterUndo (the Undo's late step, PR 82 review)", () => {
 
   test("never puts back a card a settings refresh took out, so the fresh copy can be dealt", () => {
     // Pass, Undo before the save lands, then the country or services change: the queue refreshes.
-    const refreshed = refreshQueue(returned());
+    const refreshed = refreshQueue(returned(), false);
     expect(ids(refreshed)).toEqual([]);
     const q = keepOutAfterUndo(refreshed, card(1), null, now);
     expect(q).toBe(refreshed);
@@ -237,7 +238,7 @@ describe("keepOutAfterUndo (the Undo's late step, PR 82 review)", () => {
   });
 
   test("a listed row after a refresh: the title stays out of the refreshed deck", () => {
-    const q = keepOutAfterUndo(refreshQueue(returned()), card(1), { status: "passed" }, now);
+    const q = keepOutAfterUndo(refreshQueue(returned(), false), card(1), { status: "passed" }, now);
     expect(ids(addPage(q, { cards: [card(1), card(4)], nextCursor: null }))).toEqual(["movie:4"]);
   });
 });
@@ -274,7 +275,7 @@ describe("refreshQueue", () => {
   test("drops queued cards so the next pages deal them again, keeping sorted titles out", () => {
     let q = addPage(emptyQueue(), { cards: [card(1), card(2), card(3)], nextCursor: "c" });
     q = removeCard(q, card(1)); // sorted
-    q = refreshQueue(q);
+    q = refreshQueue(q, false);
     expect(q.cards).toEqual([]);
     expect(q.cursor).toBeNull();
     expect(needsMore(q)).toBe(true);
@@ -285,7 +286,7 @@ describe("refreshQueue", () => {
 
   test("keeps the old top only for the first page after the refresh", () => {
     let q = addPage(emptyQueue(), { cards: [card(7)], nextCursor: "c" });
-    q = refreshQueue(q);
+    q = refreshQueue(q, false);
     q = addPage(q, { cards: [card(8)], nextCursor: "d" });
     q = addPage(q, { cards: [card(9), card(7)], nextCursor: null });
     expect(ids(q)).toEqual(["movie:8", "movie:9", "movie:7"]);
@@ -309,13 +310,13 @@ describe("deckInputChange", () => {
   });
 
   test("a new mode or new filters refresh the queue and keep Undo", () => {
-    expect(deckInputChange(base, { ...base, choiceKey: "mode=popular" })).toEqual({ refresh: true, dropUndo: false });
-    expect(deckInputChange(base, { ...base, choiceKey: "genre=scifi&type=tv" })).toEqual({ refresh: true, dropUndo: false });
+    expect(deckInputChange(base, { ...base, choiceKey: "mode=popular" })).toEqual({ refresh: true, dropUndo: false, newDeal: true });
+    expect(deckInputChange(base, { ...base, choiceKey: "genre=scifi&type=tv" })).toEqual({ refresh: true, dropUndo: false, newDeal: true });
   });
 
   test("new settings refresh the queue and end Undo, with or without a new choice", () => {
-    expect(deckInputChange(base, { ...base, settingsKey: "GB:8" })).toEqual({ refresh: true, dropUndo: true });
-    expect(deckInputChange(base, { settingsKey: "GB:8", choiceKey: "mode=popular" })).toEqual({ refresh: true, dropUndo: true });
+    expect(deckInputChange(base, { ...base, settingsKey: "GB:8" })).toEqual({ refresh: true, dropUndo: true, newDeal: false });
+    expect(deckInputChange(base, { settingsKey: "GB:8", choiceKey: "mode=popular" })).toEqual({ refresh: true, dropUndo: true, newDeal: true });
   });
 });
 
@@ -372,7 +373,7 @@ describe("dropTitles (a queued title sorted elsewhere)", () => {
 
   test("a dropped title can't come back on top after a refresh", () => {
     let q = addPage(emptyQueue(), { cards: [card(1), card(2)], nextCursor: "c" });
-    q = refreshQueue(q);
+    q = refreshQueue(q, false);
     expect(q.keepOnTop).toBe("movie:1");
     q = dropTitles(q, ["movie:1"]);
     expect(q.keepOnTop).toBeNull();
@@ -389,5 +390,30 @@ describe("queuedTitles", () => {
       { mediaType: "movie", tmdbId: 1 },
     ]);
     expect(queuedTitles(emptyQueue(), 10)).toEqual([]);
+  });
+});
+
+describe("the queue's shuffle seed (its deal)", () => {
+  const dealt = () => addPage(withShuffleSeed(emptyQueue(), () => "s1"), { cards: [card(1), card(2)], nextCursor: "c" });
+
+  test("a new queue has none, takes one once, and keeps it from page to page", () => {
+    expect(emptyQueue().shuffleSeed).toBeNull();
+    const q = dealt();
+    expect(q.shuffleSeed).toBe("s1");
+    expect(withShuffleSeed(q, () => "s2")).toBe(q);
+    expect(addPage(q, { cards: [card(3)], nextCursor: null }).shuffleSeed).toBe("s1");
+  });
+
+  test("a settings refresh, a retry, and a stale cursor keep the deal", () => {
+    expect(refreshQueue(dealt(), false).shuffleSeed).toBe("s1");
+    expect(resumeQueue(dealt()).shuffleSeed).toBe("s1");
+    expect(restartCursor(dealt()).shuffleSeed).toBe("s1");
+    expect(afterRefusal(dealt(), "invalid_deck_query", false)?.shuffleSeed).toBe("s1");
+  });
+
+  test("a new mode or filters, and Check again, start a new deal", () => {
+    expect(refreshQueue(dealt(), true).shuffleSeed).toBeNull();
+    expect(startAgain(dealt(), []).shuffleSeed).toBeNull();
+    expect(withShuffleSeed(startAgain(dealt(), []), () => "s2").shuffleSeed).toBe("s2");
   });
 });

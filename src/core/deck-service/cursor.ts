@@ -3,10 +3,18 @@
 // recommendations list per "for you" seed. The cursor records where each
 // stream stopped, so the next page reads on from there.
 //
+// It also carries the deck's shuffle seed. A new deck (a call without a
+// cursor) takes the caller's seed or else a new one from the service, and the seed sets the order every
+// stream reads its pages in and the order the engine deals each page. Carrying
+// it keeps one deck consistent from page to page. A stream's position counts
+// steps through its page order, not TMDB page numbers (see Stream in
+// service.ts). In a deck with no seed the two are the same.
+//
 // The cursor names no titles. A "for you" stream is named by a hash of the
 // user and its seed title (for_you:<hash>), and the seeds are read again on
-// every call. So a seed keeps its stream's place when the seeds reorder, a new
-// seed starts at page 1, and a dropped seed's place is ignored.
+// every call. So a seed title keeps its stream's place when the seed titles
+// reorder, a new seed title starts at its stream's first step, and a dropped
+// one's place is ignored.
 // A `context` fingerprint binds the cursor to the user and, when "on my
 // services" is on, to their country and services (the discover lists depend
 // on them only then). A mismatch means another user's cursor, or settings
@@ -19,6 +27,7 @@
 // work (the stream count is capped).
 
 import { createHash } from "node:crypto";
+import { isShuffleSeed } from "../deck/shuffle";
 import { DISCOVER_POOLS, type DiscoverPool } from "../tmdb/client";
 import { TMDB_MAX_PAGE } from "../tmdb/constants";
 import type { DeckFilters, DiscoveryMode, MediaType, TitleId } from "../types";
@@ -29,7 +38,11 @@ export type StreamSpec =
   /** `seedHash` names the stream in the cursor without naming the title (see seedStreamHash). */
   | { pool: "for_you"; seedHash: string; seed: TitleId };
 
-/** Where a stream stands: the next title is item `offset` of page `page`. Page 0 means exhausted. */
+/**
+ * Where a stream stands: the next title is item `offset` of the page at step
+ * `page` of the stream's page order. Step n is TMDB page n in a deck with no
+ * shuffle seed. Page 0 means exhausted.
+ */
 export interface StreamPosition {
   page: number;
   offset: number;
@@ -39,6 +52,8 @@ export interface CursorState {
   mode: DiscoveryMode;
   filters: string;
   context: string;
+  /** The deck's shuffle seed, or null for a deck dealt in ranked order. */
+  shuffleSeed: string | null;
   /** Positions by stream ID. */
   positions: Map<string, StreamPosition>;
 }
@@ -91,6 +106,8 @@ export function encodeCursor(state: CursorState): string {
     m: state.mode,
     f: state.filters,
     c: state.context,
+    // Only when set, so a cursor from before the shuffle still continues its (ranked) deck.
+    ...(state.shuffleSeed !== null ? { r: state.shuffleSeed } : {}),
     s: [...state.positions].map(([id, position]) => [id, position.page, position.offset]),
   };
   return Buffer.from(JSON.stringify(body), "utf8").toString("base64url");
@@ -108,9 +125,10 @@ export function decodeCursor(cursor: unknown): CursorState | string {
     return "cursor is malformed";
   }
   if (typeof body !== "object" || body === null) return "cursor is malformed";
-  const { v, m, f, c, s } = body as Record<string, unknown>;
+  const { v, m, f, c, r, s } = body as Record<string, unknown>;
   if (v !== CURSOR_VERSION || typeof m !== "string" || typeof f !== "string" || !Array.isArray(s)) return "cursor is malformed";
   if (typeof c !== "string" || !FINGERPRINT.test(c)) return "cursor is malformed";
+  if (r !== undefined && !isShuffleSeed(r)) return "cursor is malformed";
   if (s.length > MAX_STREAMS) return "cursor names too many streams";
   const positions = new Map<string, StreamPosition>();
   for (const entry of s) {
@@ -120,5 +138,5 @@ export function decodeCursor(cursor: unknown): CursorState | string {
     if (positions.has(id)) return "cursor repeats a stream";
     positions.set(id, { page, offset });
   }
-  return { mode: m as DiscoveryMode, filters: f, context: c, positions };
+  return { mode: m as DiscoveryMode, filters: f, context: c, shuffleSeed: r ?? null, positions };
 }

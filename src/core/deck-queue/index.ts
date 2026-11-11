@@ -46,6 +46,14 @@ export interface DeckQueue {
    * again, it goes back on top, so the user keeps their card with fresh data.
    */
   keepOnTop: string | null;
+  /**
+   * The deal this queue asks for: the shuffle seed it sends with a first page
+   * (a call without a cursor). The queue holds it so the same deal comes back
+   * when a first page is asked for again (a retry, a stale cursor, a refresh
+   * after a settings change). Null until the screen gives it one
+   * (withShuffleSeed), and again when a new deal is due.
+   */
+  shuffleSeed: string | null;
 }
 
 export function titleKey(ref: TitleId): string {
@@ -53,7 +61,16 @@ export function titleKey(ref: TitleId): string {
 }
 
 export function emptyQueue(): DeckQueue {
-  return { cards: [], dealt: new Set(), cursor: null, exhausted: false, emptyPages: 0, keepOnTop: null };
+  return { cards: [], dealt: new Set(), cursor: null, exhausted: false, emptyPages: 0, keepOnTop: null, shuffleSeed: null };
+}
+
+/**
+ * The queue with a shuffle seed for its deal: its own if it has one, or else
+ * a new one from `make`. The queue stays pure: the screen brings the
+ * randomness, and makes a seed only when a new deal is due.
+ */
+export function withShuffleSeed(queue: DeckQueue, make: () => string): DeckQueue {
+  return queue.shuffleSeed === null ? { ...queue, shuffleSeed: make() } : queue;
 }
 
 /** Appends a page's new cards and takes its cursor. */
@@ -69,6 +86,7 @@ export function addPage(queue: DeckQueue, page: { cards: DeckPageCard[]; nextCur
   const top = queue.keepOnTop === null ? -1 : fresh.findIndex((c) => titleKey(c) === queue.keepOnTop);
   if (top > 0) fresh.unshift(...fresh.splice(top, 1));
   return {
+    ...queue,
     cards: [...queue.cards, ...fresh],
     dealt,
     cursor: page.nextCursor,
@@ -110,7 +128,7 @@ export function resumeQueue(queue: DeckQueue): DeckQueue {
 /**
  * Forgets the cursor but keeps the cards and what was dealt: the service
  * rejected the cursor (stale after a settings change), so the next page
- * starts the deck again and dedupe drops what this queue already showed.
+ * starts the same deal again and dedupe drops what this queue already showed.
  */
 export function restartCursor(queue: DeckQueue): DeckQueue {
   return { ...queue, cursor: null, exhausted: false, emptyPages: 0 };
@@ -130,16 +148,20 @@ export function afterRefusal(queue: DeckQueue, error: string, alreadyRestarted: 
 /**
  * The user's country or services changed, so every queued card shows stale
  * streaming data, or the mode or filters changed, so they are the wrong cards
- * (see deckInputChange). Drops the queued cards and starts the deck again
- * from the first page. The dropped titles are forgotten, so the next pages deal them
- * again with fresh data. Sorted titles stay in dealt, so a sort still saving
- * can't come back. The card on screen returns on top if the first page has it.
+ * (see deckInputChange). Drops the queued cards and asks for a first page
+ * again. The dropped titles are forgotten, so they can be dealt again. Sorted
+ * titles stay in dealt, so a sort still saving can't come back.
+ *
+ * `newDeal` says which deck comes next. False (a settings change) keeps the
+ * queue's shuffle seed, so the same deal comes back with fresh data and the
+ * card on screen returns on top if the first page has it. True (a new mode or
+ * filters) drops the seed, so the next deck is a fresh deal.
  */
-export function refreshQueue(queue: DeckQueue): DeckQueue {
+export function refreshQueue(queue: DeckQueue, newDeal: boolean): DeckQueue {
   const dealt = new Set(queue.dealt);
   for (const card of queue.cards) dealt.delete(titleKey(card));
   const top = queue.cards[0];
-  return { cards: [], dealt, cursor: null, exhausted: false, emptyPages: 0, keepOnTop: top ? titleKey(top) : null };
+  return { cards: [], dealt, cursor: null, exhausted: false, emptyPages: 0, keepOnTop: top ? titleKey(top) : null, shuffleSeed: newDeal ? null : queue.shuffleSeed };
 }
 
 /**
@@ -163,22 +185,27 @@ export interface DeckInputs {
 /** What a change to the deck's inputs means for the queue. */
 export type DeckInputChange =
   | { refresh: false }
-  /** Refresh the queue (refreshQueue). dropUndo: the last sort's Undo would bring back a card with stale streaming data. */
-  | { refresh: true; dropUndo: boolean };
+  /**
+   * Refresh the queue (refreshQueue). dropUndo: the last sort's Undo would bring back a card with stale streaming data.
+   * newDeal: the mode or filters changed, so the next deck is a fresh deal. A settings change alone keeps the deal.
+   */
+  | { refresh: true; dropUndo: boolean; newDeal: boolean };
 
 /**
  * The staleness rule for the deck's inputs (dropTitles is the one for titles
  * sorted elsewhere). A new mode or new filters make the
  * queued cards the wrong ones, and new settings make their streaming data
- * stale: either way the queue refreshes (refreshQueue), and the card on
- * screen stays on top if the first new page deals it. Only a settings change
+ * stale: either way the queue refreshes (refreshQueue). A settings change
+ * keeps the deal, so the card on screen stays on top when the first new page
+ * deals it. A new mode or new filters start a fresh deal. Only a settings change
  * ends the last sort's Undo window. After a mode or filter change, Undo still
  * brings the card back, even if it no longer matches: the user asked for it.
  */
 export function deckInputChange(prev: DeckInputs, next: DeckInputs): DeckInputChange {
   const settings = prev.settingsKey !== next.settingsKey;
-  if (!settings && prev.choiceKey === next.choiceKey) return { refresh: false };
-  return { refresh: true, dropUndo: settings };
+  const choice = prev.choiceKey !== next.choiceKey;
+  if (!settings && !choice) return { refresh: false };
+  return { refresh: true, dropUndo: settings, newDeal: choice };
 }
 
 /**
@@ -214,14 +241,14 @@ export function dropTitles(queue: DeckQueue, keys: Iterable<string>, keep: Itera
 }
 
 /**
- * Starts the deck again from the first page (Check again) and forgets the
+ * Starts a new deal (Check again) and forgets the
  * titles it dealt, except the queued cards and `keep` (sorts still saving),
  * so a skip that expired or a title moved in Lists can be dealt again.
  */
 export function startAgain(queue: DeckQueue, keep: Iterable<string>): DeckQueue {
   const dealt = new Set(keep);
   for (const card of queue.cards) dealt.add(titleKey(card));
-  return { ...restartCursor(queue), dealt };
+  return { ...restartCursor(queue), dealt, shuffleSeed: null };
 }
 
 /**

@@ -6,12 +6,24 @@
 // Dependencies are injected, so tests run with a fake TMDB client and fake
 // repositories. index.ts wires the real ones.
 //
+// Each new deck (a call without a cursor) gets a shuffle seed, carried in the
+// cursor: the caller's (DeckRequest.shuffleSeed), or else a fresh random one.
+// A caller that holds its seed gets the same deal again, which is how the
+// Discover screen keeps its cards through a settings refresh or a retry. The
+// seed sets the order each stream reads its first pages in
+// (Stream) and the order the engine deals each page's titles, so choosing the
+// same mode and filters again deals a different run of cards.
+//
 // The bound on TMDB work per getDeck call (Vercel Hobby, a fast first card,
 // and politeness to TMDB, which publishes no fixed rate limit):
 // - List lookups: at most MAX_PAGES_PER_STREAM per stream. Streams are one per
 //   discover pool and media type (at most 3 * 2) plus one per "for you" seed
 //   (at most FOR_YOU_SEED_COUNT), so at most 3 * 11 = 33. Usually one per
-//   stream, and discover pages are shared across users in the cache.
+//   stream, and discover pages are shared across users in the cache. A new
+//   deck's first shuffled page can lie past the end of a short list: TMDB
+//   answers with no titles and the list's real length, and the stream moves
+//   to a page that exists. That costs a short list one extra lookup per deck,
+//   inside the same per-stream budget.
 // - Details lookups: one per title taken, at most POOL_QUOTA per pool (times
 //   the pool's blend weight in the blend), so 20 for a single mode and 32 for
 //   the blend at even weights. With a minimum IMDb rating a thin page takes up
@@ -21,9 +33,11 @@
 // - One IMDb ratings query per round, plus a one-row probe of the ratings
 //   table when a query finds nothing (see lookupRatings).
 
+import { randomBytes } from "node:crypto";
 import { mapWithConcurrency } from "../concurrency";
 import { MEDIA_TYPES } from "@/db/schema";
 import { activePools, buildDeck, createFilterMatcher, createVisibilityCheck, dealsForYou, forYouLock, isForYouUnlocked } from "../deck/build-deck";
+import { isShuffleSeed, seededFrontWeightedOrder } from "../deck/shuffle";
 import { getRatings, type RatingsDatasetProbe, type RatingsStore } from "../imdb/ratings";
 import { parseFilters } from "../library/list";
 import { fail, ok, validateUserId, type Result } from "../result";
@@ -54,6 +68,9 @@ import {
   MIN_RATING_TAKE_ROUNDS,
   POOL_QUOTA,
   RATINGS_PROBE_TTL_MS,
+  SHUFFLE_FRONT_BIAS,
+  FOR_YOU_SHUFFLE_WINDOW_PAGES,
+  SHUFFLE_WINDOW_PAGES,
 } from "./constants";
 import {
   canonicalFilters,
@@ -90,6 +107,14 @@ export interface DeckServiceDeps {
   ratings: RatingsStore & RatingsDatasetProbe;
   library: DeckLibrary;
   now?: () => Date;
+  /**
+   * The shuffle seed for a new deck (a getDeck call without a cursor) when the
+   * caller passes none. By
+   * default a random one, so every new deck is a fresh deal. Null deals the
+   * deck in ranked order, with every list read from its first page (tests and
+   * tuning).
+   */
+  newShuffleSeed?: () => string | null;
   /** Called with each getDeck call's counts. For the smoke test and tuning. */
   onStats?: (stats: DeckStats) => void;
 }
@@ -100,11 +125,14 @@ interface ParsedRequest {
   mode: DiscoveryMode;
   filters: DeckFilters;
   cursor: CursorState | null;
+  /** The caller's shuffle seed for a new deck, or null to let the service make one. */
+  shuffleSeed: string | null;
 }
 
 export function createDeckService(deps: DeckServiceDeps) {
   const { tmdb, ratings, library } = deps;
   const clock = deps.now ?? (() => new Date());
+  const newShuffleSeed = deps.newShuffleSeed ?? randomShuffleSeed;
   /** Until when "the ratings table has rows" is trusted without asking again. */
   let datasetLoadedUntil = 0;
 
@@ -156,7 +184,7 @@ export function createDeckService(deps: DeckServiceDeps) {
     if (!u.ok) return u;
     const parsed = parseRequest(request);
     if (!parsed.ok) return parsed;
-    const { mode, filters, cursor } = parsed.value;
+    const { mode, filters, cursor, shuffleSeed: askedSeed } = parsed.value;
     const now = clock();
     const mediaTypes: MediaType[] = filters.mediaTypes?.length
       ? MEDIA_TYPES.filter((m) => filters.mediaTypes!.includes(m))
@@ -191,11 +219,15 @@ export function createDeckService(deps: DeckServiceDeps) {
     // With no services, "on my services" matches nothing. An empty provider list would also drop TMDB's server-side filter.
     if (filters.onMyServices && providerIds.length === 0) return ok({ kind: "cards", cards: [], nextCursor: null });
 
+    // A cursor continues the deal it came from. A new deck takes the caller's seed, or else a new deal.
+    const shuffleSeed = cursor ? cursor.shuffleSeed : (askedSeed ?? newShuffleSeed());
+    if (shuffleSeed !== null && !isShuffleSeed(shuffleSeed)) throw new Error("getDeck: newShuffleSeed returned a bad shuffle seed");
+
     const active = activePools(mode, ratedCount);
     const pools = active.map((p) => p.pool);
     // The streams this request reads, each resumed from its place in the cursor if it has one. Anything else in the
-    // cursor is ignored, never fetched. A seed's stream is named by its title, so it keeps its place when the seeds
-    // reorder, and a seed new to the top 5 starts at page 1.
+    // cursor is ignored, never fetched. A seed title's stream is named by its title, so it keeps its place when the seed
+    // titles reorder, and one new to the top 5 starts at its stream's first step.
     const specs = requestStreams(pools, mediaTypes, seeds, u.value).map((spec) => ({
       spec,
       position: cursor?.positions.get(streamId(spec)) ?? { page: 1, offset: 0 },
@@ -205,7 +237,7 @@ export function createDeckService(deps: DeckServiceDeps) {
     const discoverFilters = toDiscoverFilters(filters, providerIds, country);
     const streams = specs.map(
       ({ spec, position }) =>
-        new Stream(spec, position, (page) => {
+        new Stream(spec, position, pageOrder(shuffleSeed, spec), (page) => {
           stats.listLookups++;
           return spec.pool === "for_you"
             ? tmdb.recommendations(spec.seed, { genreIds: discoverFilters.genreIds, era: discoverFilters.era }, page)
@@ -320,6 +352,7 @@ export function createDeckService(deps: DeckServiceDeps) {
         now,
         ratedCount,
         pools: candidatePools,
+        shuffleSeed,
       });
       if (result.kind !== "cards") throw new Error("getDeck: the engine locked a deck the service had unlocked");
       if (result.cards.length >= MIN_RATING_PAGE_TARGET) break;
@@ -353,6 +386,7 @@ export function createDeckService(deps: DeckServiceDeps) {
           mode,
           filters: canonicalFilters(filters),
           context,
+          shuffleSeed,
           positions: new Map(positions.map(({ spec, position }) => [streamId(spec), position])),
         });
 
@@ -430,11 +464,30 @@ function invalid<T>(message: string): Result<T> {
   return fail({ code: "invalid_deck_query", message });
 }
 
+/** A fresh shuffle seed: 12 random URL-safe characters. */
+function randomShuffleSeed(): string {
+  return randomBytes(9).toString("base64url");
+}
+
+/**
+ * The order a stream reads its first pages in, for this deck's shuffle seed:
+ * a shuffle that leans toward the front, different for each stream. The
+ * window is SHUFFLE_WINDOW_PAGES for a discover list and the narrower
+ * FOR_YOU_SHUFFLE_WINDOW_PAGES for a recommendations list. Empty for a deck
+ * with no shuffle seed, which reads every list in TMDB's order.
+ */
+function pageOrder(shuffleSeed: string | null, spec: StreamSpec): number[] {
+  if (shuffleSeed === null) return [];
+  const window = spec.pool === "for_you" ? FOR_YOU_SHUFFLE_WINDOW_PAGES : SHUFFLE_WINDOW_PAGES;
+  return seededFrontWeightedOrder(window, shuffleSeed, `pages|${streamId(spec)}`, SHUFFLE_FRONT_BIAS);
+}
+
 /** Checks a request that may have come from JSON (the API, an MCP call). */
 function parseRequest(request: unknown): Result<ParsedRequest> {
   const raw = request ?? {};
   if (typeof raw !== "object" || Array.isArray(raw)) return invalid("request must be an object");
-  const { mode = "blend", filters, cursor } = raw as Record<string, unknown>;
+  const { mode = "blend", filters, cursor, shuffleSeed = null } = raw as Record<string, unknown>;
+  if (shuffleSeed !== null && !isShuffleSeed(shuffleSeed)) return invalid("shuffleSeed must be 1 to 32 URL-safe characters");
   if (!(DISCOVERY_MODES as readonly unknown[]).includes(mode)) return invalid(`unknown discovery mode ${JSON.stringify(mode)}`);
   const f = parseFilters(filters);
   if (!f.ok) return invalid(f.error.code === "invalid_list_query" ? f.error.message : "filters are invalid");
@@ -456,7 +509,7 @@ function parseRequest(request: unknown): Result<ParsedRequest> {
     }
     state = decoded;
   }
-  return ok({ mode: mode as DiscoveryMode, filters: f.value, cursor: state });
+  return ok({ mode: mode as DiscoveryMode, filters: f.value, cursor: state, shuffleSeed });
 }
 
 /** The seeds in order, of the wanted media types, each once, at most FOR_YOU_SEED_COUNT. */
@@ -540,15 +593,25 @@ function deckUserState(s: UserTitleState | undefined): CardUserState | null {
  * where it was, so the next call retries it, unless TMDB refused the request
  * in a way a retry will not change (isPermanentTmdbFailure): then the stream
  * ends, as on a 404, so a list that always fails cannot block the deck.
+ *
+ * The stream walks the list in steps. Step n reads page `order[n - 1]` while
+ * the order lasts (the deck's shuffled window of first pages), and page n
+ * after it, so every page is read exactly once: the window first, shuffled,
+ * then the rest in TMDB's order. An empty order reads the list front to back.
+ * The stream learns the list's last page from its first read, and from then
+ * on steps over window pages that lie past it. A step that turns out to lie
+ * past the end (the first read of a short list, or a list that shrank) reads
+ * as an empty page and is stepped over the same way.
  */
 class Stream {
-  private page: number;
+  private step: number;
   private offset: number;
   private exhausted: boolean;
   private failed = false;
   private fetches = 0;
   private results: TitleSummary[] | null = null;
-  private totalPages = 0;
+  /** The list's last page, once a read has told us. */
+  private lastPage = 0;
   /** True once the position has moved (or the stream ran out) during this call. */
   progressed = false;
   readonly exhaustedAtStart: boolean;
@@ -556,16 +619,22 @@ class Stream {
   constructor(
     readonly spec: StreamSpec,
     start: StreamPosition,
+    private readonly order: readonly number[],
     private readonly fetchPage: (page: number) => Promise<ResultPage<TitleSummary>>,
   ) {
-    this.page = start.page;
+    this.step = start.page;
     this.offset = start.offset;
     this.exhausted = start.page === 0;
     this.exhaustedAtStart = this.exhausted;
   }
 
   get position(): StreamPosition {
-    return this.exhausted ? { page: 0, offset: 0 } : { page: this.page, offset: this.offset };
+    return this.exhausted ? { page: 0, offset: 0 } : { page: this.step, offset: this.offset };
+  }
+
+  /** The TMDB page a step reads. */
+  private pageAt(step: number): number {
+    return step <= this.order.length ? this.order[step - 1] : step;
   }
 
   /** Makes sure the current page is loaded. False when the stream is out, failed, or over its page budget. */
@@ -573,20 +642,21 @@ class Stream {
     if (this.results !== null) return true;
     if (this.exhausted || this.failed || this.fetches >= MAX_PAGES_PER_STREAM) return false;
     this.fetches++;
+    const pageNumber = this.pageAt(this.step);
     try {
-      const page = await this.fetchPage(this.page);
+      const page = await this.fetchPage(pageNumber);
       this.results = page.results;
-      this.totalPages = page.totalPages;
+      this.lastPage = Math.min(page.totalPages, TMDB_MAX_PAGE);
       return true;
     } catch (err) {
       if (isPermanentTmdbFailure(err)) {
         this.exhausted = true;
         this.progressed = true;
-        console.warn(`deck: TMDB refused ${streamId(this.spec)} page ${this.page} for good, ending that stream:`, err);
+        console.warn(`deck: TMDB refused ${streamId(this.spec)} page ${pageNumber} for good, ending that stream:`, err);
         return false;
       }
       this.failed = true;
-      console.warn(`deck: TMDB list lookup failed for ${streamId(this.spec)} page ${this.page}:`, err);
+      console.warn(`deck: TMDB list lookup failed for ${streamId(this.spec)} page ${pageNumber}:`, err);
       return false;
     }
   }
@@ -601,11 +671,14 @@ class Stream {
         return results[this.offset++];
       }
       this.progressed = true;
-      if (this.page >= Math.min(this.totalPages, TMDB_MAX_PAGE)) {
+      // The next step whose page exists. Inside the window that skips pages past the list's end.
+      do this.step++;
+      while (this.step <= this.order.length && this.pageAt(this.step) > this.lastPage);
+      // Past the window a step is its own page number, so the list is done once the step passes its last page.
+      if (this.step > this.order.length && this.step > this.lastPage) {
         this.exhausted = true;
         return undefined;
       }
-      this.page++;
       this.offset = 0;
       this.results = null;
     }
