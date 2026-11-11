@@ -1,6 +1,7 @@
 "use client";
 
 import type { Card, CardImdb, CardProvider, StreamingOffer } from "@/core/deck-service/types";
+import { imdbTitleUrl } from "@/core/imdb/url";
 import { formatTitleKey } from "@/core/title-id";
 import { Trailer } from "./trailer";
 
@@ -40,10 +41,23 @@ const OFFER_WORDS: Record<StreamingOffer, string> = {
   buy: "Buy",
 };
 
-/** The IMDb rating, large (VISION invariant 5). "Not loaded" is a neutral dash, never "no rating". */
+/** What a screen reader says for the rating when it is a link. */
+function imdbLinkLabel(imdb: CardImdb): string {
+  if (imdb.kind === "rated") return `IMDb rating ${imdb.rating.toFixed(1)}, ${compact.format(imdb.votes)} votes. Open on IMDb`;
+  if (imdb.kind === "none") return "No IMDb rating. Open on IMDb";
+  return "IMDb rating not available right now. Open on IMDb";
+}
+
+/**
+ * The IMDb rating, large (VISION invariant 5). "Not loaded" is a neutral dash,
+ * never "no rating". With an IMDb ID, in any of the three states, the badge
+ * and rating are one link to the title's IMDb page (issue 123). Without an ID
+ * they stay plain text.
+ */
 function ImdbRating({ imdb }: { imdb: CardImdb }) {
-  return (
-    <div className="flex items-center gap-3" data-imdb={imdb.kind}>
+  const url = imdbTitleUrl(imdb.imdbId);
+  const content = (
+    <>
       <span className="rounded-md bg-accent px-1.5 py-0.5 text-sm font-black tracking-tight text-black">IMDb</span>
       {imdb.kind === "rated" && (
         <p className="flex items-baseline gap-2">
@@ -57,6 +71,29 @@ function ImdbRating({ imdb }: { imdb: CardImdb }) {
           –
         </p>
       )}
+    </>
+  );
+
+  if (!url) {
+    return (
+      <div className="flex items-center gap-3" data-imdb={imdb.kind}>
+        {content}
+      </div>
+    );
+  }
+  // The ::after pad grows the tap target to 44px or more in every state
+  // without moving the layout. A new tab leaves the card where it was.
+  return (
+    <div className="flex" data-imdb={imdb.kind}>
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={imdbLinkLabel(imdb)}
+        className="relative flex items-center gap-3 rounded-md after:absolute after:-inset-2 after:content-[''] active:opacity-60"
+      >
+        {content}
+      </a>
     </div>
   );
 }
