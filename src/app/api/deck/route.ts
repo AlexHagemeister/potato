@@ -12,14 +12,16 @@ import { getCurrentUserForRequest } from "@/lib/current-user";
 // server actions one at a time, so a page fetch sent as an action would wait
 // behind every card tap, and every tap behind the fetch.
 //
-//   GET /api/deck?cursor=<nextCursor>&mode=<mode>&type=&genre=&era=&mine=
+//   GET /api/deck?cursor=<nextCursor>&shuffle=<seed>&mode=<mode>&type=&genre=&era=&mine=
 //
 // The filter parameters are core's filter choice (filterChoiceToParams in
 // src/core/filters). A cursor only works with the mode and filters it came
-// from: anything else is invalid_deck_query.
+// from: anything else is invalid_deck_query. `shuffle` names the deal of a
+// first page (a call without a cursor), so the client can ask for the same
+// deal again. Core checks it and ignores it beside a cursor.
 //
 // 200 { ok: true, page }      a DeckPage (cards, locked, or no_seeds)
-// 400 { ok: false, error }    invalid_deck_query: a bad mode or a stale cursor. Start again without a cursor.
+// 400 { ok: false, error }    invalid_deck_query: a bad mode, a bad shuffle seed, or a stale cursor. Start again without a cursor.
 // 401 { ok: false, error }    signed_out: no session, or the user row is gone
 // 503 { ok: false, error }    unavailable: TMDB (or the database) failed. Retry later.
 export const dynamic = "force-dynamic";
@@ -44,6 +46,7 @@ export async function GET(request: Request): Promise<Response> {
   try {
     const result = await getDeck(user.id, {
       cursor: cursor || null,
+      shuffleSeed: params.get("shuffle") || null,
       // Core rejects an unknown mode with invalid_deck_query.
       ...(mode ? { mode: mode as DiscoveryMode } : {}),
       // Era presets resolve against the server's clock, so "Recent" stays recent.

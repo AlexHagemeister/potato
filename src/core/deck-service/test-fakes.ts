@@ -167,7 +167,7 @@ export function fakeService(w: FakeWorld) {
     ratings,
     library,
     now: () => NOW,
-    ...(w.randomSeeds ? {} : { newSeed: () => w.shuffleSeed ?? null }),
+    ...(w.randomSeeds ? {} : { newShuffleSeed: () => w.shuffleSeed ?? null }),
     onStats: (s) => calls.stats.push(s),
   });
   return { service, calls };

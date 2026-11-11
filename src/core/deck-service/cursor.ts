@@ -3,8 +3,8 @@
 // recommendations list per "for you" seed. The cursor records where each
 // stream stopped, so the next page reads on from there.
 //
-// It also carries the deck's shuffle seed. The service makes a new seed for
-// each new deck (a call without a cursor), and the seed sets the order every
+// It also carries the deck's shuffle seed. A new deck (a call without a
+// cursor) takes the caller's seed or else a new one from the service, and the seed sets the order every
 // stream reads its pages in and the order the engine deals each page. Carrying
 // it keeps one deck consistent from page to page. A stream's position counts
 // steps through its page order, not TMDB page numbers (see Stream in
@@ -12,8 +12,9 @@
 //
 // The cursor names no titles. A "for you" stream is named by a hash of the
 // user and its seed title (for_you:<hash>), and the seeds are read again on
-// every call. So a seed keeps its stream's place when the seeds reorder, a new
-// seed starts at page 1, and a dropped seed's place is ignored.
+// every call. So a seed title keeps its stream's place when the seed titles
+// reorder, a new seed title starts at its stream's first step, and a dropped
+// one's place is ignored.
 // A `context` fingerprint binds the cursor to the user and, when "on my
 // services" is on, to their country and services (the discover lists depend
 // on them only then). A mismatch means another user's cursor, or settings
@@ -52,7 +53,7 @@ export interface CursorState {
   filters: string;
   context: string;
   /** The deck's shuffle seed, or null for a deck dealt in ranked order. */
-  seed: string | null;
+  shuffleSeed: string | null;
   /** Positions by stream ID. */
   positions: Map<string, StreamPosition>;
 }
@@ -106,7 +107,7 @@ export function encodeCursor(state: CursorState): string {
     f: state.filters,
     c: state.context,
     // Only when set, so a cursor from before the shuffle still continues its (ranked) deck.
-    ...(state.seed !== null ? { r: state.seed } : {}),
+    ...(state.shuffleSeed !== null ? { r: state.shuffleSeed } : {}),
     s: [...state.positions].map(([id, position]) => [id, position.page, position.offset]),
   };
   return Buffer.from(JSON.stringify(body), "utf8").toString("base64url");
@@ -137,5 +138,5 @@ export function decodeCursor(cursor: unknown): CursorState | string {
     if (positions.has(id)) return "cursor repeats a stream";
     positions.set(id, { page, offset });
   }
-  return { mode: m as DiscoveryMode, filters: f, context: c, seed: r ?? null, positions };
+  return { mode: m as DiscoveryMode, filters: f, context: c, shuffleSeed: r ?? null, positions };
 }

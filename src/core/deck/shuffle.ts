@@ -32,7 +32,8 @@ function hash53(text: string): number {
  */
 export function seededUnit(seed: string, key: string): number {
   // The separator keeps ("ab", "c") and ("a", "bc") apart. A seed never holds one (SHUFFLE_SEED).
-  return (hash53(`${seed}|${key}`) + 0.5) / 2 ** 53;
+  // The hash's top 52 bits plus a half: a double holds every such value exactly, so the result is never 0 or 1.
+  return (Math.floor(hash53(`${seed}|${key}`) / 2) + 0.5) / 2 ** 52;
 }
 
 /**

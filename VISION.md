@@ -71,8 +71,6 @@ You can search for any title at any time. A search result opens the same card yo
 - top rated
 - for you (based on your own ratings)
 
-Each time you choose a mode or filters, or open the app, the deck is a fresh deal: the same choice never gives the same run of cards twice.
-
 The default mode is a blend of these. "For you" needs ratings to work. Until you have rated enough titles, choosing "For you" shows an empty state that asks you to rate more titles to unlock it.
 
 The test case: "a good modern sci-fi series on something I already pay for" takes a few taps.

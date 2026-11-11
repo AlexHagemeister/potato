@@ -38,6 +38,7 @@ import {
   returnToFront,
   queueStop,
   startAgain,
+  withShuffleSeed,
   titleKey,
   type DeckQueue,
 } from "@/core/deck-queue";
@@ -419,7 +420,7 @@ function rebase(settingsKey: string, choice: DeckChoice): boolean {
   if (!change.refresh) return false;
   if (change.dropUndo) dropUndo();
   fetchEpoch++;
-  set({ settingsKey, choice, queue: refreshQueue(state.queue), gate: null, failed: false });
+  set({ settingsKey, choice, queue: refreshQueue(state.queue, change.newDeal), gate: null, failed: false });
   return true;
 }
 
@@ -439,7 +440,7 @@ function reset(userId: string, settingsKey: string, savedChoice: DeckChoice) {
 }
 
 /**
- * The deck ran out: ask again from the first page. Saves still in flight keep
+ * The deck ran out: ask for a new deal. Saves still in flight keep
  * their handlers and stay out of the new deck, so a sort that hasn't landed
  * can't be dealt again. Other titles dealt earlier may come back (a skip that
  * expired, a title moved in Lists); the service already leaves out the rest.
@@ -456,9 +457,17 @@ export function retry() {
   void fill();
 }
 
-async function fetchPage(cursor: string | null, choice: DeckChoice): Promise<DeckResponse> {
+/** A shuffle seed for a new deal: 12 random URL-safe characters. The service checks it. */
+function newShuffleSeed(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(9));
+  return btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_");
+}
+
+async function fetchPage(queue: DeckQueue, choice: DeckChoice): Promise<DeckResponse> {
   const params = new URLSearchParams(deckChoiceToParams(choice));
-  if (cursor) params.set("cursor", cursor);
+  if (queue.cursor) params.set("cursor", queue.cursor);
+  // A first page names its deal, so asking again (a retry, a settings refresh) gets the same cards.
+  else if (queue.shuffleSeed) params.set("shuffle", queue.shuffleSeed);
   try {
     const res = await fetch(`/api/deck${params.size ? `?${params}` : ""}`, { cache: "no-store" });
     return (await res.json()) as DeckResponse;
@@ -480,8 +489,10 @@ async function fill() {
   try {
     // A failed fetch doesn't stop later fills: the next sort or tab visit tries again.
     while (state.userId && !state.gate && needsMore(state.queue)) {
+      // A new deal gets its seed here, once. The queue keeps it until the next new deal.
+      if (state.queue.shuffleSeed === null) set({ queue: withShuffleSeed(state.queue, newShuffleSeed) });
       const epoch = fetchEpoch;
-      const body = await fetchPage(state.queue.cursor, state.choice);
+      const body = await fetchPage(state.queue, state.choice);
       if (epoch !== fetchEpoch) {
         restarted = false;
         continue;

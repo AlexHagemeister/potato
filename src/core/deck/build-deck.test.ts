@@ -825,23 +825,23 @@ describe("buildDeck: a shuffle seed", () => {
 
   test("deals the same titles as the ranked deck, in another order", () => {
     const ranked = keys(run({ pools: { popular } }));
-    const shuffled = keys(run({ pools: { popular }, seed: "s1" }));
+    const shuffled = keys(run({ pools: { popular }, shuffleSeed: "s1" }));
     expect(ranked).toEqual(popular.map((c) => `movie:${c.tmdbId}`));
     expect([...shuffled].sort()).toEqual([...ranked].sort());
     expect(shuffled).not.toEqual(ranked);
   });
 
   test("the same seed gives the same deck, whatever order the pool arrived in, and a new seed gives a new one", () => {
-    const a = keys(run({ pools: { popular }, seed: "s1" }));
-    expect(keys(run({ pools: { popular }, seed: "s1" }))).toEqual(a);
-    expect(keys(run({ pools: { popular: [...popular].reverse() }, seed: "s1" }))).toEqual(a);
-    expect(keys(run({ pools: { popular }, seed: "s2" }))).not.toEqual(a);
+    const a = keys(run({ pools: { popular }, shuffleSeed: "s1" }));
+    expect(keys(run({ pools: { popular }, shuffleSeed: "s1" }))).toEqual(a);
+    expect(keys(run({ pools: { popular: [...popular].reverse() }, shuffleSeed: "s1" }))).toEqual(a);
+    expect(keys(run({ pools: { popular }, shuffleSeed: "s2" }))).not.toEqual(a);
   });
 
   test("null or no seed is the ranked deck", () => {
     const ranked = keys(run({ pools: { popular } }));
-    expect(keys(run({ pools: { popular }, seed: null }))).toEqual(ranked);
-    expect(keys(run({ pools: { popular }, seed: undefined }))).toEqual(ranked);
+    expect(keys(run({ pools: { popular }, shuffleSeed: null }))).toEqual(ranked);
+    expect(keys(run({ pools: { popular }, shuffleSeed: undefined }))).toEqual(ranked);
   });
 
   test("each pool keeps its gate: top rated still needs the votes, and a deep cut its band and score", () => {
@@ -854,8 +854,8 @@ describe("buildDeck: a shuffle seed", () => {
       cand(5, { imdb: { rating: 9, votes: imdb.deepCutsMin - 1 } }),
     ];
     for (const seed of ["s1", "s2", "s3"]) {
-      expect(keys(run({ mode: "top_rated", pools: { top_rated: pool }, seed }))).toEqual(["movie:1"]);
-      expect(keys(run({ mode: "deep_cuts", pools: { deep_cuts: pool }, seed })).sort()).toEqual(["movie:2", "movie:3"]);
+      expect(keys(run({ mode: "top_rated", pools: { top_rated: pool }, shuffleSeed: seed }))).toEqual(["movie:1"]);
+      expect(keys(run({ mode: "deep_cuts", pools: { deep_cuts: pool }, shuffleSeed: seed })).sort()).toEqual(["movie:2", "movie:3"]);
     }
   });
 
@@ -866,7 +866,7 @@ describe("buildDeck: a shuffle seed", () => {
         pools: { popular: pool },
         states: [{ mediaType: "movie", tmdbId: 2, status: "passed" }],
         filters: { era: { fromYear: 2000 } },
-        seed: "s1",
+        shuffleSeed: "s1",
       }),
     );
     expect([...out].sort()).toEqual(["movie:1", "movie:4"]);
@@ -874,7 +874,7 @@ describe("buildDeck: a shuffle seed", () => {
 
   test("the blend still deals each title once and keeps its pools taking turns", () => {
     const shared = Array.from({ length: 6 }, (_, i) => cand(i + 1, { imdb: { rating: 8, votes: VOTE_THRESHOLDS.imdb.topRatedMin } }));
-    const result = run({ mode: "blend", pools: { popular: shared, top_rated: shared }, seed: "s1" });
+    const result = run({ mode: "blend", pools: { popular: shared, top_rated: shared }, shuffleSeed: "s1" });
     if (result.kind !== "cards") throw new Error("expected cards");
     expect(keys(result).sort()).toEqual(shared.map((c) => `movie:${c.tmdbId}`).sort());
     // Both pools hold the same shuffled list, so each title is dealt by whichever pool reaches it first: popular leads.
@@ -883,7 +883,7 @@ describe("buildDeck: a shuffle seed", () => {
 
   test("a seed that is not 1 to 32 URL-safe characters throws", () => {
     for (const seed of ["", "a|b", "x".repeat(33), 7 as unknown as string]) {
-      expect(() => run({ pools: { popular }, seed })).toThrow(RangeError);
+      expect(() => run({ pools: { popular }, shuffleSeed: seed })).toThrow(RangeError);
     }
   });
 });

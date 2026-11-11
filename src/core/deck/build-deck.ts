@@ -44,7 +44,7 @@ export interface DeckInput {
   now: Date;
   /** How many titles the user has rated. Gates "for you". A whole number, 0 or more. */
   ratedCount: number;
-  /** Candidates per source. A missing pool counts as empty. "for_you" arrives already in taste order. */
+  /** Candidates per source. A missing pool counts as empty. "for_you" arrives in taste order, which a ranked deck keeps and a shuffled one does not (see shuffleSeed). */
   pools: Partial<Record<PoolName, readonly Candidate[]>>;
   /**
    * The shuffle seed. With one, each pool's titles are dealt in an order that
@@ -53,7 +53,7 @@ export interface DeckInput {
    * thresholds), so a shuffled deck holds the same titles as a ranked one.
    * Null or missing: each pool is ranked by its own signal.
    */
-  seed?: string | null;
+  shuffleSeed?: string | null;
 }
 
 /** A card in the deck, tagged with the pool it came from (the first pool it appeared in, for a blend). */
@@ -99,9 +99,9 @@ export function buildDeck(input: DeckInput): DeckResult {
     throw new RangeError(`buildDeck: ratedCount must be a whole number, 0 or more, got ${String(ratedCount)}`);
   }
 
-  const seed = input.seed ?? null;
-  if (seed !== null && !isShuffleSeed(seed)) {
-    throw new RangeError(`buildDeck: seed must be 1 to 32 URL-safe characters, got ${JSON.stringify(seed)}`);
+  const shuffleSeed = input.shuffleSeed ?? null;
+  if (shuffleSeed !== null && !isShuffleSeed(shuffleSeed)) {
+    throw new RangeError(`buildDeck: shuffleSeed must be 1 to 32 URL-safe characters, got ${JSON.stringify(shuffleSeed)}`);
   }
 
   if (input.mode === "for_you" && !isForYouUnlocked(ratedCount)) return forYouLock(ratedCount);
@@ -118,7 +118,7 @@ export function buildDeck(input: DeckInput): DeckResult {
       entries.push(toEntry(c, pool, key));
     }
     const eligible = gatePool(pool, entries);
-    return seed === null ? rankPool(pool, eligible) : seededShuffle(eligible, seed, (e) => e.key);
+    return shuffleSeed === null ? rankPool(pool, eligible) : seededShuffle(eligible, shuffleSeed, (e) => e.key);
   };
 
   const active = activePools(input.mode, ratedCount);

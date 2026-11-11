@@ -6,8 +6,11 @@
 // Dependencies are injected, so tests run with a fake TMDB client and fake
 // repositories. index.ts wires the real ones.
 //
-// Each new deck (a call without a cursor) gets a fresh shuffle seed, carried
-// in the cursor. The seed sets the order each stream reads its first pages in
+// Each new deck (a call without a cursor) gets a shuffle seed, carried in the
+// cursor: the caller's (DeckRequest.shuffleSeed), or else a fresh random one.
+// A caller that holds its seed gets the same deal again, which is how the
+// Discover screen keeps its cards through a settings refresh or a retry. The
+// seed sets the order each stream reads its first pages in
 // (Stream) and the order the engine deals each page's titles, so choosing the
 // same mode and filters again deals a different run of cards.
 //
@@ -66,6 +69,7 @@ import {
   POOL_QUOTA,
   RATINGS_PROBE_TTL_MS,
   SHUFFLE_FRONT_BIAS,
+  FOR_YOU_SHUFFLE_WINDOW_PAGES,
   SHUFFLE_WINDOW_PAGES,
 } from "./constants";
 import {
@@ -104,12 +108,13 @@ export interface DeckServiceDeps {
   library: DeckLibrary;
   now?: () => Date;
   /**
-   * The shuffle seed for a new deck (a getDeck call without a cursor). By
+   * The shuffle seed for a new deck (a getDeck call without a cursor) when the
+   * caller passes none. By
    * default a random one, so every new deck is a fresh deal. Null deals the
    * deck in ranked order, with every list read from its first page (tests and
    * tuning).
    */
-  newSeed?: () => string | null;
+  newShuffleSeed?: () => string | null;
   /** Called with each getDeck call's counts. For the smoke test and tuning. */
   onStats?: (stats: DeckStats) => void;
 }
@@ -120,12 +125,14 @@ interface ParsedRequest {
   mode: DiscoveryMode;
   filters: DeckFilters;
   cursor: CursorState | null;
+  /** The caller's shuffle seed for a new deck, or null to let the service make one. */
+  shuffleSeed: string | null;
 }
 
 export function createDeckService(deps: DeckServiceDeps) {
   const { tmdb, ratings, library } = deps;
   const clock = deps.now ?? (() => new Date());
-  const newSeed = deps.newSeed ?? randomSeed;
+  const newShuffleSeed = deps.newShuffleSeed ?? randomShuffleSeed;
   /** Until when "the ratings table has rows" is trusted without asking again. */
   let datasetLoadedUntil = 0;
 
@@ -177,7 +184,7 @@ export function createDeckService(deps: DeckServiceDeps) {
     if (!u.ok) return u;
     const parsed = parseRequest(request);
     if (!parsed.ok) return parsed;
-    const { mode, filters, cursor } = parsed.value;
+    const { mode, filters, cursor, shuffleSeed: askedSeed } = parsed.value;
     const now = clock();
     const mediaTypes: MediaType[] = filters.mediaTypes?.length
       ? MEDIA_TYPES.filter((m) => filters.mediaTypes!.includes(m))
@@ -212,15 +219,15 @@ export function createDeckService(deps: DeckServiceDeps) {
     // With no services, "on my services" matches nothing. An empty provider list would also drop TMDB's server-side filter.
     if (filters.onMyServices && providerIds.length === 0) return ok({ kind: "cards", cards: [], nextCursor: null });
 
-    // A new deck is a new deal. A cursor continues the deal it came from.
-    const seed = cursor ? cursor.seed : newSeed();
-    if (seed !== null && !isShuffleSeed(seed)) throw new Error("getDeck: newSeed returned a bad shuffle seed");
+    // A cursor continues the deal it came from. A new deck takes the caller's seed, or else a new deal.
+    const shuffleSeed = cursor ? cursor.shuffleSeed : (askedSeed ?? newShuffleSeed());
+    if (shuffleSeed !== null && !isShuffleSeed(shuffleSeed)) throw new Error("getDeck: newShuffleSeed returned a bad shuffle seed");
 
     const active = activePools(mode, ratedCount);
     const pools = active.map((p) => p.pool);
     // The streams this request reads, each resumed from its place in the cursor if it has one. Anything else in the
-    // cursor is ignored, never fetched. A seed's stream is named by its title, so it keeps its place when the seeds
-    // reorder, and a seed new to the top 5 starts at page 1.
+    // cursor is ignored, never fetched. A seed title's stream is named by its title, so it keeps its place when the seed
+    // titles reorder, and one new to the top 5 starts at its stream's first step.
     const specs = requestStreams(pools, mediaTypes, seeds, u.value).map((spec) => ({
       spec,
       position: cursor?.positions.get(streamId(spec)) ?? { page: 1, offset: 0 },
@@ -230,7 +237,7 @@ export function createDeckService(deps: DeckServiceDeps) {
     const discoverFilters = toDiscoverFilters(filters, providerIds, country);
     const streams = specs.map(
       ({ spec, position }) =>
-        new Stream(spec, position, pageOrder(seed, spec), (page) => {
+        new Stream(spec, position, pageOrder(shuffleSeed, spec), (page) => {
           stats.listLookups++;
           return spec.pool === "for_you"
             ? tmdb.recommendations(spec.seed, { genreIds: discoverFilters.genreIds, era: discoverFilters.era }, page)
@@ -345,7 +352,7 @@ export function createDeckService(deps: DeckServiceDeps) {
         now,
         ratedCount,
         pools: candidatePools,
-        seed,
+        shuffleSeed,
       });
       if (result.kind !== "cards") throw new Error("getDeck: the engine locked a deck the service had unlocked");
       if (result.cards.length >= MIN_RATING_PAGE_TARGET) break;
@@ -379,7 +386,7 @@ export function createDeckService(deps: DeckServiceDeps) {
           mode,
           filters: canonicalFilters(filters),
           context,
-          seed,
+          shuffleSeed,
           positions: new Map(positions.map(({ spec, position }) => [streamId(spec), position])),
         });
 
@@ -458,25 +465,29 @@ function invalid<T>(message: string): Result<T> {
 }
 
 /** A fresh shuffle seed: 12 random URL-safe characters. */
-function randomSeed(): string {
+function randomShuffleSeed(): string {
   return randomBytes(9).toString("base64url");
 }
 
 /**
- * The order a stream reads its first SHUFFLE_WINDOW_PAGES pages in, for this
- * deck's seed: a shuffle that leans toward the front, different for each
- * stream. Empty for a deck with no seed, which reads every list in TMDB's order.
+ * The order a stream reads its first pages in, for this deck's shuffle seed:
+ * a shuffle that leans toward the front, different for each stream. The
+ * window is SHUFFLE_WINDOW_PAGES for a discover list and the narrower
+ * FOR_YOU_SHUFFLE_WINDOW_PAGES for a recommendations list. Empty for a deck
+ * with no shuffle seed, which reads every list in TMDB's order.
  */
-function pageOrder(seed: string | null, spec: StreamSpec): number[] {
-  if (seed === null) return [];
-  return seededFrontWeightedOrder(SHUFFLE_WINDOW_PAGES, seed, `pages|${streamId(spec)}`, SHUFFLE_FRONT_BIAS);
+function pageOrder(shuffleSeed: string | null, spec: StreamSpec): number[] {
+  if (shuffleSeed === null) return [];
+  const window = spec.pool === "for_you" ? FOR_YOU_SHUFFLE_WINDOW_PAGES : SHUFFLE_WINDOW_PAGES;
+  return seededFrontWeightedOrder(window, shuffleSeed, `pages|${streamId(spec)}`, SHUFFLE_FRONT_BIAS);
 }
 
 /** Checks a request that may have come from JSON (the API, an MCP call). */
 function parseRequest(request: unknown): Result<ParsedRequest> {
   const raw = request ?? {};
   if (typeof raw !== "object" || Array.isArray(raw)) return invalid("request must be an object");
-  const { mode = "blend", filters, cursor } = raw as Record<string, unknown>;
+  const { mode = "blend", filters, cursor, shuffleSeed = null } = raw as Record<string, unknown>;
+  if (shuffleSeed !== null && !isShuffleSeed(shuffleSeed)) return invalid("shuffleSeed must be 1 to 32 URL-safe characters");
   if (!(DISCOVERY_MODES as readonly unknown[]).includes(mode)) return invalid(`unknown discovery mode ${JSON.stringify(mode)}`);
   const f = parseFilters(filters);
   if (!f.ok) return invalid(f.error.code === "invalid_list_query" ? f.error.message : "filters are invalid");
@@ -498,7 +509,7 @@ function parseRequest(request: unknown): Result<ParsedRequest> {
     }
     state = decoded;
   }
-  return ok({ mode: mode as DiscoveryMode, filters: f.value, cursor: state });
+  return ok({ mode: mode as DiscoveryMode, filters: f.value, cursor: state, shuffleSeed });
 }
 
 /** The seeds in order, of the wanted media types, each once, at most FOR_YOU_SEED_COUNT. */
