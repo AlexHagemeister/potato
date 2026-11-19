@@ -3,7 +3,7 @@ import { summary } from "../deck-service/test-fakes";
 import { formatTitleKey } from "../title-id";
 import type { ImdbRating, TitleId } from "../types";
 import { DETAILS_CAP, IMDB_FLOOR, IMDB_MIN_VOTES, MIN_TMDB_AVERAGE, MIN_TMDB_VOTES, SIMILAR_LIMIT } from "./constants";
-import { finalize, shortlist, type FoundDetails, type Shortlisted } from "./rank";
+import { finalize, reasonLine, shortlist, type FoundDetails, type Shortlisted } from "./rank";
 
 const VIEWED: TitleId = { mediaType: "movie", tmdbId: 1 };
 const all = () => true;
@@ -108,6 +108,14 @@ describe("finalize", () => {
       posterUrl: "https://image.tmdb.org/t/p/w185/p100.jpg",
       imdbRating: 7,
       because: ["Arrival"],
+      reason: "Because you liked Arrival",
     });
+    expect(out[1].reason).toBeNull();
+  });
+
+  test("the reason line names at most two liked titles", () => {
+    expect(reasonLine([])).toBeNull();
+    expect(reasonLine(["Arrival"])).toBe("Because you liked Arrival");
+    expect(reasonLine(["Arrival", "Dune", "Moon"])).toBe("Because you liked Arrival and Dune");
   });
 });

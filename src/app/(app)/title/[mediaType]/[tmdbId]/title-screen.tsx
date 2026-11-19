@@ -14,10 +14,11 @@ import { DeckButtons } from "../../../_deck/deck-buttons";
 import { NoticePill, UndoPill } from "../../../_components/toast-pills";
 import { Screen } from "../../../_shell/screen";
 import { editRatingAction, removeRatingAction } from "../../../lists/actions";
-import { applyTitleChange } from "../../../lists/shown";
+import { noteTitleChange } from "../../../library-changes";
+import { applyTitleChange, markListsStale } from "../../../lists/shown";
 import { SimilarRow } from "./similar-row";
 
-// The full card for one title, opened from Search or Lists. The same card and
+// The full card for one title, opened from Search, Lists, or another title's "You might also like" row. The same card and
 // the same four buttons as the deck, except on a Seen title, which shows only
 // Edit rating (issue 43). The other difference: the card stays on screen
 // after a tap, showing where the title now is, since there is no next card.
@@ -145,6 +146,14 @@ function showsAsOpened(state: CardUserState | null, shown: EditShown): boolean {
   return state?.status === "seen" && state.rating === shown.rating && state.review === shown.review;
 }
 
+/**
+ * Lists isn't the screen showing, but Back can still reach it (through a title screen opened from a "You might also
+ * like" row, PR 135), so mark it to reload when it next mounts.
+ */
+function markListsStaleUnlessShowing() {
+  if (window.location.pathname !== "/lists") markListsStale();
+}
+
 export function TitleScreen({ card }: { card: Card }) {
   const router = useRouter();
   const ref: TitleId = { mediaType: card.mediaType, tmdbId: card.tmdbId };
@@ -181,7 +190,11 @@ export function TitleScreen({ card }: { card: Card }) {
     gone.current = false;
     return () => {
       gone.current = true;
-      if (flag.current) setTimeout(() => router.refresh(), 0);
+      if (flag.current)
+        setTimeout(() => {
+          markListsStaleUnlessShowing();
+          router.refresh();
+        }, 0);
     };
   }, [router]);
 
@@ -194,6 +207,8 @@ export function TitleScreen({ card }: { card: Card }) {
    * the refresh. A row they dropped (Skip, Remove rating) comes back from there on Undo.
    */
   function landed(record: TitleRecord | null) {
+    // Any "You might also like" row on screen reads again, so it drops this title if it is now on a list.
+    noteTitleChange(ref);
     // The kept rows now hold the title's latest row, so an earlier change they couldn't take needs no refresh either.
     changed.current = !applyTitleChange(ref, record);
     if (changed.current) refreshAfterLeaving();
@@ -201,11 +216,14 @@ export function TitleScreen({ card }: { card: Card }) {
 
   /**
    * A change the kept Lists rows couldn't take settled after Back. The refresh on leaving ran without it, so refresh
-   * now, but only while Lists is the screen showing: a refresh starts it over from the server. Search fetches afresh
-   * on every visit, and the Lists tab reads the server when tapped, so no other screen needs it.
+   * now, but only while Lists is the screen showing: a refresh starts it over from the server. On any other screen,
+   * Lists is marked to reload when Back next brings it up. Search fetches afresh on every visit, and the Lists tab
+   * reads the server when tapped.
    */
   function refreshAfterLeaving() {
-    if (gone.current && window.location.pathname === "/lists") router.refresh();
+    if (!gone.current) return;
+    if (window.location.pathname === "/lists") router.refresh();
+    else markListsStale();
   }
 
   useEffect(() => {
@@ -291,6 +309,7 @@ export function TitleScreen({ card }: { card: Card }) {
    */
   function showTrueState(result: { current?: ActionOutcome["current"] }, sheetStaysOpen = false) {
     if (result.current === undefined) {
+      noteTitleChange(ref);
       changed.current = true;
       if (gone.current) refreshAfterLeaving();
       else if (sheetStaysOpen) refreshOnClose.current = true;

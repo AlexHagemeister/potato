@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { detailsFor, NOW, summary } from "../deck-service/test-fakes";
 import { MemoryRatingsStore } from "../imdb/ratings";
 import { fail, ok, type Result } from "../result";
+import type { DetailsCore } from "../tmdb/normalize";
 import type { ResultPage, TitleDetails, TitleSummary } from "../tmdb/types";
 import { formatTitleKey } from "../title-id";
 import type { ImdbRating, TitleId, UserTitleState } from "../types";
@@ -47,22 +48,26 @@ function service(w: World) {
         const pages = w.recs[key] ?? [];
         return { results: pages[page - 1] ?? [], page, totalPages: pages.length };
       },
-      async getTitleDetails(mediaType, tmdbId) {
-        const key = formatTitleKey({ mediaType, tmdbId });
-        calls.details.push(key);
-        if (w.failingDetails?.has(key)) throw new Error("TMDB 503");
-        const o = w.details?.[key];
-        if (o === null) return null;
-        const base = byKey.get(key) ?? summary(mediaType, tmdbId);
-        return detailsFor(base, o ?? {});
+      // Like the real lookupTitles: a title it can't read (unknown to TMDB, or failing) is left out of the map.
+      async lookupTitles(ids) {
+        const out = new Map<string, DetailsCore>();
+        for (const id of ids) {
+          const key = formatTitleKey(id);
+          calls.details.push(key);
+          const o = w.details?.[key];
+          if (w.failingDetails?.has(key) || o === null) continue;
+          out.set(key, detailsFor(byKey.get(key) ?? summary(id.mediaType, id.tmdbId), o ?? {}));
+        }
+        return out;
       },
     },
     library: {
       async getUserTitleStates() {
         return w.statesResult ?? ok(w.states ?? []);
       },
-      async getFavoriteSeen(_u, minRating, limit) {
+      async getTopRatedSeen(_u, mediaTypes, limit, minRating) {
         calls.liked.push([minRating, limit]);
+        expect([...mediaTypes].sort()).toEqual(["movie", "tv"]);
         return ok((w.liked ?? []).slice(0, limit));
       },
     },

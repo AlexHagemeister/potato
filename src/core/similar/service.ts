@@ -8,35 +8,34 @@
 // - For each of up to FAVORITE_COUNT liked titles, one recommendations page
 //   (the same cache entry the For you deck reads) and one details lookup for
 //   its name.
-// - One details lookup per shortlisted title, at most DETAILS_CAP, run
-//   TMDB_FANOUT_CONCURRENCY at a time.
+// - One details lookup per shortlisted title, at most DETAILS_CAP.
+// Details go through lookupTitles: the 7-day details cache, read in one batch,
+// with no streaming refresh, since the row shows no streaming.
 // So at most 2 + 2 * 5 + 40 = 52 lookups, plus one IMDb ratings query (and a
 // one-row probe of the ratings table when it finds nothing).
 //
 // Dependencies are injected, so tests run with fakes. index.ts wires the real ones.
 
-import { mapWithConcurrency } from "../concurrency";
 import { createVisibilityCheck } from "../deck/build-deck";
 import { getRatingsForFilter, type RatingsDatasetProbe, type RatingsStore } from "../imdb/ratings";
 import { fail, ok, validateUserId, type Result } from "../result";
 import type { TmdbClient } from "../tmdb/client";
-import { TMDB_FANOUT_CONCURRENCY } from "../tmdb/constants";
 import type { TitleSummary } from "../tmdb/types";
-import { formatTitleKey, titleIdError } from "../title-id";
+import { formatTitleKey, titleIdError, type MediaType } from "../title-id";
 import type { ImdbRating, TitleId, UserTitleState } from "../types";
-import { DETAILS_CAP, FAVORITE_COUNT, FAVORITE_MIN_RATING, SIMILAR_REC_PAGES } from "./constants";
+import { FAVORITE_COUNT, FAVORITE_MIN_RATING, SIMILAR_REC_PAGES } from "./constants";
 import { finalize, shortlist, type Favorite, type FoundDetails } from "./rank";
 import type { SimilarTitle } from "./types";
 
 /** The TMDB calls the service makes. The app passes getTmdb(). */
-export type SimilarTmdb = Pick<TmdbClient, "recommendations" | "getTitleDetails">;
+export type SimilarTmdb = Pick<TmdbClient, "recommendations" | "lookupTitles">;
 
 /** The library reads the service makes. index.ts wires them to the library core. */
 export interface SimilarLibrary {
   /** Every row the user has (the deck's hiding rule reads them). */
   getUserTitleStates(userId: string): Promise<Result<UserTitleState[]>>;
-  /** Seen titles rated at least minRating, highest first, at most limit. */
-  getFavoriteSeen(userId: string, minRating: number, limit: number): Promise<Result<(TitleId & { rating: number })[]>>;
+  /** Seen titles of these media types rated at least minRating, highest first, at most limit. */
+  getTopRatedSeen(userId: string, mediaTypes: readonly MediaType[], limit: number, minRating: number): Promise<Result<TitleId[]>>;
 }
 
 export interface SimilarServiceDeps {
@@ -47,6 +46,9 @@ export interface SimilarServiceDeps {
 }
 
 export type SimilarService = ReturnType<typeof createSimilarService>;
+
+/** Favorites come from both movies and series, whatever the title on screen is. */
+const BOTH: readonly MediaType[] = ["movie", "tv"];
 
 export function createSimilarService(deps: SimilarServiceDeps) {
   const { tmdb, ratings, library } = deps;
@@ -78,7 +80,7 @@ export function createSimilarService(deps: SimilarServiceDeps) {
       ),
       library.getUserTitleStates(u.value),
       // One extra, since the viewed title may be among them.
-      library.getFavoriteSeen(u.value, FAVORITE_MIN_RATING, FAVORITE_COUNT + 1),
+      library.getTopRatedSeen(u.value, BOTH, FAVORITE_COUNT + 1, FAVORITE_MIN_RATING),
     ]);
     if (!states.ok) return states;
     if (!liked.ok) return liked;
@@ -90,42 +92,41 @@ export function createSimilarService(deps: SimilarServiceDeps) {
     if (recommendations.length === 0) return ok([]);
 
     const favoriteRefs = liked.value.filter((f) => formatTitleKey(f) !== viewedKey).slice(0, FAVORITE_COUNT);
-    const favorites = (
-      await Promise.all(
-        favoriteRefs.map(async (f): Promise<Favorite | null> => {
-          try {
-            const [details, recs] = await Promise.all([tmdb.getTitleDetails(f.mediaType, f.tmdbId), tmdb.recommendations(f, {}, 1)]);
-            return details ? { title: details.title, recommendations: recs.results } : null;
-          } catch (err) {
+    // Details through lookupTitles, which reads the 7-day details cache and never refreshes streaming
+    // availability the row doesn't show. A title it can't read is left out of the map, and drops only itself.
+    const [favoriteDetails, favoriteRecs] = await Promise.all([
+      tmdb.lookupTitles(favoriteRefs),
+      Promise.all(
+        favoriteRefs.map((f) =>
+          tmdb.recommendations(f, {}, 1).catch((err: unknown) => {
             console.warn(`similar: liked title ${formatTitleKey(f)} failed:`, err);
             return null;
-          }
-        }),
-      )
-    ).filter((f): f is Favorite => f !== null);
+          }),
+        ),
+      ),
+    ]);
+    const favorites = favoriteRefs.flatMap((f, i): Favorite[] => {
+      const name = favoriteDetails.get(formatTitleKey(f))?.title;
+      const recs = favoriteRecs[i];
+      return name && recs ? [{ title: name, recommendations: recs.results }] : [];
+    });
 
     const candidates = shortlist({ viewed, recommendations, favorites, visible: createVisibilityCheck(states.value, clock()) });
 
+    const found = await tmdb.lookupTitles(candidates.map((c) => c.summary));
     const details = new Map<string, FoundDetails>();
-    await mapWithConcurrency(candidates.slice(0, DETAILS_CAP), TMDB_FANOUT_CONCURRENCY, async ({ summary }) => {
-      try {
-        const d = await tmdb.getTitleDetails(summary.mediaType, summary.tmdbId);
-        if (d) details.set(formatTitleKey(summary), { imdbId: d.imdbId, collectionId: d.collectionId });
-      } catch (err) {
-        console.warn(`similar: details for ${formatTitleKey(summary)} failed:`, err);
-      }
-    });
+    for (const [key, d] of found) details.set(key, { imdbId: d.imdbId, collectionId: d.collectionId });
 
     const imdbIds = [...details.values()].flatMap((d) => (d.imdbId ? [d.imdbId] : []));
-    let found: ReadonlyMap<string, ImdbRating> | "unavailable";
+    let rated: ReadonlyMap<string, ImdbRating> | "unavailable";
     try {
       // Throws when the ratings table is empty (the first daily load has not landed): then the floor is skipped.
-      found = await getRatingsForFilter(ratings, imdbIds);
+      rated = await getRatingsForFilter(ratings, imdbIds);
     } catch (err) {
       console.warn("similar: IMDb ratings unavailable:", err);
-      found = "unavailable";
+      rated = "unavailable";
     }
-    return ok(finalize(candidates, details, found));
+    return ok(finalize(candidates, details, rated));
   }
 
   return { similarTitles };

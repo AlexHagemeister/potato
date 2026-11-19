@@ -14,8 +14,9 @@ export interface SimilarTitle extends TitleId {
   imdbRating: number | null;
   /**
    * The titles the user liked that also lead here, by name, strongest first.
-   * Empty when only the title being viewed does. The UI words the reason
-   * line from it ("Because you liked Arrival").
+   * Empty when only the title being viewed does.
    */
   because: string[];
+  /** The line to show under the title, worded from `because` ("Because you liked Arrival"). Null when `because` is empty. */
+  reason: string | null;
 }

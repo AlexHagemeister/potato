@@ -80,6 +80,15 @@ export interface FoundDetails {
   collectionId?: number | null;
 }
 
+/** How many liked titles the reason line names. */
+const REASON_NAMES = 2;
+
+/** The reason line under a title: "Because you liked Arrival", or "... Arrival and Dune". Null when no liked title leads there. */
+export function reasonLine(because: readonly string[]): string | null {
+  if (because.length === 0) return null;
+  return `Because you liked ${because.slice(0, REASON_NAMES).join(" and ")}`;
+}
+
 export function finalize(
   shortlisted: readonly Shortlisted[],
   details: ReadonlyMap<string, FoundDetails>,
@@ -119,6 +128,7 @@ export function finalize(
       posterUrl: posterUrl(t.posterPath, ROW_POSTER_SIZE),
       imdbRating,
       because: item.because,
+      reason: reasonLine(item.because),
     });
     if (out.length === SIMILAR_LIMIT) break;
   }

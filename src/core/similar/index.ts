@@ -3,7 +3,7 @@
 // library core. createSimilarService takes injected ones (tests).
 
 import { PostgresRatingsStore } from "../imdb/postgres";
-import { getFavoriteSeen, getUserTitleStates } from "../library";
+import { getTopRatedSeen, getUserTitleStates } from "../library";
 import type { Result } from "../result";
 import { getTmdb } from "../tmdb/app-client";
 import type { TitleId } from "../types";
@@ -17,7 +17,7 @@ export { createSimilarService, type SimilarLibrary, type SimilarService, type Si
 let service: SimilarService | undefined;
 
 function appService(): SimilarService {
-  service ??= createSimilarService({ tmdb: getTmdb(), ratings: new PostgresRatingsStore(), library: { getUserTitleStates, getFavoriteSeen } });
+  service ??= createSimilarService({ tmdb: getTmdb(), ratings: new PostgresRatingsStore(), library: { getUserTitleStates, getTopRatedSeen } });
   return service;
 }
 

@@ -25,6 +25,8 @@ import {
   getShown,
   seedShown,
   setShown,
+  clearListsStale,
+  listsStale,
   subscribeShown,
   updateLists,
   wasShown,
@@ -439,9 +441,17 @@ export function ListsScreen({
       if (cursor && want > fresh[status].rows.length) jobs[status] = { cursor, have: fresh[status].rows.length, want };
     }
     updateLists(() => fresh);
+    clearListsStale();
     // Rows past the first page are fetched again only on screen. After leaving, Back shows the first pages.
     if (mounted.current) setRefill(Object.keys(jobs).length > 0 ? { filters: using, jobs } : null);
   }
+
+  // A title card's change these rows couldn't take settled while another screen showed (shown.ts, markListsStale).
+  useEffect(() => {
+    if (listsStale()) void reload();
+    // Once per mount: Back brings the screen up again, and that is when the rows may be stale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /**
    * The filter load, for a filter change or for an address the rows don't fit. Wherever `due` is set,

@@ -122,44 +122,37 @@ export async function getRatedCount(userId: string): Promise<Result<number>> {
 }
 
 /**
- * The user's highest-rated Seen titles of these media types, at most `limit`.
- * Ties on rating go to the most recently changed, then by identity: the order
- * of the Seen list's rating_desc sort. Reads only the identities, so the deck
- * can call it on every page. Seeds "for you".
+ * The user's highest-rated Seen titles of these media types, at most `limit`,
+ * and, given `minRating`, only those rated at least that. Ties on rating go to
+ * the most recently changed, then by identity: the order of the Seen list's
+ * rating_desc sort. Reads only the identities, so the deck can call it on every
+ * page. Seeds "for you", and gives the similar-titles row the titles the user
+ * liked.
  */
-export async function getTopRatedSeen(userId: string, mediaTypes: readonly MediaType[], limit: number): Promise<Result<TitleId[]>> {
+export async function getTopRatedSeen(
+  userId: string,
+  mediaTypes: readonly MediaType[],
+  limit: number,
+  minRating?: number,
+): Promise<Result<TitleId[]>> {
   const u = validateUserId(userId);
   if (!u.ok) return u;
   if (mediaTypes.length === 0 || !Number.isSafeInteger(limit) || limit <= 0) return ok([]);
+  if (minRating !== undefined && !Number.isFinite(minRating)) return ok([]);
   const rows = await getDb()
     .select({ mediaType: titleStatus.mediaType, tmdbId: titleStatus.tmdbId })
     .from(titleStatus)
-    .where(and(eq(titleStatus.userId, u.value), eq(titleStatus.status, "seen"), inArray(titleStatus.mediaType, [...mediaTypes])))
+    .where(
+      and(
+        eq(titleStatus.userId, u.value),
+        eq(titleStatus.status, "seen"),
+        inArray(titleStatus.mediaType, [...mediaTypes]),
+        minRating === undefined ? undefined : gte(titleStatus.rating, minRating),
+      ),
+    )
     .orderBy(desc(titleStatus.rating), desc(titleStatus.updatedAt), asc(titleStatus.mediaType), asc(titleStatus.tmdbId))
     .limit(limit);
   return ok(rows.map(({ mediaType, tmdbId }) => ({ mediaType, tmdbId })));
-}
-
-/**
- * The user's Seen titles rated at least `minRating`, highest rating first
- * (ties: most recently changed first), at most `limit`, each with its rating.
- * The similar-titles row reads them as the titles the user liked.
- */
-export async function getFavoriteSeen(
-  userId: string,
-  minRating: number,
-  limit: number,
-): Promise<Result<(TitleId & { rating: number })[]>> {
-  const u = validateUserId(userId);
-  if (!u.ok) return u;
-  if (!Number.isFinite(minRating) || !Number.isSafeInteger(limit) || limit <= 0) return ok([]);
-  const rows = await getDb()
-    .select({ mediaType: titleStatus.mediaType, tmdbId: titleStatus.tmdbId, rating: titleStatus.rating })
-    .from(titleStatus)
-    .where(and(eq(titleStatus.userId, u.value), eq(titleStatus.status, "seen"), gte(titleStatus.rating, minRating)))
-    .orderBy(desc(titleStatus.rating), desc(titleStatus.updatedAt), asc(titleStatus.mediaType), asc(titleStatus.tmdbId))
-    .limit(limit);
-  return ok(rows.flatMap(({ mediaType, tmdbId, rating }) => (rating === null ? [] : [{ mediaType, tmdbId, rating: Number(rating) }])));
 }
 
 /**
