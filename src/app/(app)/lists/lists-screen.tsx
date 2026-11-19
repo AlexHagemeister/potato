@@ -109,6 +109,17 @@ async function call<T>(action: () => Promise<ActionResult<T>>, outage = SAVE_FAI
   }
 }
 
+/**
+ * The Lists writes not yet answered, from this screen or one Back left behind. A reload waits for them before it
+ * reads, so it never reads lists older than a write it would then show over. Next usually runs a page's server
+ * actions one at a time, but a navigation or an address write (a list-tab tap) lets the next one start early.
+ */
+const writesInFlight = new Set<Promise<unknown>>();
+
+async function writesSettled() {
+  while (writesInFlight.size > 0) await Promise.allSettled([...writesInFlight]);
+}
+
 /** How long a filter load may take before it counts as failed, so a dead connection can't leave it hanging. */
 const FILTER_TIMEOUT_MS = 15_000;
 
@@ -418,6 +429,8 @@ export function ListsScreen({
    * reload doesn't drop them.
    */
   async function reload() {
+    // A write still under way would land after this read, and the read's rows would undo it on screen.
+    await writesSettled();
     const here = mounted.current;
     // A filter load under way brings fresh lists if it succeeds. If it fails, it runs this reload then.
     if (here && filteringRef.current) {
@@ -434,8 +447,7 @@ export function ListsScreen({
     const result = await call(() => loadListsAction(using), FILTER_FAILED);
     if (seq !== loadSeq.current || !result.ok) return;
     // A write made on this screen while the load ran may have landed after the load read: its rows would undo the
-    // write until it lands. Read again instead. Next runs a page's server actions one at a time, so this read queues
-    // behind the write.
+    // write until it lands. Read again instead, once the write has answered (writesSettled).
     if (writeSeq.current !== writesAt) return void reload();
     // The rows kept for Back can have moved on meanwhile (a fresh render, a filter load). Only rows for the same
     // user and filters land.
@@ -524,11 +536,15 @@ export function ListsScreen({
 
   /**
    * A write to one title. It counts in writeSeq, so a reload already under way knows its read may be older than this
-   * write, and it tells any "You might also like" row kept for Back to read again (library-changes).
+   * write, and in writesInFlight, so a reload waits for it before reading. It tells any "You might also like" row
+   * kept for Back to read again (library-changes).
    */
   async function write<T>(ref: TitleId, action: () => Promise<ActionResult<T>>): Promise<ActionResult<T>> {
     writeSeq.current++;
-    const result = await call(action);
+    const pending = call(action);
+    writesInFlight.add(pending);
+    const result = await pending;
+    writesInFlight.delete(pending);
     noteTitleChange(ref);
     return result;
   }
