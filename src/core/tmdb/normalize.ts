@@ -35,6 +35,7 @@ export interface RawTitle {
   runtime?: number | null;
   number_of_seasons?: number | null;
   imdb_id?: string | null;
+  belongs_to_collection?: { id?: number } | null;
   external_ids?: { imdb_id?: string | null };
   videos?: { results?: RawVideo[] };
   "watch/providers"?: RawWatchProviders;
@@ -122,7 +123,13 @@ export function normalizeDetailsCore(raw: RawTitle, mediaType: MediaType): Detai
     posterUrl: posterUrl(summary.posterPath),
     imdbId: imdbId && /^tt\d+$/.test(imdbId) ? imdbId : null,
     trailerYouTubeKey: pickTrailer(raw.videos?.results ?? []),
+    collectionId: mediaType === "movie" ? collectionIdOf(raw.belongs_to_collection) : null,
   };
+}
+
+function collectionIdOf(collection: RawTitle["belongs_to_collection"]): number | null {
+  const id = collection?.id;
+  return isPositiveInt(id) ? id : null;
 }
 
 const TYPE_RANK: Record<string, number> = { Trailer: 0, Teaser: 1 };

@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import { getCard } from "@/core/deck-service";
-import { parseTitleKey } from "@/core/title-id";
+import { formatTitleKey, parseTitleKey } from "@/core/title-id";
 import { getCurrentUserForRequest } from "@/lib/current-user";
 import { SignedOutScreen } from "../../../_shell/signed-out";
 import { TitleScreen } from "./title-screen";
@@ -26,6 +26,7 @@ export default async function TitlePage({ params }: PageProps<"/title/[mediaType
     if (result.error.code === "unknown_user" || result.error.code === "invalid_user") return <SignedOutScreen />;
     throw new Error(`Could not load the card: ${result.error.code}`);
   }
-  // Keyed on the title's state: when a refresh finds it changed elsewhere, the screen starts over from the new state.
-  return <TitleScreen key={JSON.stringify(result.value.userState)} card={result.value} />;
+  // Keyed on the title and its state: when a refresh finds it changed elsewhere, the screen starts over from the new
+  // state, and a card opened from another card's suggestions (SimilarRow) never inherits that card's screen.
+  return <TitleScreen key={`${formatTitleKey(ref)}|${JSON.stringify(result.value.userState)}`} card={result.value} />;
 }

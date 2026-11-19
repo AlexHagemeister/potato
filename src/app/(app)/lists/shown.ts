@@ -40,6 +40,22 @@ const MAX_SHOWN_RENDERS = 50;
 const dropped = new Map<string, ListRow>();
 const MAX_DROPPED = 20;
 
+/**
+ * A title card's change the kept rows couldn't take settled while another screen showed, one that wasn't Lists
+ * (a title screen opened from the first one's "You might also like" row, PR 135). Lists reloads from the server when
+ * it next mounts, and a reload that lands clears it. Cleared only then, so a load that is dropped (the screen started
+ * over meanwhile) leaves it for the next mount.
+ */
+let staleSinceShown = false;
+export function markListsStale() {
+  // With no rows kept, Lists has nothing stale to show: its next visit renders fresh from the server.
+  if (shownNow) staleSinceShown = true;
+}
+export const listsStale = () => staleSinceShown;
+export function clearListsStale() {
+  staleSinceShown = false;
+}
+
 /** Whether this server render was shown already, so Back restoring it shows the rows kept here. */
 export const wasShown = (renderId: string) => shownRenders.has(renderId);
 

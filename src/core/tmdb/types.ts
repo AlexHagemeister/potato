@@ -53,6 +53,12 @@ export interface TitleDetails extends TitleSummary {
   /** YouTube video key of the best trailer, or null when there is none. */
   trailerYouTubeKey: string | null;
   /**
+   * TMDB's collection (franchise) for a movie, such as the Toy Story films.
+   * Null when the title belongs to none, and always null for a series.
+   * Undefined (unknown) on details cached before the field existed.
+   */
+  collectionId?: number | null;
+  /**
    * Where the title streams, by country. Null when availability is unknown:
    * the providers lookup failed and nothing was cached. A known title that
    * streams nowhere is `{}`, or has no entry for the country.

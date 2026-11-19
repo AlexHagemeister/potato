@@ -25,7 +25,15 @@ describe("normalizeDetailsCore", () => {
       posterUrl: "https://image.tmdb.org/t/p/w500/dXNAPwY7VrqMAo51EKhhCJfaGb5.jpg",
       imdbId: "tt0133093",
       trailerYouTubeKey: "anniv1",
+      collectionId: null,
     });
+  });
+
+  test("movie: the collection it belongs to, a series never", () => {
+    expect(normalizeDetailsCore({ ...matrixDetails, belongs_to_collection: { id: 2344 } }, "movie")!.collectionId).toBe(2344);
+    expect(normalizeDetailsCore({ ...matrixDetails, belongs_to_collection: null }, "movie")!.collectionId).toBeNull();
+    expect(normalizeDetailsCore({ ...matrixDetails, belongs_to_collection: { id: -1 } }, "movie")!.collectionId).toBeNull();
+    expect(normalizeDetailsCore({ ...breakingBadDetails, belongs_to_collection: { id: 9 } }, "tv")!.collectionId).toBeNull();
   });
 
   test("series: name, first air year, season count, no runtime", () => {

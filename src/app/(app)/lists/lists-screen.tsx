@@ -16,6 +16,7 @@ import { listFromParam, type ListRow, type ListRowsPage } from "@/core/lists";
 import { formatTitleKey } from "@/core/title-id";
 import type { ListStatus, TitleId } from "@/core/types";
 import { FilterControl } from "../_components/filter-control";
+import { noteTitleChange } from "../library-changes";
 import { Poster } from "../_components/poster";
 import { RatingSheet } from "../_components/rating-sheet";
 import { Stars } from "../_components/stars";
@@ -25,6 +26,8 @@ import {
   getShown,
   seedShown,
   setShown,
+  clearListsStale,
+  listsStale,
   subscribeShown,
   updateLists,
   wasShown,
@@ -104,6 +107,17 @@ async function call<T>(action: () => Promise<ActionResult<T>>, outage = SAVE_FAI
   } catch {
     return { ok: false, error: outage };
   }
+}
+
+/**
+ * The Lists writes not yet answered, from this screen or one Back left behind. A reload waits for them before it
+ * reads, so it never reads lists older than a write it would then show over. Next usually runs a page's server
+ * actions one at a time, but a navigation or an address write (a list-tab tap) lets the next one start early.
+ */
+const writesInFlight = new Set<Promise<unknown>>();
+
+async function writesSettled() {
+  while (writesInFlight.size > 0) await Promise.allSettled([...writesInFlight]);
 }
 
 /** How long a filter load may take before it counts as failed, so a dead connection can't leave it hanging. */
@@ -254,6 +268,8 @@ export function ListsScreen({
   // Counts list loads, so a slower, older load never overwrites a newer one,
   // or the server data a navigation brought in meanwhile. `restarts` counts the times the screen starts over.
   const loadSeq = useRef(0);
+  // Counts this screen's writes, so a reload that read before one of them can tell (reload).
+  const writeSeq = useRef(0);
   const [restarts, setRestarts] = useState(0);
   useEffect(() => {
     loadSeq.current++;
@@ -413,6 +429,8 @@ export function ListsScreen({
    * reload doesn't drop them.
    */
   async function reload() {
+    // A write still under way would land after this read, and the read's rows would undo it on screen.
+    await writesSettled();
     const here = mounted.current;
     // A filter load under way brings fresh lists if it succeeds. If it fails, it runs this reload then.
     if (here && filteringRef.current) {
@@ -420,6 +438,7 @@ export function ListsScreen({
       return;
     }
     const seq = ++loadSeq.current;
+    const writesAt = writeSeq.current;
     // On screen: the latest filters, not this closure's, since a write can come back stale after the filters
     // changed. After leaving (a stale save that settled late): the filters of the rows kept for Back.
     const using = here ? filtersRef.current : getShown()?.filters;
@@ -427,6 +446,9 @@ export function ListsScreen({
     if (!using) return;
     const result = await call(() => loadListsAction(using), FILTER_FAILED);
     if (seq !== loadSeq.current || !result.ok) return;
+    // A write made on this screen while the load ran may have landed after the load read: its rows would undo the
+    // write until it lands. Read again instead, once the write has answered (writesSettled).
+    if (writeSeq.current !== writesAt) return void reload();
     // The rows kept for Back can have moved on meanwhile (a fresh render, a filter load). Only rows for the same
     // user and filters land.
     const now = getShown();
@@ -439,9 +461,17 @@ export function ListsScreen({
       if (cursor && want > fresh[status].rows.length) jobs[status] = { cursor, have: fresh[status].rows.length, want };
     }
     updateLists(() => fresh);
+    clearListsStale();
     // Rows past the first page are fetched again only on screen. After leaving, Back shows the first pages.
     if (mounted.current) setRefill(Object.keys(jobs).length > 0 ? { filters: using, jobs } : null);
   }
+
+  // A title card's change these rows couldn't take settled while another screen showed (shown.ts, markListsStale).
+  useEffect(() => {
+    if (listsStale()) void reload();
+    // Once per mount: Back brings the screen up again, and that is when the rows may be stale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /**
    * The filter load, for a filter change or for an address the rows don't fit. Wherever `due` is set,
@@ -504,11 +534,26 @@ export function ListsScreen({
     writeAddress(status, filters);
   }
 
+  /**
+   * A write to one title. It counts in writeSeq, so a reload already under way knows its read may be older than this
+   * write, and in writesInFlight, so a reload waits for it before reading. It tells any "You might also like" row
+   * kept for Back to read again (library-changes).
+   */
+  async function write<T>(ref: TitleId, action: () => Promise<ActionResult<T>>): Promise<ActionResult<T>> {
+    writeSeq.current++;
+    const pending = call(action);
+    writesInFlight.add(pending);
+    const result = await pending;
+    writesInFlight.delete(pending);
+    noteTitleChange(ref);
+    return result;
+  }
+
   /** Undo for a move or an edit: restore the row in core, then put the screen back. */
   function undoer(ref: TitleId, outcome: ActionOutcome, putBack: (lists: Lists) => Lists) {
     return async () => {
       setToast(null);
-      const result = await call(() => undoAction(ref, outcome));
+      const result = await write(ref, () => undoAction(ref, outcome));
       // On failure nothing was undone, so the screen already matches the server.
       if (!result.ok) return failed(result);
       updateLists(putBack);
@@ -529,7 +574,7 @@ export function ListsScreen({
   async function saveMarkSeen(row: ListRow, rating: number, review: string): Promise<string | null> {
     const ref = refOf(row);
     const key = keyOf(row);
-    const result = await call(() => markSeenAction(ref, rating, review));
+    const result = await write(ref, () => markSeenAction(ref, rating, review));
     if (!result.ok) return result.stale ? refusedInSheet(result) : result.error;
     const index = lists.watchlist.rows.findIndex((r) => keyOf(r) === key);
     const moved = withRecord(row, result.value.current);
@@ -550,7 +595,7 @@ export function ListsScreen({
     // title still has that rating and review (issue 103). A Seen row always has a rating.
     if (row.rating === null) return "Couldn't save. Try again.";
     const shown = { rating: row.rating, review: row.review };
-    const result = await call(() => editRatingAction(ref, rating, review, shown));
+    const result = await write(ref, () => editRatingAction(ref, rating, review, shown));
     if (!result.ok) return result.stale ? refusedInSheet(result) : result.error;
     updateLists((prev) => replaced(prev, "seen", withRecord(row, result.value.current)));
     setSheet(null);
@@ -567,7 +612,7 @@ export function ListsScreen({
     // Moves on tap, with the row's button disabled until the move saves. A failure puts the row back.
     setRowPending(key, true);
     updateLists((prev) => insertAt(without(prev, "passed", key), "watchlist", { ...row, status: "watchlist" }, 0));
-    const result = await call(() => addToWatchlistAction(ref));
+    const result = await write(ref, () => addToWatchlistAction(ref));
     setRowPending(key, false);
     if (!result.ok) {
       updateLists(putBack);
