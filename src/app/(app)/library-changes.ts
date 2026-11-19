@@ -1,4 +1,4 @@
-// Tells screens kept on the phone that a title card's write landed, so they can read again (PR 135). Not a server
+// Tells screens kept on the phone that a write to a title landed, so they can read again (PR 135). Not a server
 // module: it lives in the browser, for as long as the page does.
 //
 // A title screen can sit behind another one (a "You might also like" title opened from it), and a save can settle
@@ -14,7 +14,10 @@ const changedAt: { version: number; key: string }[] = [];
 const MAX_CHANGES = 50;
 const listeners = new Set<() => void>();
 
-/** A title card's write landed (or a refusal showed the title's row has changed): `ref` is the title. */
+/**
+ * A write to `ref` settled (or a refusal showed its row has changed), from any screen: a title card, the deck, or
+ * Lists. A row read before it may still show the title.
+ */
 export function noteTitleChange(ref: TitleId) {
   version++;
   changedAt.push({ version, key: formatTitleKey(ref) });

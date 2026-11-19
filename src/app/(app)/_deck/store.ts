@@ -20,6 +20,7 @@
 // actions and holds what the screen shows.
 
 import { useSyncExternalStore } from "react";
+import { noteTitleChange } from "../library-changes";
 import {
   addPage,
   afterRefusal,
@@ -605,6 +606,8 @@ export function sortCard(kind: Exclude<SortKind, "seen">, card: DeckPageCard) {
   const pending = postSave<SortResult>("/api/deck/sort", { kind, title: toTitleId(card) })
     .catch((): SortResult => ({ ok: false, error: "Couldn't save. Check your connection." }))
     .then((result) => {
+      // A "You might also like" row kept for Back reads again, so it leaves this title out (library-changes).
+      noteTitleChange(toTitleId(card));
       if (gen !== generation) return result;
       saving.delete(key);
       touch(key);
@@ -655,6 +658,7 @@ export async function markCardSeen(card: DeckPageCard, rating: number, review: s
     result = { ok: false, error: "Couldn't save. Check your connection." };
   }
   touch(key);
+  noteTitleChange(toTitleId(card));
   if (!result.ok && !result.stale) return result.error;
   if (gen !== generation) return result.ok ? null : result.error;
   set({ queue: removeCard(state.queue, card) });
@@ -713,6 +717,7 @@ export async function undoLastSort() {
     // old row, so it must still leave the title alone (touch) once
     // undoingKey no longer covers it.
     touch(key);
+    noteTitleChange(toTitleId(sort.card));
     if (undoingKey === key) undoingKey = null;
     if (gen === generation) set({ undoing: false });
   }

@@ -48,7 +48,8 @@ const MAX_DROPPED = 20;
  */
 let staleSinceShown = false;
 export function markListsStale() {
-  staleSinceShown = true;
+  // With no rows kept, Lists has nothing stale to show: its next visit renders fresh from the server.
+  if (shownNow) staleSinceShown = true;
 }
 export const listsStale = () => staleSinceShown;
 export function clearListsStale() {
