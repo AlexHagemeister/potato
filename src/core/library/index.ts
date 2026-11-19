@@ -13,6 +13,7 @@ export {
   watchlistTitle,
 } from "./actions";
 export {
+  getFavoriteSeen,
   getList,
   getRatedCount,
   getTitleState,

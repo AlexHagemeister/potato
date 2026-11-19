@@ -1,7 +1,7 @@
 // Reads over a user's library. Each takes the user id explicitly, like the
 // actions, so the app, the API, and a future AI connection share them.
 
-import { and, asc, count, desc, eq, inArray, or } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, inArray, or } from "drizzle-orm";
 import { getDb } from "@/db/client";
 import { MEDIA_TYPES, titleStatus } from "@/db/schema";
 import { getUserSettings } from "../settings/user-settings";
@@ -138,6 +138,28 @@ export async function getTopRatedSeen(userId: string, mediaTypes: readonly Media
     .orderBy(desc(titleStatus.rating), desc(titleStatus.updatedAt), asc(titleStatus.mediaType), asc(titleStatus.tmdbId))
     .limit(limit);
   return ok(rows.map(({ mediaType, tmdbId }) => ({ mediaType, tmdbId })));
+}
+
+/**
+ * The user's Seen titles rated at least `minRating`, highest rating first
+ * (ties: most recently changed first), at most `limit`, each with its rating.
+ * The similar-titles row reads them as the titles the user liked.
+ */
+export async function getFavoriteSeen(
+  userId: string,
+  minRating: number,
+  limit: number,
+): Promise<Result<(TitleId & { rating: number })[]>> {
+  const u = validateUserId(userId);
+  if (!u.ok) return u;
+  if (!Number.isFinite(minRating) || !Number.isSafeInteger(limit) || limit <= 0) return ok([]);
+  const rows = await getDb()
+    .select({ mediaType: titleStatus.mediaType, tmdbId: titleStatus.tmdbId, rating: titleStatus.rating })
+    .from(titleStatus)
+    .where(and(eq(titleStatus.userId, u.value), eq(titleStatus.status, "seen"), gte(titleStatus.rating, minRating)))
+    .orderBy(desc(titleStatus.rating), desc(titleStatus.updatedAt), asc(titleStatus.mediaType), asc(titleStatus.tmdbId))
+    .limit(limit);
+  return ok(rows.flatMap(({ mediaType, tmdbId, rating }) => (rating === null ? [] : [{ mediaType, tmdbId, rating: Number(rating) }])));
 }
 
 /**

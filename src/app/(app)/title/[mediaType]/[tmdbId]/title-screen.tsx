@@ -15,6 +15,7 @@ import { NoticePill, UndoPill } from "../../../_components/toast-pills";
 import { Screen } from "../../../_shell/screen";
 import { editRatingAction, removeRatingAction } from "../../../lists/actions";
 import { applyTitleChange } from "../../../lists/shown";
+import { SimilarRow } from "./similar-row";
 
 // The full card for one title, opened from Search or Lists. The same card and
 // the same four buttons as the deck, except on a Seen title, which shows only
@@ -413,6 +414,7 @@ export function TitleScreen({ card }: { card: Card }) {
 
       <StatusLine state={state} />
       <CardView card={card} />
+      <SimilarRow mediaType={card.mediaType} tmdbId={card.tmdbId} />
 
       {sheet && (
         <RatingSheet
