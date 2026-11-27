@@ -25,7 +25,8 @@ const eslintConfig = defineConfig([
   {
     files: ["src/core/**", "src/db/**"],
     rules: {
-      // Framework and UI packages, static imports.
+      // Framework and UI packages, static imports. The patterns also catch any
+      // react-* package (react-dom/*, react-is) and any @vercel/* package.
       "no-restricted-imports": [
         "error",
         {
@@ -35,7 +36,7 @@ const eslintConfig = defineConfig([
           })),
           patterns: [
             {
-              group: ["next/*", "next-*", "@next/*", "react/*", "react-dom/*"],
+              group: ["next/*", "next-*", "@next/*", "react/*", "react-*", "@vercel/*"],
               message: FRAMEWORK_MESSAGE,
             },
           ],
@@ -46,7 +47,7 @@ const eslintConfig = defineConfig([
         // Framework and UI packages, dynamic import(), which no-restricted-imports does not see.
         {
           selector:
-            "ImportExpression[source.value=/^(next|react|react-dom|server-only|client-only)($|\\u002F)|^next-|^@next\\u002F/]",
+            "ImportExpression[source.value=/^(next|react|react-dom|server-only|client-only)($|\\u002F)|^next-|^react-|^@next\\u002F|^@vercel\\u002F/]",
           message: FRAMEWORK_MESSAGE,
         },
         // Only literal specifiers, so the rules above can check every dynamic import.
@@ -71,6 +72,28 @@ const eslintConfig = defineConfig([
               from: "./",
               except: ["./src/core", "./src/db", "./node_modules"],
               message: "src/core may import only from src/core, src/db, and packages.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: ["src/db/**"],
+    rules: {
+      // Core imports the database layer, so the database layer gets the same
+      // allowlist: itself, core (dev-guard.ts reads the dev database name from
+      // src/core/auth/dev-user.ts), and packages. Without it, src/db could
+      // import app code and be a back door around the core boundary.
+      "import/no-restricted-paths": [
+        "error",
+        {
+          zones: [
+            {
+              target: "./src/db",
+              from: "./",
+              except: ["./src/db", "./src/core", "./node_modules"],
+              message: "src/db may import only from src/db, src/core, and packages.",
             },
           ],
         },

@@ -8,10 +8,13 @@ on:
 permissions:
   contents: read
 
-# A new push to a PR cancels that PR's stale run. Runs on main are never
-# cancelled, so every merge commit gets a CI result.
+# A new push to a PR cancels that PR's stale run. Each push to main gets its
+# own group (by commit SHA), so no main run is ever cancelled, running or
+# queued. One shared main group would not do: GitHub keeps at most one pending
+# run per group and cancels it when a newer one queues, so a third quick merge
+# would leave the second without a result.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || format('main-{0}', github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -36,11 +39,13 @@ jobs:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
 
+      # The second hash covers every build input, not only src/: the public
+      # assets and the config files next build reads.
       - name: Cache Next.js build cache
         uses: actions/cache@v6
         with:
           path: .next/cache
-          key: ${{ runner.os }}-next-${{ hashFiles('bun.lock') }}-${{ hashFiles('src/**') }}
+          key: ${{ runner.os }}-next-${{ hashFiles('bun.lock') }}-${{ hashFiles('src/**', 'public/**', 'next.config.ts', 'tsconfig.json', 'package.json') }}
           restore-keys: |
             ${{ runner.os }}-next-${{ hashFiles('bun.lock') }}-
 
