@@ -3,7 +3,7 @@
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { currentHint, HINTS, type Hint } from "@/core/onboarding/rules";
-import { useDeck, viewOf } from "../_deck/store";
+import { titleKey, useDeck, viewOf } from "../_deck/store";
 import { ServicesSheet } from "./services-sheet";
 import {
   hideHints,
@@ -64,13 +64,14 @@ export function Onboarding({ userId, isNew }: { userId: string; isNew: boolean }
     return () => clearInterval(timer);
   }, [sheetDue, quiet]);
 
-  if (!state.progress && !state.sheetOpen) return null;
+  if (!state.progress && !state.sheetVisible) return null;
   const hint = state.progress ? currentHint(state.progress) : null;
-  const showHint = hint !== null && onDeck && deck.userId === userId && viewOf(deck).kind === "card";
+  const view = viewOf(deck);
+  const showHint = hint !== null && onDeck && deck.userId === userId && view.kind === "card";
   return (
     <>
-      {showHint && <HintLayer hint={hint} index={state.progress!.hint} />}
-      {state.sheetOpen && <ServicesSheet data={state.sheetData} onRefresh={() => router.refresh()} />}
+      {showHint && view.kind === "card" && <HintLayer hint={hint} index={state.progress!.hint} cardKey={titleKey(view.card)} />}
+      {state.sheetVisible && <ServicesSheet data={state.sheetData} onRefresh={() => router.refresh()} />}
     </>
   );
 }
@@ -87,11 +88,11 @@ const ABOVE_TAB_BAR = "calc(var(--tab-bar-height) + env(safe-area-inset-bottom) 
 /**
  * The hint for one button: a ring around the button and a label above the row pointing at it. Never modal, and
  * never in the way of a tap: the ring takes no taps, and the label sits clear of the buttons. When the label would
- * cover the card's title (a short screen, a long title), it moves up over the poster instead.
+ * cover the card's title or its IMDb rating (VISION invariant 5), it moves up over the poster instead.
  */
-function HintLayer({ hint, index }: { hint: Hint; index: number }) {
+function HintLayer({ hint, index, cardKey }: { hint: Hint; index: number; cardKey: string }) {
   const bubble = useRef<HTMLDivElement>(null);
-  const placement = useTitleClearPlacement(bubble, index);
+  const placement = useKeepClearPlacement(bubble, `${cardKey}:${index}`);
 
   return (
     <>
@@ -183,22 +184,26 @@ function HintLayer({ hint, index }: { hint: Hint; index: number }) {
 type Placement = "above_row" | "over_poster";
 
 /**
- * Where the hint's label goes: just above the button row, unless it would cover the card's title there. Measured
- * against the card on screen, again on every scroll and resize, so a long title or a short screen moves it up.
+ * Where the hint's label goes: just above the button row, unless it would cover the card's title or IMDb rating
+ * there. Measured against the card on screen, again on every scroll, resize, and new card, so a long title or a
+ * short screen moves it up over the poster.
  */
-function useTitleClearPlacement(bubble: React.RefObject<HTMLDivElement | null>, index: number): Placement {
+function useKeepClearPlacement(bubble: React.RefObject<HTMLDivElement | null>, measureKey: string): Placement {
   const [placement, setPlacement] = useState<Placement>("above_row");
   useLayoutEffect(() => {
     const measure = () => {
       const row = document.querySelector('[data-slot="deck-actions"]');
-      const title = document.querySelector("main article[data-title-key] header h2");
+      const card = document.querySelector("main article[data-title-key]");
       const box = bubble.current;
-      if (!row || !title || !box) return;
+      if (!row || !card || !box) return;
+      const keep = [card.querySelector("header h2"), card.querySelector("[data-imdb]")].filter((el) => el !== null);
       const rowTop = row.getBoundingClientRect().top;
-      const t = title.getBoundingClientRect();
       // Where the label's top would be above the row (its pointer reaches into the row's top padding).
       const top = rowTop - box.offsetHeight + 2;
-      const covers = t.bottom > top - 6 && t.top < rowTop;
+      const covers = keep.some((el) => {
+        const r = el.getBoundingClientRect();
+        return r.bottom > top - 6 && r.top < rowTop;
+      });
       setPlacement(covers ? "over_poster" : "above_row");
     };
     measure();
@@ -221,6 +226,6 @@ function useTitleClearPlacement(bubble: React.RefObject<HTMLDivElement | null>, 
       window.removeEventListener("resize", later);
       observer.disconnect();
     };
-  }, [bubble, index]);
+  }, [bubble, measureKey]);
   return placement;
 }

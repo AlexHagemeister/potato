@@ -24,14 +24,20 @@ export interface OnboardingState {
   /** Null when onboarding isn't running on this load (not new, finished, or storage that can't keep a mark). */
   progress: Progress | null;
   sheetOpen: boolean;
-  /** What the services sheet shows. Null until loaded; fetched ahead, after the first sort. */
+  /**
+   * The sheet is on screen. It appears once its first read is in, so someone whose services were saved elsewhere
+   * meanwhile never sees it flash open and shut.
+   */
+  sheetVisible: boolean;
+  /** What the services sheet shows. Null while it loads, read fresh each time the sheet opens. */
   sheetData: SheetData | null;
 }
 
-const OFF: OnboardingState = { userId: null, progress: null, sheetOpen: false, sheetData: null };
+const OFF: OnboardingState = { userId: null, progress: null, sheetOpen: false, sheetVisible: false, sheetData: null };
 
 let state: OnboardingState = OFF;
-let loading: Promise<SheetData> | null = null;
+/** Bumped per sheet read, so only the latest read fills the sheet. */
+let loadToken = 0;
 const listeners = new Set<() => void>();
 
 function set(patch: Partial<OnboardingState>) {
@@ -68,18 +74,17 @@ export function startOnboarding(userId: string, isNew: boolean) {
   const store = storage();
   const device = store ? readDeviceRecord(store, userId) : { done: null, progress: null };
   const progress = startingProgress({ isNew, device });
-  loading = null;
+  loadToken++;
   set({ ...OFF, userId, progress });
   if (!progress) return;
   holdInstallAutoOpen();
   writeProgress(store!, userId, progress);
-  if (progress.sorts > 0) void prefetchSheet();
 }
 
 /** The shell unmounted (signed out). The hold lifts without opening anything. */
 export function stopOnboarding() {
   releaseInstallAutoOpen({ open: false });
-  loading = null;
+  loadToken++;
   set(OFF);
 }
 
@@ -91,7 +96,6 @@ function apply(event: OnboardingEvent) {
   const store = storage();
   if (store) writeProgress(store, userId, next);
   set({ progress: next });
-  if (event.kind === "sorted") void prefetchSheet();
 }
 
 /** A card was sorted on the deck. */
@@ -101,37 +105,35 @@ export const nextHint = () => apply({ kind: "next" });
 /** "Hide tips". */
 export const hideHints = () => apply({ kind: "hide_hints" });
 
-function prefetchSheet(): Promise<SheetData> {
-  if (state.sheetData?.ok) return Promise.resolve(state.sheetData);
-  if (loading) return loading;
+/**
+ * Reads what the sheet shows, fresh each time it opens, never from earlier in the session: services saved on
+ * Profile meanwhile must show as saved, or the sheet's first tap would save over them. The settings form takes its
+ * starting values once, so it mounts only from this read.
+ */
+async function loadSheet() {
+  const token = ++loadToken;
   const userId = state.userId;
-  const load = loadServicesSheetAction()
-    .catch((): SheetData => ({ ok: false }))
-    .then((data) => {
-      if (state.userId === userId) set({ sheetData: data });
-      // A failure is tried again when the sheet opens.
-      if (loading === load && !data.ok) loading = null;
-      return data;
-    });
-  loading = load;
-  return load;
+  set({ sheetData: null });
+  const data = await loadServicesSheetAction().catch((): SheetData => ({ ok: false }));
+  if (token !== loadToken || state.userId !== userId || !state.sheetOpen) return;
+  // Services saved elsewhere meanwhile (Profile, another device): the sheet has nothing to ask.
+  if (data.ok && data.value.settings.providerIds.length > 0 && !state.sheetVisible) {
+    void finishOnboarding(() => {});
+    return;
+  }
+  set({ sheetData: data, sheetVisible: true });
 }
 
-/**
- * The sheet's moment has come (the hints are over, the first few sorts are made, and nothing else is on screen).
- * Someone who has already saved services elsewhere meanwhile doesn't need it, so it finishes instead.
- */
-export async function openServicesSheet() {
+/** The sheet's moment has come (the hints are over, the first few sorts are made, and nothing else is on screen). */
+export function openServicesSheet() {
   if (state.progress?.stage !== "sheet" || state.sheetOpen) return;
   set({ sheetOpen: true });
-  const data = await prefetchSheet();
-  if (data.ok && data.value.settings.providerIds.length > 0 && state.sheetOpen) void finishOnboarding(() => {});
+  void loadSheet();
 }
 
 /** Loads the sheet again after a failure. */
 export function retrySheet() {
-  set({ sheetData: null });
-  void prefetchSheet();
+  void loadSheet();
 }
 
 /**
@@ -144,7 +146,7 @@ export async function finishOnboarding(refresh: () => void) {
   if (!userId || !state.progress) return;
   const store = storage();
   if (store) writeDone(store, userId);
-  set({ progress: null, sheetOpen: false });
+  set({ progress: null, sheetOpen: false, sheetVisible: false });
   try {
     await settledAction();
   } catch {
