@@ -43,6 +43,7 @@ import {
   titleKey,
   type DeckQueue,
 } from "@/core/deck-queue";
+import { readDeckResponse } from "@/core/deck-queue/card-shape";
 import { MAX_HIDDEN_CHECK } from "@/core/deck-service/constants";
 import type { DeckPage, DeckPageCard } from "@/core/deck-service/types";
 import {
@@ -469,13 +470,29 @@ async function fetchPage(queue: DeckQueue, choice: DeckChoice): Promise<DeckResp
   if (queue.cursor) params.set("cursor", queue.cursor);
   // A first page names its deal, so asking again (a retry, a settings refresh) gets the same cards.
   else if (queue.shuffleSeed) params.set("shuffle", queue.shuffleSeed);
+  let body: unknown;
   try {
     const res = await fetch(`/api/deck${params.size ? `?${params}` : ""}`, { cache: "no-store" });
-    return (await res.json()) as DeckResponse;
+    body = await res.json();
   } catch {
     return { ok: false, error: "unavailable" };
   }
+  // Checked, not cast (issue 129): this client may be older than the server it talks to.
+  const read = readDeckResponse(body);
+  if (read.kind === "malformed") {
+    // Not a deck answer: a failed page, which the screen retries.
+    console.error("deck: malformed /api/deck answer:", read.reason);
+    return { ok: false, error: "unavailable" };
+  }
+  if (read.kind === "refused") return { ok: false, error: DECK_ERRORS.has(read.error) ? (read.error as DeckError) : "unavailable" };
+  // A malformed card is left out and the rest of the page goes on, so one bad card can't stall the deck (issue 41).
+  for (const { index, reason } of read.dropped) console.error(`deck: dropped malformed card ${index}:`, reason);
+  return { ok: true, page: read.page };
 }
+
+type DeckError = Extract<DeckResponse, { ok: false }>["error"];
+/** The refusals the route sends. Any other reads as unavailable: a failed page to retry. */
+const DECK_ERRORS: ReadonlySet<string> = new Set<DeckError>(["invalid_deck_query", "signed_out", "unavailable"]);
 
 /**
  * Fetches pages until the queue has enough cards, the deck ends, or a fetch
@@ -522,7 +539,8 @@ async function fill() {
       preload();
     }
   } catch (err) {
-    // An unexpected throw (a malformed card, say) shows the error with Try again, not an endless skeleton.
+    // An unexpected throw shows the error with Try again, not an endless skeleton. (A malformed card no longer
+    // throws here: fetchPage drops it.)
     console.error("deck: fill failed:", err);
     set({ failed: true });
   } finally {
