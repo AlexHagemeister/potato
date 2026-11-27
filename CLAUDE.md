@@ -79,6 +79,7 @@ State lives in GitHub. Do not create status, progress, or tracking files in the 
 ## Environment notes
 
 - **This repo is public.** Nothing personal goes into code, commits, PRs, or issues.
+- **Production has real users.** Alex and other people use the app, and every merge to main deploys to them. Their Watchlist, Passed, and Seen rows, ratings, and reviews must survive every change. So a change to code that writes or deletes those rows gets the full review whatever its size, and a migration that drops or rewrites user data waits for Alex's yes. Why: "we dont want to wipe that or anything as we make changes" (Alex, 2026-11-26).
 - **Agents post through Alex's GitHub account, so every agent-written comment, issue, and PR body opens with "Agent:".** Only comments without that marker are Alex's rulings.
 - **Alex's exocortex vault** (`~/exocortex`, also reachable through its MCP) holds his preferences and context. Read it when useful. Never write to it from this project, and never copy personal details from it into this repo.
 - **The permission classifier.** Claude Code's auto-mode classifier sometimes denies or stalls routine commands. Run file moves (`mv`, `git mv`) as standalone commands, never chained with `&&` or `;`. When a command is denied or hangs, split it and retry once before treating it as a bug.
