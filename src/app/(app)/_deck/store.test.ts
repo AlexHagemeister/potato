@@ -25,12 +25,21 @@ let undoCalls: UndoCall[] = [];
 let undoAnswer: () => Promise<DeckActionResult> = async () => ({ ok: true, outcome: { previous: null, current: null } });
 let seenAnswer: () => Promise<DeckActionResult> = async () => ({ ok: false, error: "unset" });
 
+/** An export the store does not call here. A later test that reaches it fails with a clear message. */
+const notMocked = (name: string) => () => {
+  throw new Error(`${name} is not mocked in store.test.ts`);
+};
+
+// Every export of ./actions, so nothing reads as undefined.
 mock.module("./actions", () => ({
   undoSortAction: (ref: unknown, outcome: unknown) => {
     undoCalls.push({ ref, outcome });
     return undoAnswer();
   },
   markSeenAction: () => seenAnswer(),
+  sortCardAction: notMocked("sortCardAction"),
+  sortDeckCardAction: notMocked("sortDeckCardAction"),
+  saveDeckChoiceAction: notMocked("saveDeckChoiceAction"),
 }));
 
 const store = await import("./store");
@@ -266,7 +275,8 @@ describe("Undo of a sort of a title that already had a row sends that row back e
       previous: PREVIOUS.skippedRunOut(101),
       current: row(101, { status: "seen", rating: 9.5, review: "Loved it." }),
     };
-    seenAnswer = async () => ({ ok: true, outcome: outcome as never });
+    // A copy, so a store that edited the outcome in place would fail the comparison below.
+    seenAnswer = async () => ({ ok: true, outcome: structuredClone(outcome) as never });
     expect(await store.markCardSeen(c, 9.5, "Loved it.")).toBeNull();
     expect(snapshot().toast?.message).toBe("Marked as seen");
     expect(top()).toBe(102);
