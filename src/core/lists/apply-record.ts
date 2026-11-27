@@ -18,7 +18,9 @@ import type { ListRow } from "./lists";
  * - Skipped, or no row at all (`record` null): the row leaves the lists. A skipped title is on no list.
  *
  * `known` is a row these lists showed for the title earlier and dropped (a Skip, or Remove rating). When the lists
- * don't show the title now, it supplies the title, year, and poster, so an Undo can put the row back.
+ * don't show the title now, it supplies the title, year, and poster, so an Undo can put the row back. Nothing here
+ * checks it against the lists' filters (a row holds no genres, rating, or services), so the caller passes only a row
+ * these lists dropped under the filters they have now (issue 121).
  *
  * Returns `lists` itself exactly when nothing could be applied: the lists don't show the title and no `known` row was
  * given. A row is never invented, since its title and poster come from a server read.
