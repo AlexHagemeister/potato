@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { authClient } from "@/lib/auth-client";
 
 const buttonClass =
@@ -18,6 +18,18 @@ function ErrorText({ message }: { message: string | null }) {
 export function SignInButton() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A tap leaves for Google with `pending` still true. If the browser later
+  // restores this page from its back/forward cache (Back from Google's
+  // consent screen), the page comes back as it was left, button disabled, so
+  // re-enable it on a restore (issue 18 item 3). A normal load starts fresh
+  // and needs nothing.
+  useEffect(() => {
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) setPending(false);
+    };
+    window.addEventListener("pageshow", onPageShow);
+    return () => window.removeEventListener("pageshow", onPageShow);
+  }, []);
   return (
     <>
       <button

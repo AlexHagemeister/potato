@@ -20,7 +20,7 @@ import {
   parseDevUserSlug,
 } from "./dev-user";
 
-export { DEV_DATABASE_NAME, DEV_TEST_USER, databaseNameFromUrl, parseDevUserSlug } from "./dev-user";
+export { DEV_DATABASE_NAME, databaseNameFromUrl, parseDevUserSlug } from "./dev-user";
 
 export interface DevLoginEnv {
   /**
