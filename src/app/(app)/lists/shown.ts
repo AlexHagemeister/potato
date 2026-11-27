@@ -1,7 +1,7 @@
 // The Lists rows kept on the phone for Back (issue 76), in their own module so a title card can write to them too
 // (issues 93 and 110). Not a server module: it lives in the browser, for as long as the page does.
 
-import type { FilterChoice } from "@/core/filters";
+import { sameFilterChoice, type FilterChoice } from "@/core/filters";
 import type { TitleRecord } from "@/core/library/types";
 import { applyTitleRecord, type ListRow } from "@/core/lists";
 import { formatTitleKey } from "@/core/title-id";
@@ -36,8 +36,12 @@ const MAX_SHOWN_RENDERS = 50;
  * Rows a card's change took off the kept lists (a Skip, or Remove rating), by title key, newest last. A card's Undo
  * brings the title back, and only the dropped row still holds its title and poster. A few are plenty: an Undo
  * follows its own change within seconds.
+ *
+ * Each row keeps the filters it showed under, and comes back only while the kept rows have those filters (issue 121).
+ * A row holds no genres, rating, or services, so nothing on the phone can tell whether it fits other filters. Under
+ * other filters the change counts as one the kept rows couldn't take, and Lists reads the server instead.
  */
-const dropped = new Map<string, ListRow>();
+const dropped = new Map<string, { row: ListRow; filters: FilterChoice }>();
 const MAX_DROPPED = 20;
 
 /**
@@ -95,14 +99,16 @@ export function updateLists(change: (lists: Lists) => Lists) {
  * A title card saved a change (issues 93 and 110): `record` is the title's row as the server now holds it. Back to
  * Lists then shows the title where it is now at once, not the row from before the card, so an Edit tapped right after
  * Back opens on the rating and review the card saved. Core decides where the row goes (applyTitleRecord). False when
- * the kept rows neither show the title nor hold a row they dropped for it, so they couldn't take the change: the card
- * then refreshes Lists instead.
+ * the kept rows neither show the title nor hold a row they dropped for it under the filters they have now, so they
+ * couldn't take the change: the card then refreshes Lists instead.
  */
 export function applyTitleChange(ref: TitleId, record: TitleRecord | null): boolean {
   if (!shownNow) return false;
   const key = formatTitleKey(ref);
   const before = shownNow.lists;
-  const lists = applyTitleRecord(before, ref, record, dropped.get(key));
+  const known = dropped.get(key);
+  const fits = known !== undefined && sameFilterChoice(known.filters, shownNow.filters);
+  const lists = applyTitleRecord(before, ref, record, fits ? known.row : null);
   if (lists === before) return false;
   // A Skip or Remove rating drops the row. Keep it, so the card's Undo can put it back with its title and poster.
   const now = rowOf(lists, key);
@@ -110,7 +116,7 @@ export function applyTitleChange(ref: TitleId, record: TitleRecord | null): bool
   if (now) dropped.delete(key);
   else if (was) {
     dropped.delete(key);
-    dropped.set(key, was);
+    dropped.set(key, { row: was, filters: shownNow.filters });
     if (dropped.size > MAX_DROPPED) dropped.delete(dropped.keys().next().value as string);
   }
   setShown({ ...shownNow, lists });
