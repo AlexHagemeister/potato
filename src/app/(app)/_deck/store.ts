@@ -76,7 +76,7 @@ const DONE_LABEL: Record<SortKind, string> = {
   seen: "Marked as seen",
 };
 
-/** The last sort's confirmation, with its Undo. */
+/** The confirmation of the sort an Undo is on offer for, with its Undo: the last sort, or the one before it when the last one failed. */
 export interface Toast {
   id: number;
   message: string;
