@@ -52,10 +52,10 @@ export function DrawnPoster({ className = "" }: { className?: string }) {
         fill="#ededed"
         fontSize="13"
         fontWeight="700"
-        letterSpacing="3"
+        letterSpacing="4"
         fontFamily="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
       >
-        THE FAR SHORE
+        {EXAMPLE_CARD.title.toUpperCase()}
       </text>
     </svg>
   );

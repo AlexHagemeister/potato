@@ -37,7 +37,7 @@ export const BUILDS_FOOTNOTE = "Every choice can be undone, and your lists follo
  */
 export const EXAMPLE_CARD = {
   badge: "Example",
-  title: "The Far Shore",
+  title: "Saltlight",
   meta: "2024 · Series",
   genres: ["Sci-fi", "Drama"],
   length: "2 seasons",
