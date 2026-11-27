@@ -3,6 +3,7 @@ import { getCurrentUserForRequest } from "@/lib/current-user";
 import { Screen, ScreenTitle } from "../_shell/screen";
 import { SignedOutScreen } from "../_shell/signed-out";
 import { Attribution } from "./attribution";
+import { InstallRow } from "./install-row";
 import { SettingsForm } from "./settings-form";
 import { SignOutButton } from "./sign-out-button";
 
@@ -33,6 +34,8 @@ export default async function ProfilePage() {
         initialServices={profile.services}
         servicesUnavailable={profile.servicesUnavailable}
       />
+
+      <InstallRow />
 
       <Attribution />
     </Screen>
