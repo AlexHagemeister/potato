@@ -1251,6 +1251,32 @@ try {
     }
   });
 
+  await check("PostgresCacheStore.deleteExpiredBefore deletes only rows expiring strictly before the cutoff, up to the limit", async () => {
+    // A cutoff in 2001 so the purge can reach only this run's own rows, never
+    // another agent's cache in the shared potato_dev.
+    const store = new PostgresCacheStore();
+    const key = (name: string) => `itest:${runId}:purge-${name}`;
+    const cutoff = new Date(Date.UTC(2001, 0, 1));
+    const rows: [string, Date][] = [
+      [key("old-1"), new Date(Date.UTC(2000, 0, 1))],
+      [key("old-2"), new Date(Date.UTC(2000, 0, 2))],
+      [key("old-3"), new Date(Date.UTC(2000, 0, 3))],
+      [key("at-cutoff"), cutoff],
+      [key("after-cutoff"), new Date(Date.UTC(2001, 0, 2))],
+      [key("fresh"), new Date(Date.UTC(2030, 0, 1))],
+    ];
+    try {
+      for (const [k, expires] of rows) await store.set(k, { k }, expires);
+      assert.equal(await store.deleteExpiredBefore(cutoff, 2), 2, "the limit caps one run, and the count is real");
+      assert.equal(await store.deleteExpiredBefore(cutoff, 10), 1, "the next run takes the rest");
+      assert.equal(await store.deleteExpiredBefore(cutoff, 10), 0);
+      const left = await store.getMany(rows.map(([k]) => k));
+      assert.deepEqual([...left.keys()].sort(), [key("after-cutoff"), key("at-cutoff"), key("fresh")]);
+    } finally {
+      await db.execute(sql`delete from tmdb_cache where key like ${`itest:${runId}:purge-%`}`);
+    }
+  });
+
   console.log("Unknown users and bad input");
 
   await check("writes for a user id with no users row return unknown_user", async () => {
