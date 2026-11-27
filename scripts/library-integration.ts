@@ -976,18 +976,8 @@ try {
     assert.deepEqual(await state(A, ref), before);
   });
 
-  await check("restore refuses a date outside its bounds or with no offset, changing nothing (issues 22 and 27)", async () => {
-    const bad: [string, (stored: string) => unknown][] = [
-      ["far in the future", () => "3000-01-01T00:00:00.000Z"],
-      ["a week ahead of the clock", () => new Date(Date.now() + 7 * 86_400_000).toISOString()],
-      ["two years ahead of the clock", () => new Date(Date.now() + 730 * 86_400_000).toISOString()],
-      ["before Potato existed", () => "2025-12-31T23:59:59.999Z"],
-      ["the year 0001", () => "0001-01-01T00:00:00.000Z"],
-      ["a Date past the year 9999", () => new Date(8.64e15)],
-      ["no offset", (stored) => stored.replace(/Z$/, "")],
-      ["a date with no time", (stored) => stored.slice(0, 10)],
-      ["a space for the T", (stored) => stored.replace("T", " ")],
-    ];
+  /** Each bad date, put in place of each date of a real undo, is invalid_snapshot and changes nothing. `stored` is the real date. */
+  async function restoreRefusesDates(bad: [string, (stored: string) => unknown][]) {
     // A Watchlist row that a Pass replaced: undo would write `previous` back.
     const ref = fresh();
     unwrap(await lib.watchlistTitle(A, ref));
@@ -1018,7 +1008,26 @@ try {
     assert.deepEqual(JSON.parse(JSON.stringify(await state(A, ref))), act.previous);
     unwrap(await lib.restoreTitleState(A, skipRef, skipAct));
     assert.deepEqual(JSON.parse(JSON.stringify(await state(A, skipRef))), skipAct.previous);
-  });
+  }
+
+  await check("restore refuses a date outside its bounds, changing nothing (issue 22)", () =>
+    restoreRefusesDates([
+      ["far in the future", () => "3000-01-01T00:00:00.000Z"],
+      ["a week ahead of the clock", () => new Date(Date.now() + 7 * 86_400_000).toISOString()],
+      ["two years ahead of the clock", () => new Date(Date.now() + 730 * 86_400_000).toISOString()],
+      ["before Potato existed", () => "2025-12-31T23:59:59.999Z"],
+      ["the year 0001", () => "0001-01-01T00:00:00.000Z"],
+      ["a Date past the year 9999", () => new Date(8.64e15)],
+    ]),
+  );
+
+  await check("restore refuses a date string with no offset, or not in ISO form, changing nothing (issue 27)", () =>
+    restoreRefusesDates([
+      ["no offset", (stored) => stored.replace(/Z$/, "")],
+      ["a date with no time", (stored) => stored.slice(0, 10)],
+      ["a space for the T", (stored) => stored.replace("T", " ")],
+    ]),
+  );
 
   await check("restore takes each date form an outcome can arrive in and puts a Seen row back exactly", async () => {
     /** The same instant written with a +05:30 offset. */
