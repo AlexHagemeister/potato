@@ -1,7 +1,7 @@
 // Daily IMDb ratings load, invoked by Vercel Cron (vercel.json). It also
-// purges long-expired tmdb_cache rows (issue 14), since Hobby allows few cron
-// jobs and this one already runs nightly. Thin: the auth check, the load and
-// the purge all live in src/core.
+// purges long-expired tmdb_cache rows (issue 14), riding on this job because
+// it already runs nightly. Thin: the auth check, the load and the purge all
+// live in src/core.
 
 import { PostgresCacheStore, runNightlyCachePurge } from "@/core/cache";
 import { isAuthorizedCronRequest } from "@/core/cron-auth";
