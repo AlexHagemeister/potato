@@ -3,7 +3,7 @@
 
 import type { Genre } from "../tmdb/types";
 import type { DeckFilters, DiscoveryMode, MediaType, PoolName, TitleId, TitleStatus } from "../types";
-import type { JUSTWATCH_ATTRIBUTION } from "./constants";
+import type { JUSTWATCH_ATTRIBUTION } from "../attribution";
 
 /**
  * The IMDb rating on a card (VISION invariant 5). Three states, so the UI

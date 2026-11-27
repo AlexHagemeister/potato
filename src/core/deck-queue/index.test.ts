@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { JUSTWATCH_ATTRIBUTION } from "../deck-service/constants";
+import { JUSTWATCH_ATTRIBUTION } from "../attribution";
 import type { DeckPageCard } from "../deck-service/types";
 import type { MediaType } from "../types";
 import {

@@ -90,16 +90,6 @@ export const DETAILS_OUTAGE_MIN_FAILURES = 3;
 export const RATINGS_PROBE_TTL_MS = 60 * 60 * 1000;
 
 /**
- * The credit every place that shows streaming availability must carry
- * (CLAUDE.md architecture rule 7). TMDB's watch-provider data comes from
- * JustWatch, and TMDB revokes API access for non-compliance.
- */
-export const JUSTWATCH_ATTRIBUTION = {
-  text: "Streaming availability from JustWatch",
-  url: "https://www.justwatch.com",
-} as const;
-
-/**
  * Titles one hiddenTitles call may check. The Discover screen sends its queued
  * cards, which stay well under this (a few pages of at most POOL_QUOTA titles).
  */

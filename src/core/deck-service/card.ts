@@ -5,7 +5,7 @@ import { STREAMING_MONETIZATION } from "../tmdb/client";
 import { logoUrl } from "../tmdb/images";
 import type { CountryProviders, TitleDetails, WatchProvider } from "../tmdb/types";
 import type { ImdbRating } from "../types";
-import { JUSTWATCH_ATTRIBUTION } from "./constants";
+import { JUSTWATCH_ATTRIBUTION } from "../attribution";
 import type { Card, CardImdb, CardProvider, CardStreaming, CardUserState, StreamingOffer, UnknownStreaming } from "./types";
 
 type OfferKind = keyof Omit<CountryProviders, "link">;
