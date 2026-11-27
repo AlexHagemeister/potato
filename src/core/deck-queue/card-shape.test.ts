@@ -53,6 +53,10 @@ describe("cardProblem", () => {
     expect(cardProblem(wire(1, (c) => ((c.newField = { anything: 1 }), ((c.imdb as Record<string, unknown>).extra = true))))).toBeNull();
   });
 
+  test("userState and source are not checked: the Discover client never reads them", () => {
+    expect(cardProblem(wire(1, (c) => ((c.userState = "seen"), delete c.source)))).toBeNull();
+  });
+
   test("an offer name it does not know passes: the card still shows", () => {
     expect(cardProblem(wire(1, (c) => ((c.streaming as { providers: { offers: string[] }[] }).providers[0].offers = ["cinema"])))).toBeNull();
   });
@@ -74,8 +78,6 @@ describe("cardProblem", () => {
     ["an unknown streaming kind", (c) => ((c.streaming as Record<string, unknown>).kind = "maybe")],
     ["providers not a list", (c) => ((c.streaming as Record<string, unknown>).providers = null)],
     ["a provider without streams", (c) => delete (c.streaming as { providers: Record<string, unknown>[] }).providers[0].streams],
-    ["no source", (c) => delete c.source],
-    ["userState a string", (c) => (c.userState = "seen")],
   ];
   for (const [name, patch] of broken) {
     test(`a card with ${name} is malformed`, () => {

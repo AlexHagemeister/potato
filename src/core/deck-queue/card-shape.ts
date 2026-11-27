@@ -47,9 +47,8 @@ const CARD_FIELDS: [string, (v: unknown) => boolean][] = [
   ["numberOfSeasons", isNumOrNull],
   ["synopsis", isStr],
   ["trailerYouTubeKey", isStrOrNull],
-  // The deck screen does not read it, so its inside is not checked: an object or null.
-  ["userState", orNull(isObj)],
-  ["source", isStr],
+  // Not checked: userState and source. The Discover client never reads them, so a server that changed or dropped
+  // them must not cost an older client its cards.
 ];
 
 /** Why the IMDb part of a card is malformed, or null when it is fine (CardImdb). */
