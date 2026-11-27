@@ -24,7 +24,7 @@ export function Attribution() {
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img src={TMDB_LOGO_URL} alt="TMDB" width={77} height={10} className="h-2.5 w-auto" />
       <p>{TMDB_NOTICE}</p>
-      <p>{JUSTWATCH_ATTRIBUTION.text}</p>
+      <p>{JUSTWATCH_ATTRIBUTION.text}.</p>
       <p>{IMDB_NOTICE}</p>
     </footer>
   );
