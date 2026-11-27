@@ -242,7 +242,9 @@ export function updateLists(change: (lists: Lists) => Lists) {
  * Where a changed row lands (issue 119). Every change these rows take goes through one rule, core's applyTitleRecord:
  * a title card's save (applyTitleChange), the Lists screen's own saves and their Undos (placeTitle), the move
  * + Watchlist shows before its save answers (showMoved), and the saves a fresh render replays (withSaves). So a change
- * lands in the same place whichever screen made it, and a new list order (issue 118) is a change in core alone.
+ * lands in the same place whichever screen made it. Re-sorting an in-place edit (issue 118) is then a change in core
+ * alone. A list order by some key other than the time of the last change would also need showMoved's provisional
+ * time replaced by that key.
  */
 
 /** A row the Lists screen acted on, and the filters the rows showed it under. */

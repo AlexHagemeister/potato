@@ -504,6 +504,36 @@ describe("one placement rule for a changed row (issue 119)", () => {
     expect(shownLists().watchlist.rows[0].updatedAt).toEqual(NOW);
   });
 
+  test("a fresh render replays the screen's real + Watchlist through the same rule", () => {
+    const userId = newUser();
+    const tapped = row(MATRIX, "passed", 4);
+    // The screen's `move`, as lists-screen passes it to write() as showUnderWay.
+    const move = (l: Lists) => (l.passed.rows.some((r) => r.tmdbId === MATRIX.tmdbId) ? showMoved(l, tapped, "watchlist") : l);
+    const moved: ActionOutcome = { previous: record(MATRIX, "passed", at(4)), current: record(MATRIX, "watchlist") };
+    const watchlistAfter = ["movie:603", "movie:13", "movie:550", "movie:155"];
+    seed(userId);
+    // Under way: a render read before the save shows the move, on the Watchlist only.
+    const save = startSave(userId, MATRIX, move);
+    seed(userId);
+    expect(keys(shownLists(), "watchlist")).toEqual(watchlistAfter);
+    expect(listsWith(shownLists(), "movie:603")).toEqual(["watchlist"]);
+    // Answered: the same, with the server's time.
+    finishSave(save, moved);
+    seed(userId);
+    expect(keys(shownLists(), "watchlist")).toEqual(watchlistAfter);
+    expect(listsWith(shownLists(), "movie:603")).toEqual(["watchlist"]);
+    expect(shownLists().watchlist.rows[0].updatedAt).toEqual(NOW);
+    // Its Undo under way: the move waits, so a render read before the move shows the title on Passed only.
+    const undo = startSave(userId, MATRIX, undefined, moved);
+    seed(userId);
+    expect(listsWith(shownLists(), "movie:603")).toEqual(["passed"]);
+    // The Undo answered: a render read before the move ends on Passed too, where it was.
+    finishSave(undo, { previous: moved.current, current: moved.previous });
+    seed(userId);
+    expect(keys(shownLists(), "passed")).toEqual(["movie:603"]);
+    expect(listsWith(shownLists(), "movie:603")).toEqual(["passed"]);
+  });
+
   test("a failed + Watchlist goes back where it was on Passed", () => {
     seed(newUser(), {
       ...lists(),
