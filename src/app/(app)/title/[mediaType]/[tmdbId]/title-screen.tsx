@@ -202,8 +202,9 @@ export function TitleScreen({ card }: { card: Card }) {
    * A write landed, or a refusal read where the title is now: `record` is the title's row as the server holds it.
    * The Lists rows kept for Back take it at once (issues 93 and 110), whether or not this card is still on screen, so
    * Back to Lists shows the title where it is now, and an Edit tapped there opens on what this card saved. No server
-   * refresh follows then: one that read before a Lists save made right after Back, and arrived after it, would put
-   * the old row back. Only a title the kept rows neither show nor dropped earlier (not loaded, or on no list) needs
+   * refresh follows then: the kept rows already hold the change, and a refresh would only replace them with a server
+   * read and drop their Show more pages. (A fresh render does take the Lists saves it may be older than, shown.ts
+   * withSaves, but not for a row from a Show more page.) Only a title the kept rows neither show nor dropped earlier (not loaded, or on no list) needs
    * the refresh. A row they dropped (Skip, Remove rating) comes back from there on Undo.
    */
   function landed(record: TitleRecord | null) {

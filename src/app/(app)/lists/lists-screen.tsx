@@ -557,16 +557,16 @@ export function ListsScreen({
 
   /**
    * A write to one title. It is noted in shown.ts (startSave): a reload already under way then knows its read may be
-   * older than this write, and a fresh render of Lists takes it (`show` while it is under way, its outcome once it
-   * answers). It counts in writesInFlight, so a reload waits for it before reading. It tells any "You might also
-   * like" row kept for Back to read again (library-changes).
+   * older than this write, and a fresh render of Lists takes it (`showUnderWay` while it is under way, its outcome
+   * once it answers). It counts in writesInFlight, so a reload waits for it before reading. It tells any "You might
+   * also like" row kept for Back to read again (library-changes).
    */
   async function write(
     ref: TitleId,
     action: () => Promise<ActionResult<ActionOutcome>>,
-    show?: (lists: Lists) => Lists,
+    showUnderWay?: (lists: Lists) => Lists,
   ): Promise<ActionResult<ActionOutcome>> {
-    const save = startSave(userId, ref, show);
+    const save = startSave(userId, ref, showUnderWay);
     const pending = call(action);
     writesInFlight.add(pending);
     const result = await pending;
@@ -637,8 +637,9 @@ export function ListsScreen({
     const next = index >= 0 ? lists.passed.rows[index + 1] : undefined;
     const putBack = (prev: Lists) => insertAt(without(prev, "watchlist", key), "passed", row, index);
     // Moves on tap, with the row's button disabled until the move saves. A failure puts the row back. A fresh render
-    // that arrives before the save answers shows the move too (write's `show`, issue 137), but only when it shows the
-    // title on Passed: one that doesn't read after the save, or has filters the title doesn't fit.
+    // that arrives before the save answers shows the move too (write's `showUnderWay`, issue 137), but only when it shows
+    // the title on Passed. One that doesn't read after the save, has filters the title doesn't fit, or holds the row
+    // only past its first page (issue 98 leftover, filed separately).
     const move = (prev: Lists) =>
       prev.passed.rows.some((r) => keyOf(r) === key)
         ? insertAt(without(prev, "passed", key), "watchlist", { ...row, status: "watchlist" }, 0)
@@ -651,8 +652,9 @@ export function ListsScreen({
       updateLists(putBack);
       return failed(result);
     }
-    // The whole move again, not only the saved record: a fresh render read before the save landed can have started
-    // the rows over meanwhile, with the title still on Passed.
+    // The whole move again, not only the saved record: the rows can have started over meanwhile with the title still
+    // on Passed. A fresh render shows the move already (withSaves), but a filter load does not, nor does a fresh
+    // render that holds the row only past its first page.
     const saved = withRecord({ ...row, status: "watchlist" }, result.value.current);
     updateLists((prev) => {
       const at = prev.watchlist.rows.findIndex((r) => keyOf(r) === key);

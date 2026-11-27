@@ -92,10 +92,19 @@ export function seedShown(renderId: string, from: Shown) {
  *
  * Saves replay in the order they answered, which is the order the server took them, so a move and its Undo come back
  * as the Undo left them.
+ *
+ * An answered save stops replaying once a later save on the same title has started, such as its Undo (PR 158 review).
+ * The Undo restores the row exactly as the save found it, `updatedAt` included, so a render read after the Undo
+ * landed shows the save's `previous`, and only the Undo's own outcome, replayed after it, can say the save no longer
+ * stands. So while the later save is under way, the earlier ones wait. Once it answers, the chain replays in order
+ * again. If it fails, the phone can't tell whether the server took it (the answer may have been lost), so the title's
+ * earlier saves are forgotten, and fresh renders show the title as the server read it.
  */
 type Save = {
   userId: string;
   ref: TitleId;
+  /** The order the saves started in. */
+  seq: number;
   /** While under way: how the screen shows it before the save answers. */
   show?: (lists: Lists) => Lists;
   /** Once answered: what the save did, and when it answered (Date.now()). */
@@ -115,7 +124,7 @@ export const savesStartedCount = () => savesStarted;
 /** A Lists save is starting. `show`, if given, is how the screen shows it before it answers. */
 export function startSave(userId: string, ref: TitleId, show?: (lists: Lists) => Lists): Save {
   savesStarted++;
-  const save: Save = { userId, ref, show };
+  const save: Save = { userId, ref, seq: savesStarted, show };
   savesUnderWay.push(save);
   return save;
 }
@@ -124,7 +133,15 @@ export function startSave(userId: string, ref: TitleId, show?: (lists: Lists) =>
 export function finishSave(save: Save, outcome: ActionOutcome | null) {
   const i = savesUnderWay.indexOf(save);
   if (i !== -1) savesUnderWay.splice(i, 1);
-  if (!outcome) return;
+  if (!outcome) {
+    // The server may have taken it all the same: the title's earlier saves can no longer prove where it is.
+    const key = formatTitleKey(save.ref);
+    for (let j = savesAnswered.length - 1; j >= 0; j--) {
+      const s = savesAnswered[j];
+      if (s.userId === save.userId && s.seq < save.seq && formatTitleKey(s.ref) === key) savesAnswered.splice(j, 1);
+    }
+    return;
+  }
   save.done = { outcome, at: Date.now() };
   savesAnswered.push(save);
   if (savesAnswered.length > MAX_SAVES_ANSWERED) savesAnswered.shift();
@@ -151,9 +168,12 @@ function forgetSaves(from: Shown) {
 export function withSaves(userId: string, lists: Lists): Lists {
   const now = Date.now();
   let out = lists;
-  for (const { userId: owner, ref, done } of savesAnswered) {
+  for (const { userId: owner, ref, seq, done } of savesAnswered) {
     if (owner !== userId || now - done!.at > SAVE_REPLAY_MS) continue;
-    const row = rowOf(out, formatTitleKey(ref));
+    const key = formatTitleKey(ref);
+    // A later save on the title is under way (its Undo, say): this one waits for it (see above).
+    if (savesUnderWay.some((s) => s.userId === owner && s.seq > seq && formatTitleKey(s.ref) === key)) continue;
+    const row = rowOf(out, key);
     if (row && sameRow(row, done!.outcome.previous)) out = applyTitleRecord(out, ref, done!.outcome.current, row);
   }
   for (const { userId: owner, show } of savesUnderWay) if (owner === userId && show) out = show(out);

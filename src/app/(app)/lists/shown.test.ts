@@ -250,6 +250,43 @@ describe("a fresh render and the Lists saves it may be older than (issues 137 an
     expect(keys(shownLists(), "watchlist")).toEqual(["movie:13"]);
   });
 
+  test("a move doesn't replay while its Undo is under way (PR 158 review)", () => {
+    const userId = newUser();
+    seed(userId, readBefore());
+    finishSave(startSave(userId, FIGHT_CLUB, move), moved);
+    const undo = startSave(userId, FIGHT_CLUB);
+    // Read after the Undo landed, before its answer: back on Passed, exactly as the move found it.
+    seed(userId, readBefore());
+    expect(keys(shownLists(), "passed")).toEqual(["movie:550"]);
+    expect(keys(shownLists(), "watchlist")).toEqual(["movie:13"]);
+    // Once the Undo answers, the pair replays in order, and still ends on Passed.
+    finishSave(undo, undone);
+    seed(userId, readBefore());
+    expect(keys(shownLists(), "passed")).toEqual(["movie:550"]);
+    expect(keys(shownLists(), "watchlist")).toEqual(["movie:13"]);
+  });
+
+  test("a move doesn't replay once its Undo failed, since the server may have taken it", () => {
+    const userId = newUser();
+    seed(userId, readBefore());
+    finishSave(startSave(userId, FIGHT_CLUB, move), moved);
+    finishSave(startSave(userId, FIGHT_CLUB), null);
+    seed(userId, readBefore());
+    expect(keys(shownLists(), "passed")).toEqual(["movie:550"]);
+    expect(keys(shownLists(), "watchlist")).toEqual(["movie:13"]);
+  });
+
+  test("a later save on another title doesn't stop a save from replaying", () => {
+    const userId = newUser();
+    seed(userId, readBefore());
+    finishSave(startSave(userId, FIGHT_CLUB, move), moved);
+    startSave(userId, A_SERIES);
+    finishSave(startSave(userId, OTHER_MOVIE), null);
+    seed(userId, readBefore());
+    expect(keys(shownLists(), "watchlist")).toEqual(["movie:550", "movie:13"]);
+    expect(keys(shownLists(), "passed")).toEqual([]);
+  });
+
   test("a save that failed doesn't show", () => {
     const userId = newUser();
     seed(userId, readBefore());
