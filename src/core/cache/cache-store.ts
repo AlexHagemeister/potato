@@ -42,6 +42,19 @@ export class MemoryCacheStore implements CacheStore {
     this.entries.set(key, { json: JSON.stringify(data), expiresAt });
   }
 
+  /** Same contract as PostgresCacheStore.deleteExpiredBefore, for tests. */
+  async deleteExpiredBefore(cutoff: Date, limit: number): Promise<number> {
+    let deleted = 0;
+    for (const [key, entry] of this.entries) {
+      if (deleted >= limit) break;
+      if (entry.expiresAt.getTime() < cutoff.getTime()) {
+        this.entries.delete(key);
+        deleted++;
+      }
+    }
+    return deleted;
+  }
+
   /** Number of stored entries, for tests. */
   get size(): number {
     return this.entries.size;

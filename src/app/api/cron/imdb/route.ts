@@ -1,8 +1,12 @@
-// Daily IMDb ratings load, invoked by Vercel Cron (vercel.json). Thin: the
-// auth check and the load both live in src/core.
+// Daily IMDb ratings load, invoked by Vercel Cron (vercel.json). It also
+// purges long-expired tmdb_cache rows (issue 14), riding on this job because
+// it already runs nightly. Thin: the auth check and the job (load, then
+// purge) live in src/core.
 
+import { PostgresCacheStore } from "@/core/cache";
 import { isAuthorizedCronRequest } from "@/core/cron-auth";
-import { createPostgresRatingsLoadTarget, ImdbLoadGuardError, loadImdbRatings } from "@/core/imdb";
+import { createPostgresRatingsLoadTarget, loadImdbRatings } from "@/core/imdb";
+import { runDailyJob } from "@/core/imdb/daily-job";
 
 export const runtime = "nodejs";
 // Run on every invocation; never serve a cached response to the cron.
@@ -17,16 +21,10 @@ export async function GET(request: Request) {
   if (!isAuthorizedCronRequest(request.headers.get("authorization"), process.env.CRON_SECRET)) {
     return new Response("Unauthorized", { status: 401 });
   }
-  try {
-    const result = await loadImdbRatings({ target: createPostgresRatingsLoadTarget() });
-    console.log("imdb ratings load", result);
-    return Response.json(result);
-  } catch (err) {
-    // A failed run keeps yesterday's ratings (the load rolls back). The 500
-    // marks the run as failed in Vercel's cron log, and the message says why.
-    const guard = err instanceof ImdbLoadGuardError;
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`IMDB RATINGS LOAD FAILED${guard ? " (guard stopped the swap)" : ""}: ${message}`, err);
-    return Response.json({ ok: false, guard, error: message }, { status: 500 });
-  }
+  const { status, body } = await runDailyJob({
+    loadRatings: () => loadImdbRatings({ target: createPostgresRatingsLoadTarget() }),
+    cacheStore: new PostgresCacheStore(),
+    budgetMs: maxDuration * 1000,
+  });
+  return Response.json(body, { status });
 }
