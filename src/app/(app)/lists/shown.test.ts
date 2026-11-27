@@ -231,7 +231,7 @@ describe("a fresh render and the Lists saves it may be older than (issues 137 an
     const userId = newUser();
     seed(userId, readBefore());
     finishSave(startSave(userId, FIGHT_CLUB, move), moved);
-    finishSave(startSave(userId, FIGHT_CLUB), undone);
+    finishSave(startSave(userId, FIGHT_CLUB, undefined, moved), undone);
     // Read before both.
     seed(userId, readBefore());
     expect(keys(shownLists(), "passed")).toEqual(["movie:550"]);
@@ -254,7 +254,7 @@ describe("a fresh render and the Lists saves it may be older than (issues 137 an
     const userId = newUser();
     seed(userId, readBefore());
     finishSave(startSave(userId, FIGHT_CLUB, move), moved);
-    const undo = startSave(userId, FIGHT_CLUB);
+    const undo = startSave(userId, FIGHT_CLUB, undefined, moved);
     // Read after the Undo landed, before its answer: back on Passed, exactly as the move found it.
     seed(userId, readBefore());
     expect(keys(shownLists(), "passed")).toEqual(["movie:550"]);
@@ -270,10 +270,64 @@ describe("a fresh render and the Lists saves it may be older than (issues 137 an
     const userId = newUser();
     seed(userId, readBefore());
     finishSave(startSave(userId, FIGHT_CLUB, move), moved);
-    finishSave(startSave(userId, FIGHT_CLUB), null);
+    finishSave(startSave(userId, FIGHT_CLUB, undefined, moved), null);
     seed(userId, readBefore());
     expect(keys(shownLists(), "passed")).toEqual(["movie:550"]);
     expect(keys(shownLists(), "watchlist")).toEqual(["movie:13"]);
+  });
+
+  /** The lists that show the title. Never more than one (VISION invariant 3). */
+  const listsShowing = (key: string) =>
+    (["watchlist", "seen", "passed"] as const).filter((s) => keys(shownLists(), s).includes(key));
+  const SEEN_AT = new Date(NOW.getTime() + 60_000);
+  const markedSeen: ActionOutcome = {
+    previous: moved.current,
+    current: { ...record(FIGHT_CLUB, "seen", SEEN_AT), review: "Seen review." },
+  };
+  const seenUndone: ActionOutcome = { previous: markedSeen.current, current: moved.current };
+
+  test("a move still replays while a later edit on the title is under way: one list only (PR 158 re-check)", () => {
+    const userId = newUser();
+    seed(userId, readBefore());
+    const moving = startSave(userId, FIGHT_CLUB, move);
+    // Seen it on the moved row, after Back, before the move answers (issue 156's live button).
+    const seeing = startSave(userId, FIGHT_CLUB);
+    finishSave(moving, moved);
+    // A render read before the move arrives while Seen it is under way: the server holds the Watchlist.
+    seed(userId, readBefore());
+    expect(listsShowing("movie:550")).toEqual(["watchlist"]);
+    // Seen it answers: a render read before both shows the title on Seen only.
+    finishSave(seeing, markedSeen);
+    seed(userId, readBefore());
+    expect(listsShowing("movie:550")).toEqual(["seen"]);
+    expect(shownLists().seen.rows.find((r) => r.tmdbId === 550)).toMatchObject({ rating: 8, review: "Seen review." });
+  });
+
+  test("+ Watchlist and Seen it answered, Seen it's Undo under way: one list only", () => {
+    const userId = newUser();
+    seed(userId, readBefore());
+    finishSave(startSave(userId, FIGHT_CLUB, move), moved);
+    finishSave(startSave(userId, FIGHT_CLUB), markedSeen);
+    const undo = startSave(userId, FIGHT_CLUB, undefined, markedSeen);
+    // Read before the move: the move replays, Seen it waits for its Undo.
+    seed(userId, readBefore());
+    expect(listsShowing("movie:550")).toEqual(["watchlist"]);
+    // Read after Seen it, before its Undo landed: the render's own row stands.
+    seed(userId, { ...readBefore(), passed: empty(), seen: { rows: [...readBefore().seen.rows, { ...row(FIGHT_CLUB, "seen", 5), updatedAt: SEEN_AT, review: "Seen review." }], nextCursor: null } });
+    expect(listsShowing("movie:550")).toEqual(["seen"]);
+    // The Undo answers: every render ends on the Watchlist, where the server is.
+    finishSave(undo, seenUndone);
+    seed(userId, readBefore());
+    expect(listsShowing("movie:550")).toEqual(["watchlist"]);
+  });
+
+  test("a later edit that fails doesn't forget the save before it", () => {
+    const userId = newUser();
+    seed(userId, readBefore());
+    finishSave(startSave(userId, FIGHT_CLUB, move), moved);
+    finishSave(startSave(userId, FIGHT_CLUB), null);
+    seed(userId, readBefore());
+    expect(listsShowing("movie:550")).toEqual(["watchlist"]);
   });
 
   test("a later save on another title doesn't stop a save from replaying", () => {

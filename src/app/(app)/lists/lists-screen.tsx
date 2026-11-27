@@ -559,14 +559,15 @@ export function ListsScreen({
    * A write to one title. It is noted in shown.ts (startSave): a reload already under way then knows its read may be
    * older than this write, and a fresh render of Lists takes it (`showUnderWay` while it is under way, its outcome
    * once it answers). It counts in writesInFlight, so a reload waits for it before reading. It tells any "You might
-   * also like" row kept for Back to read again (library-changes).
+   * also like" row kept for Back to read again (library-changes). `undoes`, for an Undo, is the outcome it undoes.
    */
   async function write(
     ref: TitleId,
     action: () => Promise<ActionResult<ActionOutcome>>,
     showUnderWay?: (lists: Lists) => Lists,
+    undoes?: ActionOutcome,
   ): Promise<ActionResult<ActionOutcome>> {
-    const save = startSave(userId, ref, showUnderWay);
+    const save = startSave(userId, ref, showUnderWay, undoes);
     const pending = call(action);
     writesInFlight.add(pending);
     const result = await pending;
@@ -580,7 +581,7 @@ export function ListsScreen({
   function undoer(ref: TitleId, outcome: ActionOutcome, putBack: (lists: Lists) => Lists) {
     return async () => {
       setToast(null);
-      const result = await write(ref, () => undoAction(ref, outcome));
+      const result = await write(ref, () => undoAction(ref, outcome), undefined, outcome);
       // On failure nothing was undone, so the screen already matches the server.
       if (!result.ok) return failed(result);
       updateLists(putBack);
