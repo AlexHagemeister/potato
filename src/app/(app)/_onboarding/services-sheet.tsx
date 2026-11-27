@@ -27,6 +27,11 @@ export function ServicesSheet({ data, onRefresh }: { data: SheetData | null; onR
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        // An Escape meant for a field (clearing the service search, or closing the country list) stays with it:
+        // closing the sheet ends onboarding for good.
+        const t = e.target;
+        if (t instanceof HTMLSelectElement) return;
+        if ((t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) && t.value !== "") return;
         void finishOnboarding(onRefresh);
         return;
       }

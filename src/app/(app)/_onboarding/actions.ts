@@ -1,7 +1,9 @@
 "use server";
 
-// Server actions for first-run onboarding (issue 139). Reads only. The services sheet saves through the Profile
-// tab's own form and actions (profile/settings-form.tsx), so onboarding adds no write of its own.
+// Server actions for first-run onboarding (issue 139). They change no title row and no chosen setting: the
+// settings read creates the default settings row when there is none yet, as every settings read does. The
+// services sheet saves through the Profile tab's own form and actions (profile/settings-form.tsx), so onboarding
+// adds no write of its own.
 
 import { getProfileSettings, type ProfileSettings } from "@/core/settings/profile";
 import { getCurrentUserForRequest } from "@/lib/current-user";

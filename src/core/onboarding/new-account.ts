@@ -1,5 +1,7 @@
-// Whether a signed-in user is a new account (issue 139), from what the server already knows. Reads only. The rule
-// itself is isNewAccount, in rules.ts.
+// Whether a signed-in user is a new account (issue 139), from what the server already knows. The rule itself is
+// isNewAccount, in rules.ts. It changes no title row and no chosen setting. Its settings read goes through
+// getUserSettings, which creates the default settings row (country US, no services) when there is none yet, as
+// every settings read does.
 
 import { getUserTitleStates } from "../library/queries";
 import { getUserSettings } from "../settings/user-settings";

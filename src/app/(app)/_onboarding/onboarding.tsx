@@ -2,18 +2,61 @@
 
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { currentHint, HINTS, type Hint } from "@/core/onboarding/rules";
-import { titleKey, useDeck, viewOf } from "../_deck/store";
+import { chooseLabelSpot, POINTER_OVERLAP, type Box, type LabelSpot } from "@/core/onboarding/placement";
+import {
+  currentHint,
+  HINTS,
+  isQuiet,
+  nextQuietSince,
+  QUIET_MS_BEFORE_INSTALL,
+  QUIET_MS_BEFORE_SHEET,
+  quietFor,
+  startSortTracker,
+  trackSorts,
+  type Hint,
+  type SortSignals,
+  type SortTracker,
+} from "@/core/onboarding/rules";
+import { titleKey, useDeck, viewOf, type DeckState } from "../_deck/store";
 import { ServicesSheet } from "./services-sheet";
 import {
+  cancelServicesSheet,
   hideHints,
   nextHint,
-  noteSorted,
+  noteSortEvents,
   openServicesSheet,
+  releaseInstallPrompt,
   startOnboarding,
   stopOnboarding,
   useOnboarding,
 } from "./store";
+
+/** How often the shell looks again for a quiet moment while one is awaited. */
+const QUIET_POLL_MS = 250;
+
+/**
+ * Something on screen that a full-screen sheet would cover: another sheet or menu, anything fullscreen, or the
+ * card's trailer, which plays inline once tapped.
+ */
+function overlayUp(): boolean {
+  return (
+    document.querySelector('[role="dialog"], [role="menu"], main article iframe') !== null ||
+    document.fullscreenElement !== null
+  );
+}
+
+/** The screen right now, by core's rule (isQuiet). */
+function quietNow(deck: DeckState, userId: string, onDeck: boolean): boolean {
+  const mine = deck.userId === userId;
+  return isQuiet({
+    onDeck,
+    visible: document.visibilityState === "visible",
+    toast: mine && deck.toast !== null,
+    undoing: mine && deck.undoing,
+    notice: mine && deck.notice !== null,
+    overlay: overlayUp(),
+  });
+}
 
 /**
  * First-run onboarding (issue 139), a layer in the app shell. Nothing stands between sign-in and the first card
@@ -37,41 +80,81 @@ export function Onboarding({ userId, isNew }: { userId: string; isNew: boolean }
     return stopOnboarding;
   }, [userId, isNewAtStart]);
 
-  // Every sort on the deck shows a new Undo toast (Seen it, once its rating is saved). The toast up when this
-  // mounts is an older sort's, so it only sets the baseline.
-  const toastId = deck.userId === userId ? (deck.toast?.id ?? null) : null;
-  const lastToast = useRef<number | null | undefined>(undefined);
+  // Every sort on the deck shows a new Undo toast (Seen it, once its rating is saved), and how the toast ends says
+  // whether the sort stood (core's trackSorts). A toast already up when this mounts is an older sort's.
+  const mine = deck.userId === userId;
+  const signals: SortSignals = {
+    toastId: mine ? (deck.toast?.id ?? null) : null,
+    noticeId: mine ? (deck.notice?.id ?? null) : null,
+    undoing: mine && deck.undoing,
+  };
+  const tracker = useRef<SortTracker | null>(null);
   useEffect(() => {
-    if (lastToast.current === undefined) {
-      lastToast.current = toastId;
+    const now = { toastId: signals.toastId, noticeId: signals.noticeId, undoing: signals.undoing };
+    if (!tracker.current) {
+      tracker.current = startSortTracker(now);
       return;
     }
-    if (toastId !== null && toastId !== lastToast.current) noteSorted();
-    lastToast.current = toastId;
-  }, [toastId]);
+    const out = trackSorts(tracker.current, now);
+    tracker.current = out.tracker;
+    if (out.events.length > 0) noteSortEvents(out.events);
+  }, [signals.toastId, signals.noticeId, signals.undoing]);
 
-  // The services sheet waits for a quiet moment on the deck: no Undo toast (the Undo stays reachable), no undo on
-  // its way, and no other sheet up (the rating or filter sheet).
+  // The services sheet, and after it the home-screen prompt, each wait until the screen has been quiet a moment
+  // (core's isQuiet): on the deck, no Undo toast or undo on its way, no error notice, and no other sheet, menu,
+  // fullscreen, or playing trailer.
+  const latest = useRef({ deck, onDeck });
+  useLayoutEffect(() => {
+    latest.current = { deck, onDeck };
+  }, [deck, onDeck]);
+  // The quiet is watched the whole time the sheet's read is on its way too, so the sheet shows only if nothing
+  // came up at any point during the read, not merely at the moment it lands.
   const sheetDue = state.progress?.stage === "sheet" && !state.sheetOpen;
-  const quiet = onDeck && deck.toast === null && !deck.undoing;
+  const loading = state.sheetOpen && !state.sheetVisible;
+  const installDue = state.installWaiting && !state.sheetOpen;
+  const awaiting = sheetDue || loading || installDue;
+  const quietSince = useRef<number | null>(null);
   useEffect(() => {
-    if (!sheetDue || !quiet) return;
+    if (!awaiting) {
+      quietSince.current = null;
+      return;
+    }
+    const look = () => {
+      const now = Date.now();
+      quietSince.current = nextQuietSince(quietSince.current, quietNow(latest.current.deck, userId, latest.current.onDeck), now);
+      return now;
+    };
     const check = () => {
-      if (document.visibilityState === "visible" && !document.querySelector('[role="dialog"]')) void openServicesSheet();
+      const now = look();
+      if (sheetDue && quietFor(quietSince.current, now, QUIET_MS_BEFORE_SHEET)) {
+        const openedAt = now;
+        openServicesSheet(() => {
+          look();
+          return quietSince.current !== null && quietSince.current <= openedAt;
+        });
+      } else if (installDue && quietFor(quietSince.current, now, QUIET_MS_BEFORE_INSTALL)) {
+        releaseInstallPrompt();
+      }
     };
     check();
-    const timer = setInterval(check, 400);
+    const timer = setInterval(check, QUIET_POLL_MS);
     return () => clearInterval(timer);
-  }, [sheetDue, quiet]);
+  }, [awaiting, sheetDue, installDue, userId]);
+
+  // The sheet belongs to the deck. Leaving it (another tab, or Back) puts the sheet away unfinished, so it never
+  // shows over Profile's own settings form, and it opens again, read fresh, on the deck.
+  useEffect(() => {
+    if (!onDeck && state.sheetOpen) cancelServicesSheet();
+  }, [onDeck, state.sheetOpen]);
 
   if (!state.progress && !state.sheetVisible) return null;
   const hint = state.progress ? currentHint(state.progress) : null;
   const view = viewOf(deck);
-  const showHint = hint !== null && onDeck && deck.userId === userId && view.kind === "card";
+  const showHint = hint !== null && onDeck && mine && view.kind === "card";
   return (
     <>
       {showHint && view.kind === "card" && <HintLayer hint={hint} index={state.progress!.hint} cardKey={titleKey(view.card)} />}
-      {state.sheetVisible && <ServicesSheet data={state.sheetData} onRefresh={() => router.refresh()} />}
+      {state.sheetVisible && onDeck && <ServicesSheet data={state.sheetData} onRefresh={() => router.refresh()} />}
     </>
   );
 }
@@ -88,14 +171,19 @@ const ABOVE_TAB_BAR = "calc(var(--tab-bar-height) + env(safe-area-inset-bottom) 
 /**
  * The hint for one button: a ring around the button and a label above the row pointing at it. Never modal, and
  * never in the way of a tap: the ring takes no taps, and the label sits clear of the buttons. When the label would
- * cover the card's title or its IMDb rating (VISION invariant 5), it moves up over the poster instead.
+ * cover the card's title, its IMDb rating (VISION invariant 5), or the deck's top row, filter line, or error
+ * notice, it moves up over the poster to a clear spot instead, and hides when there is none.
  */
 function HintLayer({ hint, index, cardKey }: { hint: Hint; index: number; cardKey: string }) {
   const bubble = useRef<HTMLDivElement>(null);
-  const placement = useKeepClearPlacement(bubble, `${cardKey}:${index}`);
+  const safeTop = useRef<HTMLDivElement>(null);
+  const { spot, top } = useKeepClearPlacement(bubble, safeTop, `${cardKey}:${index}`);
+  const placement = spot.kind === "above_row" ? "above_row" : spot.kind === "at" ? "over_poster" : "hidden";
 
   return (
     <>
+      {/* Where the top safe area ends, for measuring. */}
+      <div ref={safeTop} aria-hidden className="pointer-events-none fixed top-[env(safe-area-inset-top)] h-0 w-0" />
       {/* The ring around the button, over the deck's own row. */}
       <div aria-hidden className="pointer-events-none fixed inset-x-0 z-20" style={{ bottom: ABOVE_TAB_BAR, height: "var(--deck-actions-height)" }}>
         <div
@@ -107,11 +195,11 @@ function HintLayer({ hint, index, cardKey }: { hint: Hint; index: number; cardKe
       </div>
 
       <div
-        className="pointer-events-none fixed inset-x-0 z-20 px-4"
+        className={`pointer-events-none fixed inset-x-0 z-20 px-4 ${placement === "hidden" ? "invisible" : ""}`}
         style={
           placement === "above_row"
-            ? { bottom: `calc(${ABOVE_TAB_BAR} + var(--deck-actions-height) - 2px)` }
-            : { top: "calc(env(safe-area-inset-top) + 4.25rem)" }
+            ? { bottom: `calc(${ABOVE_TAB_BAR} + var(--deck-actions-height) - ${POINTER_OVERLAP}px)` }
+            : { top: `${top}px` }
         }
       >
         <div
@@ -121,7 +209,7 @@ function HintLayer({ hint, index, cardKey }: { hint: Hint; index: number; cardKe
           onKeyDown={(e) => {
             if (e.key === "Escape") hideHints();
           }}
-          className="pointer-events-auto relative rounded-2xl bg-surface-raised px-4 pt-2.5 pb-3 shadow-[0_8px_30px_rgba(0,0,0,0.6)] ring-1 ring-accent/50"
+          className={`${placement === "hidden" ? "" : "pointer-events-auto"} relative rounded-2xl bg-surface-raised px-4 pt-2.5 pb-3 shadow-[0_8px_30px_rgba(0,0,0,0.6)] ring-1 ring-accent/50`}
         >
           <div className="flex items-center gap-2">
             <p className="min-w-0 flex-1 text-[0.9375rem] font-semibold text-accent">
@@ -181,30 +269,54 @@ function HintLayer({ hint, index, cardKey }: { hint: Hint; index: number; cardKe
   );
 }
 
-type Placement = "above_row" | "over_poster";
+/** What the hint's label must never cover, besides the buttons (core's chooseLabelSpot keeps it above those). */
+const KEEP_CLEAR = [
+  // The card's title and its IMDb rating (VISION invariant 5).
+  "main article[data-title-key] header h2",
+  "main article[data-title-key] [data-imdb]",
+  // The deck's top row (the Undo toast shows there), its filter line, and its error notice.
+  '[data-slot="deck-controls"]',
+  '[data-slot="deck-filter-summary"]',
+  '[data-toast="notice"]',
+].join(", ");
+
+function toBox(r: DOMRect): Box {
+  return { top: r.top, bottom: r.bottom, left: r.left, right: r.right };
+}
 
 /**
- * Where the hint's label goes: just above the button row, unless it would cover the card's title or IMDb rating
- * there. Measured against the card on screen, again on every scroll, resize, and new card, so a long title or a
- * short screen moves it up over the poster.
+ * Where the hint's label goes (core's chooseLabelSpot): just above the button row when that is clear, otherwise
+ * the highest clear spot over the poster, otherwise nowhere until the next scroll. Measured against the screen
+ * again on every scroll, resize, new card, and change on the deck (an error notice arriving, say).
  */
-function useKeepClearPlacement(bubble: React.RefObject<HTMLDivElement | null>, measureKey: string): Placement {
-  const [placement, setPlacement] = useState<Placement>("above_row");
+function useKeepClearPlacement(
+  bubble: React.RefObject<HTMLDivElement | null>,
+  safeTop: React.RefObject<HTMLDivElement | null>,
+  measureKey: string,
+): { spot: LabelSpot; top: number } {
+  // `top` is the last over-the-poster spot's, so a hidden label stays where it was (and measures the same).
+  const [placed, setPlaced] = useState<{ spot: LabelSpot; top: number }>({ spot: { kind: "above_row" }, top: 0 });
+  const current = useRef<LabelSpot>(placed.spot);
   useLayoutEffect(() => {
     const measure = () => {
       const row = document.querySelector('[data-slot="deck-actions"]');
-      const card = document.querySelector("main article[data-title-key]");
       const box = bubble.current;
-      if (!row || !card || !box) return;
-      const keep = [card.querySelector("header h2"), card.querySelector("[data-imdb]")].filter((el) => el !== null);
-      const rowTop = row.getBoundingClientRect().top;
-      // Where the label's top would be above the row (its pointer reaches into the row's top padding).
-      const top = rowTop - box.offsetHeight + 2;
-      const covers = keep.some((el) => {
-        const r = el.getBoundingClientRect();
-        return r.bottom > top - 6 && r.top < rowTop;
+      if (!row || !box) return;
+      const width = box.getBoundingClientRect();
+      const next = chooseLabelSpot({
+        rowTop: row.getBoundingClientRect().top,
+        minTop: (safeTop.current?.getBoundingClientRect().top ?? 0) + 8,
+        height: box.offsetHeight,
+        left: width.left,
+        right: width.right,
+        keepClear: Array.from(document.querySelectorAll(KEEP_CLEAR), (el) => toBox(el.getBoundingClientRect())),
+        current: current.current,
       });
-      setPlacement(covers ? "over_poster" : "above_row");
+      const same =
+        next.kind === current.current.kind && (next.kind !== "at" || current.current.kind !== "at" || next.top === current.current.top);
+      if (same) return;
+      current.current = next;
+      setPlaced((was) => ({ spot: next, top: next.kind === "at" ? next.top : was.top }));
     };
     measure();
     let frame = 0;
@@ -216,16 +328,20 @@ function useKeepClearPlacement(bubble: React.RefObject<HTMLDivElement | null>, m
     main?.addEventListener("scroll", later, { passive: true });
     window.addEventListener("resize", later);
     // The card's poster and title settle after the first paint.
-    const observer = new ResizeObserver(later);
+    const resized = new ResizeObserver(later);
     const card = document.querySelector("main article[data-title-key]");
-    if (card) observer.observe(card);
-    if (bubble.current) observer.observe(bubble.current);
+    if (card) resized.observe(card);
+    if (bubble.current) resized.observe(bubble.current);
+    // A notice, a filter line, or the Undo toast coming or going moves what must stay clear.
+    const changed = new MutationObserver(later);
+    if (main) changed.observe(main, { childList: true, subtree: true });
     return () => {
       cancelAnimationFrame(frame);
       main?.removeEventListener("scroll", later);
       window.removeEventListener("resize", later);
-      observer.disconnect();
+      resized.disconnect();
+      changed.disconnect();
     };
-  }, [bubble, measureKey]);
-  return placement;
+  }, [bubble, safeTop, measureKey]);
+  return placed;
 }

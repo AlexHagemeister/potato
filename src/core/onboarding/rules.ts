@@ -53,7 +53,7 @@ export function isNewAccount({ titleRows, country, providerIds }: AccountFacts):
 
 /**
  * Where the person is. `hint` is the index into HINTS of the hint on screen, and HINTS.length once the hints are
- * over. `sorts` counts the sorts made since onboarding began.
+ * over. `sorts` counts the sorts that stood since onboarding began: not undone, and not failed.
  */
 export interface Progress {
   stage: "hints" | "sheet";
@@ -70,8 +70,13 @@ export function currentHint(progress: Progress): Hint | null {
 }
 
 export type OnboardingEvent =
-  /** A card was sorted, with any button. The hint on screen has been used. */
-  | { kind: "sorted" }
+  /**
+   * A card was sorted, with any button. The hint on screen has been used: the person has tried a button, even if
+   * they then undo the sort.
+   */
+  | { kind: "tapped" }
+  /** A sort stood: its Undo window ended with no Undo, and its save didn't fail. Only these count toward the sheet. */
+  | { kind: "settled" }
   /** The hint's "Got it". */
   | { kind: "next" }
   /** "Hide tips": the rest of the hints go too. */
@@ -79,24 +84,123 @@ export type OnboardingEvent =
 
 /**
  * The next progress. A sort or a "Got it" moves on to the next hint. Once the hints are over and enough sorts have
- * been made, the stage moves to the sheet. Pure, so the same events always give the same progress.
+ * stood, the stage moves to the sheet. Pure, so the same events always give the same progress, and an event that
+ * changes nothing returns the same object.
  */
 export function advance(progress: Progress, event: OnboardingEvent): Progress {
   if (progress.stage !== "hints") return progress;
   let next: Progress;
   switch (event.kind) {
-    case "sorted":
-      next = { ...progress, sorts: progress.sorts + 1, hint: Math.min(progress.hint + 1, HINTS.length) };
-      break;
+    case "tapped":
     case "next":
-      next = { ...progress, hint: Math.min(progress.hint + 1, HINTS.length) };
+      if (progress.hint >= HINTS.length) return progress;
+      next = { ...progress, hint: progress.hint + 1 };
+      break;
+    case "settled":
+      next = { ...progress, sorts: progress.sorts + 1 };
       break;
     case "hide_hints":
+      if (progress.hint >= HINTS.length) return progress;
       next = { ...progress, hint: HINTS.length };
       break;
   }
   if (next.hint >= HINTS.length && next.sorts >= SORTS_BEFORE_SHEET) next = { ...next, stage: "sheet" };
   return next;
+}
+
+// ---- Telling a sort that stood from one undone or failed ----
+// The deck shows a new Undo toast for every sort, and only for sorts. The toast ends one of four ways: an Undo
+// (the deck clears it and starts the undo in one step), a failed save (cleared, with an error notice), a newer
+// sort (replaced), or its timer. Only the last two leave the sort standing.
+
+/** What the deck shows, for telling sorts apart. Ids are the deck's own, null when nothing shows. */
+export interface SortSignals {
+  toastId: number | null;
+  noticeId: number | null;
+  undoing: boolean;
+}
+
+export interface SortTracker {
+  last: SortSignals;
+  /** The toast of the sort whose fate isn't known yet. */
+  pending: number | null;
+}
+
+/** Starts from what the deck shows on mount. A toast already up then is an older sort's, so it isn't counted. */
+export function startSortTracker(now: SortSignals): SortTracker {
+  return { last: now, pending: null };
+}
+
+/** The tracker's next state, and the events the change means, in order. */
+export function trackSorts(tracker: SortTracker, now: SortSignals): { tracker: SortTracker; events: OnboardingEvent[] } {
+  const { last, pending } = tracker;
+  const events: OnboardingEvent[] = [];
+  let nextPending = pending;
+  if (now.toastId !== null && now.toastId !== last.toastId) {
+    // A new sort. One still pending was replaced by it, with no Undo, so it stood.
+    if (pending !== null) events.push({ kind: "settled" });
+    events.push({ kind: "tapped" });
+    nextPending = now.toastId;
+  } else if (now.toastId === null && last.toastId !== null && pending === last.toastId) {
+    const failed = now.noticeId !== null && now.noticeId !== last.noticeId;
+    if (!now.undoing && !failed) events.push({ kind: "settled" });
+    nextPending = null;
+  }
+  return { tracker: { last: now, pending: nextPending }, events };
+}
+
+/**
+ * Whether the services sheet still has anything to ask, from settings read fresh as it opens. Someone who saved
+ * their services elsewhere meanwhile (Profile, another device) has nothing left to answer, so onboarding finishes
+ * without showing the sheet.
+ */
+export function sheetStillNeeded(settings: { providerIds: readonly number[] }): boolean {
+  return settings.providerIds.length === 0;
+}
+
+// ---- Quiet moments ----
+// The services sheet and, after it, the home-screen prompt each cover the whole screen. Each waits for a moment
+// when it would cover nothing the person is using, by the same rule.
+
+/** What is on screen, as the shell reads it. */
+export interface ScreenFacts {
+  /** The Discover tab is showing. */
+  onDeck: boolean;
+  /** The page is in the foreground. */
+  visible: boolean;
+  /** The Undo toast is up, so Undo must stay reachable. */
+  toast: boolean;
+  /** An Undo is on its way to the server. */
+  undoing: boolean;
+  /** The deck's error notice is up. It stays until dismissed, so nothing may hide it. */
+  notice: boolean;
+  /** Another sheet or a menu is open, something is fullscreen, or the card's trailer is playing. */
+  overlay: boolean;
+}
+
+/** True when a full-screen sheet would cover nothing the person is using. */
+export function isQuiet(f: ScreenFacts): boolean {
+  return f.onDeck && f.visible && !f.toast && !f.undoing && !f.notice && !f.overlay;
+}
+
+/**
+ * How long the screen must stay quiet before the services sheet opens. Long enough that a card just brought back
+ * by an Undo, or just shown after a sort, gets a look before the sheet covers it.
+ */
+export const QUIET_MS_BEFORE_SHEET = 1500;
+
+/** How long the screen must stay quiet, after the services sheet closes, before the home-screen prompt opens. */
+export const QUIET_MS_BEFORE_INSTALL = 700;
+
+/** When the current quiet stretch began: kept while quiet, started now when quiet begins, null when not quiet. */
+export function nextQuietSince(since: number | null, quiet: boolean, now: number): number | null {
+  if (!quiet) return null;
+  return since ?? now;
+}
+
+/** The screen has been quiet for at least `ms`. */
+export function quietFor(since: number | null, now: number, ms: number): boolean {
+  return since !== null && now - since >= ms;
 }
 
 /** What the device holds for this user. `done` is null when storage can't be read, or won't keep a write. */
