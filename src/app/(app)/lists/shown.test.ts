@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { DEFAULT_FILTER_CHOICE, type FilterChoice } from "@/core/filters";
+import { encodeCursor, updatedSortKey } from "@/core/library/list";
 import type { ActionOutcome, TitleRecord } from "@/core/library/types";
 import type { ListRow } from "@/core/lists";
 import type { ListStatus, TitleStatus } from "@/core/types";
@@ -8,11 +9,14 @@ import {
   finishSave,
   getLiveReload,
   getShown,
+  placeTitle,
+  rowAsRecord,
   SAVE_REPLAY_MS,
   savesStartedCount,
   seedShown,
   setLiveReload,
   setShown,
+  showMoved,
   startSave,
   withSaves,
   type Lists,
@@ -405,5 +409,150 @@ describe("the Lists screen on screen now (issue 98, item 2)", () => {
     expect(calls).toEqual(["newer"]);
     unregisterNewer();
     expect(getLiveReload()).toBeNull();
+  });
+});
+
+describe("one placement rule for a changed row (issue 119)", () => {
+  afterEach(() => setSystemTime());
+
+  const DARK_KNIGHT = { mediaType: "movie", tmdbId: 155 } as const;
+  const MATRIX = { mediaType: "movie", tmdbId: 603 } as const;
+  type Ref = { mediaType: "movie" | "tv"; tmdbId: number };
+  /** Watchlist: the other movie (day 10), Fight Club (day 8), The Dark Knight (day 6). Seen: a series. Passed: The Matrix. */
+  const lists = (): Lists => ({
+    watchlist: {
+      rows: [row(OTHER_MOVIE, "watchlist", 10), row(FIGHT_CLUB, "watchlist", 8), row(DARK_KNIGHT, "watchlist", 6)],
+      nextCursor: null,
+    },
+    seen: { rows: [{ ...row(A_SERIES, "seen", 3), rating: 6.5, review: "Slow start." }], nextCursor: null },
+    passed: { rows: [row(MATRIX, "passed", 4)], nextCursor: null },
+  });
+  let renders = 0;
+  const seed = (userId: string, l: Lists = lists()) =>
+    seedShown(`placement-${++renders}`, { userId, filters: NONE, lists: l });
+  const seen = (ref: Ref, rating: number, review: string | null, updatedAt = NOW): TitleRecord => ({
+    ...record(ref, "seen", updatedAt),
+    rating,
+    review,
+  });
+  const actedOn = (ref: Ref, status: ListStatus, day: number) => ({ row: row(ref, status, day), filters: NONE });
+  const listsWith = (l: Lists, key: string) =>
+    (["watchlist", "seen", "passed"] as const).filter((s) => l[s].rows.some((r) => `${r.mediaType}:${r.tmdbId}` === key));
+
+  test("a change lands in the same place made on Lists or on a title card", () => {
+    const changes: [Ref, TitleRecord][] = [
+      [FIGHT_CLUB, seen(FIGHT_CLUB, 8, "Great.")],
+      [A_SERIES, seen(A_SERIES, 9, "Better later.")],
+      [MATRIX, record(MATRIX, "watchlist")],
+      [FIGHT_CLUB, record(FIGHT_CLUB, "passed", at(7))],
+    ];
+    for (const [ref, rec] of changes) {
+      seed(newUser());
+      placeTitle(ref, rec, { row: row(ref, "watchlist", 1), filters: NONE });
+      const fromLists = shownLists();
+      seed(newUser());
+      applyTitleChange(ref, rec);
+      expect(shownLists()).toEqual(fromLists);
+    }
+  });
+
+  test("Seen it lands on top of Seen, and its Undo puts the row back where its time sorts it (issue 38, item 4)", () => {
+    seed(newUser());
+    const marked: ActionOutcome = { previous: record(FIGHT_CLUB, "watchlist", at(8)), current: seen(FIGHT_CLUB, 8, "Great.") };
+    placeTitle(FIGHT_CLUB, marked.current, actedOn(FIGHT_CLUB, "watchlist", 8));
+    expect(keys(shownLists(), "seen")).toEqual(["movie:550", "tv:1399"]);
+    expect(keys(shownLists(), "watchlist")).toEqual(["movie:13", "movie:155"]);
+    // Meanwhile a title card puts The Matrix on top of the Watchlist, so the row's old index (1) is wrong now.
+    applyTitleChange(MATRIX, record(MATRIX, "watchlist"));
+    // The Undo answers with the row it restored.
+    placeTitle(FIGHT_CLUB, marked.previous, actedOn(FIGHT_CLUB, "watchlist", 8));
+    expect(keys(shownLists(), "watchlist")).toEqual(["movie:603", "movie:13", "movie:550", "movie:155"]);
+    expect(keys(shownLists(), "seen")).toEqual(["tv:1399"]);
+  });
+
+  test("an Edit stays in place, and its Undo brings the rating and review back exactly", () => {
+    seed(newUser(), {
+      ...lists(),
+      seen: {
+        rows: [
+          { ...row(DARK_KNIGHT, "seen", 9), rating: 7 },
+          { ...row(A_SERIES, "seen", 3), rating: 6.5, review: 'Slow start, "then" great.\nÉté.' },
+        ],
+        nextCursor: null,
+      },
+    });
+    const before = shownLists().seen.rows[1];
+    const edited: ActionOutcome = { previous: seen(A_SERIES, 6.5, before.review, at(3)), current: seen(A_SERIES, 9.5, "Changed.") };
+    placeTitle(A_SERIES, edited.current, { row: before, filters: NONE });
+    expect(keys(shownLists(), "seen")).toEqual(["movie:155", "tv:1399"]);
+    expect(shownLists().seen.rows[1]).toMatchObject({ rating: 9.5, review: "Changed." });
+    placeTitle(A_SERIES, edited.previous, { row: before, filters: NONE });
+    expect(shownLists().seen.rows[1]).toEqual(before);
+  });
+
+  test("+ Watchlist shows on top before it answers, even with the phone's clock behind the server's", () => {
+    seed(newUser());
+    // The phone's clock reads day 2, earlier than every row these lists show.
+    setSystemTime(at(2));
+    const l = showMoved(shownLists(), row(MATRIX, "passed", 4), "watchlist");
+    expect(keys(l, "watchlist")).toEqual(["movie:603", "movie:13", "movie:550", "movie:155"]);
+    expect(keys(l, "passed")).toEqual([]);
+    setShown({ ...getShown()!, lists: l });
+    // The save answers with the server's time: in place, still on top.
+    placeTitle(MATRIX, record(MATRIX, "watchlist"), actedOn(MATRIX, "passed", 4));
+    expect(keys(shownLists(), "watchlist")).toEqual(["movie:603", "movie:13", "movie:550", "movie:155"]);
+    expect(shownLists().watchlist.rows[0].updatedAt).toEqual(NOW);
+  });
+
+  test("a failed + Watchlist goes back where it was on Passed", () => {
+    seed(newUser(), {
+      ...lists(),
+      watchlist: empty(),
+      passed: { rows: [row(OTHER_MOVIE, "passed", 7), row(MATRIX, "passed", 4), row(DARK_KNIGHT, "passed", 2)], nextCursor: null },
+    });
+    const tapped = shownLists().passed.rows[1];
+    setShown({ ...getShown()!, lists: showMoved(shownLists(), tapped, "watchlist") });
+    expect(keys(shownLists(), "watchlist")).toEqual(["movie:603"]);
+    placeTitle(MATRIX, rowAsRecord(tapped), { row: tapped, filters: NONE });
+    expect(keys(shownLists(), "passed")).toEqual(["movie:13", "movie:603", "movie:155"]);
+    expect(shownLists().passed.rows[1]).toEqual(tapped);
+    expect(keys(shownLists(), "watchlist")).toEqual([]);
+  });
+
+  test("a save answered after the rows started over shows the title on one list only", () => {
+    seed(newUser());
+    // The rows started over from a read that still shows The Matrix on Passed.
+    setShown({ ...getShown()!, lists: lists() });
+    placeTitle(MATRIX, record(MATRIX, "watchlist"), actedOn(MATRIX, "passed", 4));
+    expect(listsWith(shownLists(), "movie:603")).toEqual(["watchlist"]);
+    expect(keys(shownLists(), "watchlist")[0]).toBe("movie:603");
+  });
+
+  test("rows that no longer show the title take it back only under the filters it was shown under (issues 121, 155)", () => {
+    const userId = newUser();
+    seed(userId);
+    const tapped = actedOn(MATRIX, "passed", 4);
+    // Filters > Type: Series > Done while the save was under way: the rows are the Series ones now.
+    setShown({ userId, filters: SERIES, lists: { watchlist: empty(), seen: empty(), passed: empty() } });
+    const before = shownLists();
+    placeTitle(MATRIX, record(MATRIX, "watchlist"), tapped);
+    expect(shownLists()).toBe(before);
+    // Under the filters it was shown under, it comes back.
+    setShown({ userId, filters: NONE, lists: { watchlist: empty(), seen: empty(), passed: empty() } });
+    placeTitle(MATRIX, record(MATRIX, "watchlist"), tapped);
+    expect(keys(shownLists(), "watchlist")).toEqual(["movie:603"]);
+  });
+
+  test("a row that sorts past the list's cursor is left to Show more", () => {
+    const last = row(OTHER_MOVIE, "passed", 10);
+    seed(newUser(), {
+      watchlist: { rows: [row(MATRIX, "watchlist", 12)], nextCursor: null },
+      seen: empty(),
+      passed: { rows: [last], nextCursor: encodeCursor({ sort: "updated_desc", values: updatedSortKey(last) }) },
+    });
+    // The Matrix had been on Passed since day 1, past the first page, before + Watchlist. Its Undo restores that.
+    placeTitle(MATRIX, record(MATRIX, "passed", at(1)), actedOn(MATRIX, "passed", 1));
+    expect(keys(shownLists(), "passed")).toEqual(["movie:13"]);
+    expect(listsWith(shownLists(), "movie:603")).toEqual([]);
   });
 });
