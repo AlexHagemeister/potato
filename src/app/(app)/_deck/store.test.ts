@@ -10,7 +10,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
-import { JUSTWATCH_ATTRIBUTION } from "@/core/deck-service/constants";
+import { JUSTWATCH_ATTRIBUTION } from "@/core/attribution";
 import type { DeckPageCard } from "@/core/deck-service/types";
 import { DEFAULT_DECK_CHOICE } from "@/core/filters";
 import type { UndoInput } from "@/core/library";

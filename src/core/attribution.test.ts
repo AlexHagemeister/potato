@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { IMDB_NOTICE, TMDB_NOTICE } from "./attribution";
+import { IMDB_NOTICE, JUSTWATCH_ATTRIBUTION, TMDB_NOTICE } from "./attribution";
 
 // The providers' required wording, verbatim. Change these only when the
 // source changes, and check the source first.
@@ -12,5 +12,12 @@ describe("attribution notices", () => {
 
   test('IMDb: the statement from "Can I use IMDb data in my software?" (help.imdb.com, G5JTRESSHJBBHTGX)', () => {
     expect(IMDB_NOTICE).toBe("Information courtesy of IMDb (https://www.imdb.com). Used with permission.");
+  });
+
+  test("JustWatch: the one credit wording, shown on cards and on Profile", () => {
+    expect(JUSTWATCH_ATTRIBUTION).toEqual({
+      text: "Streaming availability from JustWatch",
+      url: "https://www.justwatch.com",
+    });
   });
 });

@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { FOR_YOU_MIN_RATINGS } from "../deck/constants";
 import { isShuffleSeed, seededFrontWeightedOrder } from "../deck/shuffle";
+import { JUSTWATCH_ATTRIBUTION } from "../attribution";
 import { formatTitleKey } from "../title-id";
 import type { DeckFilters, UserTitleState } from "../types";
 import type { CardStreaming, DeckPage, DeckPageCard, DeckRequest, KnownStreaming } from "./types";
 import {
   FOR_YOU_SEED_COUNT,
-  JUSTWATCH_ATTRIBUTION,
   MAX_HIDDEN_CHECK,
   MAX_PAGES_PER_STREAM,
   MIN_RATING_PAGE_TARGET,
