@@ -17,10 +17,10 @@ import {
   databaseNameFromUrl,
   devDatabaseRefusal,
   devTestUser,
-  parseDevUserSlug,
+  validateDevUserSlug,
 } from "./dev-user";
 
-export { DEV_DATABASE_NAME, DEV_TEST_USER, databaseNameFromUrl, parseDevUserSlug } from "./dev-user";
+export { DEV_DATABASE_NAME, databaseNameFromUrl, parseDevUserSlug } from "./dev-user";
 
 export interface DevLoginEnv {
   /**
@@ -78,9 +78,11 @@ export async function createDevSession(
   if (!isDevLoginEnabled(env)) throw new Error("Dev login is disabled outside local development");
   // The route validates the slug first. Checked again here so no caller can
   // build an email from an unchecked slug.
-  const parsed = parseDevUserSlug(slug === null ? [] : [slug]);
-  if (!parsed.ok) throw new Error(`Dev login refused: ${parsed.reason}`);
-  const testUser = devTestUser(parsed.slug);
+  if (slug !== null) {
+    const checked = validateDevUserSlug(slug);
+    if (!checked.ok) throw new Error(`Dev login refused: ${checked.reason}`);
+  }
+  const testUser = devTestUser(slug);
 
   // Check the live connection too, not just the URL string.
   const result = await getDb().execute<{ name: string }>(sql`select current_database() as name`);
