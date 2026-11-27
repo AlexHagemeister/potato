@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { getCurrentUserForRequest } from "@/lib/current-user";
+import { InstallPrompt } from "./_install/install-sheet";
 import { SignedOutScreen } from "./_shell/signed-out";
 import { TabBar } from "./_shell/tab-bar";
 
@@ -21,6 +22,8 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
     <div className="fixed inset-0 flex flex-col">
       <div className="flex min-h-0 flex-1 flex-col">{children}</div>
       <TabBar />
+      {/* Signed in only. A layer over the tab, which loads underneath as usual (issue 138). */}
+      <InstallPrompt />
     </div>
   );
 }

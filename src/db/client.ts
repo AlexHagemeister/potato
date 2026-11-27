@@ -1,13 +1,16 @@
 // The database client. It is lazy: importing this module opens no connection
 // and reads no environment variable, so `next build` works without a database.
 //
-// The driver is Neon's HTTP driver: one HTTPS request per query, no socket to
+// getDb() uses Neon's HTTP driver: one HTTPS request per query, no socket to
 // hold open, which suits short-lived Vercel functions. It does not support
-// interactive transactions. Code that needs one should add a WebSocket Pool
-// client here (drizzle-orm/neon-serverless) rather than work around it.
+// interactive transactions. Code that needs one uses withTransaction() below,
+// which opens a WebSocket Pool connection for that one transaction.
+//
+// In local development both refuse any database but potato_dev (dev-guard.ts).
 
 import { neon, Pool, type PoolClient } from "@neondatabase/serverless";
 import { drizzle, type NeonHttpDatabase } from "drizzle-orm/neon-http";
+import { devDatabaseGuardRefusal } from "./dev-guard";
 import * as schema from "./schema";
 
 export type Db = NeonHttpDatabase<typeof schema>;
@@ -15,10 +18,27 @@ export type { PoolClient };
 
 let db: Db | undefined;
 
+/**
+ * Throws in local development when `url` names any database but potato_dev,
+ * before a client exists. `process.env.NODE_ENV` is a literal member access on
+ * purpose: Next.js replaces it with "production" in `next build` output, so
+ * this can't fire in a production build.
+ */
+function refuseNonDevDatabaseInDevelopment(url: string, variable: string): void {
+  const refusal = devDatabaseGuardRefusal({
+    nodeEnv: process.env.NODE_ENV,
+    vercelEnv: process.env.VERCEL_ENV,
+    url,
+    variable,
+  });
+  if (refusal) throw new Error(refusal);
+}
+
 export function getDb(): Db {
   if (!db) {
     const url = process.env.DATABASE_URL;
     if (!url) throw new Error("DATABASE_URL is not set");
+    refuseNonDevDatabaseInDevelopment(url, "DATABASE_URL");
     db = drizzle({ client: neon(url), schema });
   }
   return db;
@@ -36,8 +56,10 @@ export function getDb(): Db {
  * for tens of seconds.
  */
 export async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
-  const url = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
+  const unpooled = process.env.DATABASE_URL_UNPOOLED;
+  const url = unpooled || process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL is not set");
+  refuseNonDevDatabaseInDevelopment(url, unpooled ? "DATABASE_URL_UNPOOLED" : "DATABASE_URL");
   const pool = new Pool({ connectionString: url, max: 1 });
   // A connection that drops outside a query is reported here. Without a
   // listener it would be an uncaught exception. The in-flight query still

@@ -1,7 +1,9 @@
 // Development test users: the names, slugs, and database guard shared by the
 // dev login (dev-login.ts, /api/dev/login) and the walk kit script
-// (scripts/dev-user.ts). Pure: no database, auth, or environment access, so
-// the script and unit tests can import it without side effects.
+// (scripts/dev-user.ts). The database client's development guard
+// (src/db/dev-guard.ts) also takes the database name and the URL parser from
+// here. Pure: no database, auth, or environment access, so the script, the
+// database layer, and unit tests can import it without side effects.
 //
 // Each agent walking the app signs in as its own user, named by a slug
 // (/api/dev/login?as=pr90 signs in as dev-test-pr90@example.com), so agents
@@ -14,7 +16,10 @@ export const DEV_TEST_USER = {
   name: "Dev Test User",
 } as const;
 
-/** The only database the dev login and the walk kit may write to. */
+/**
+ * The only database the dev login and the walk kit may write to, and the only
+ * one the database client opens in local development (src/db/dev-guard.ts).
+ */
 export const DEV_DATABASE_NAME = "potato_dev";
 
 /**
