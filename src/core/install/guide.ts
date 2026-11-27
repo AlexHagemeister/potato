@@ -14,8 +14,10 @@
 //   https://support.google.com/chrome/answer/9658361?co=GENIE.Platform%3DiOS
 // - Android: Chromium browsers can fire beforeinstallprompt, which gives the
 //   page a real Install button, but only after some use of the page. The menu
-//   item's name varies ("Add to Home screen", "Install app"). Firefox has no
-//   such event and adds from its menu.
+//   item is "Install and create shortcut" in Google's help today, and older
+//   versions say "Add to Home screen" or "Install app". Firefox has no such
+//   event and adds from its menu.
+//   https://support.google.com/chrome/answer/9658361?co=GENIE.Platform%3DAndroid
 //   https://web.dev/articles/install-criteria
 //   https://web.dev/learn/pwa/installation
 //   https://developer.mozilla.org/en-US/docs/Web/API/Window/beforeinstallprompt_event
@@ -74,6 +76,16 @@ export function detectInstallPlatform({ userAgent, maxTouchPoints }: PlatformInp
     return { kind: "android-browser" };
   }
 
+  // An Android tablet's Chrome asks for desktop sites by default, and so does a phone with "Desktop site" on. Both
+  // then send a Linux desktop user agent with no Android token. As with the iPad, only touch tells them apart. A
+  // touch-screen Linux laptop lands here too: it is the rarer device, and the menu steps still fit its browser.
+  if (/X11; Linux/.test(ua) && !/CrOS/.test(ua) && maxTouchPoints > 1) {
+    if (/Firefox\//.test(ua)) return { kind: "android-firefox" };
+    if (/SamsungBrowser\/|Edg\/|EdgA\/|OPR\/|YaBrowser\//.test(ua)) return { kind: "android-browser" };
+    if (/Chrome\//.test(ua)) return { kind: "android-chrome" };
+    return { kind: "android-browser" };
+  }
+
   if (/Windows NT|Macintosh|CrOS|X11|Linux/.test(ua)) {
     if (/Chrome\/|Chromium\/|Edg\//.test(ua)) return { kind: "desktop", browser: "chromium" };
     if (/Macintosh/.test(ua) && /Safari\//.test(ua) && /Version\//.test(ua)) return { kind: "desktop", browser: "safari" };
@@ -121,11 +133,16 @@ const IOS_SAFARI_STEPS: InstallStep[] = [
 ];
 const IOS_SAFARI_NOTE = "No Add to Home Screen in the list? Scroll to the bottom, tap Edit Actions, and add it.";
 
+// Google's help page names the item "Install and create shortcut" (read 2026-11-26). Older Chrome versions said
+// "Add to Home screen" or "Install app", so the step names all three.
 const ANDROID_CHROME_STEPS: InstallStep[] = [
-  { text: "Tap **⋮** at the top right of Chrome.", icon: "dots-vertical" },
-  { text: "Tap **Add to Home screen**. Chrome may call it **Install app**.", icon: "install" },
+  { text: "Tap **⋮** at the right of Chrome's address bar.", icon: "dots-vertical" },
+  { text: "Tap **Install and create shortcut**. Older versions say **Add to Home screen** or **Install app**.", icon: "install" },
   { text: "Tap **Install**." },
 ];
+// A link opened from another app (mail, social) can run in a Chrome tab inside that app. It looks like Chrome to the
+// page but has no install item.
+const ANDROID_CHROME_NOTE = "Don't see it? This page may be open inside another app. Open its menu and tap Open in Chrome.";
 
 /** The steps to show for a platform. Every platform gets a guide; "unknown" gets both phones' steps. */
 export function installGuide(platform: InstallPlatform): InstallGuide {
@@ -171,7 +188,12 @@ export function installGuide(platform: InstallPlatform): InstallGuide {
         canOfferPrompt: false,
       };
     case "android-chrome":
-      return { title: TITLE, intro: INTRO, sections: [{ steps: ANDROID_CHROME_STEPS }], canOfferPrompt: true };
+      return {
+        title: TITLE,
+        intro: INTRO,
+        sections: [{ steps: ANDROID_CHROME_STEPS, note: ANDROID_CHROME_NOTE }],
+        canOfferPrompt: true,
+      };
     case "android-firefox":
       return {
         title: TITLE,
@@ -195,7 +217,7 @@ export function installGuide(platform: InstallPlatform): InstallGuide {
           {
             steps: [
               { text: "Open your browser's menu (**⋮** or **≡**).", icon: "dots-vertical" },
-              { text: "Tap **Add to Home screen**. Your browser may call it **Install app**.", icon: "install" },
+              { text: "Tap **Install** or **Add to Home screen**. The name varies by browser.", icon: "install" },
               { text: "Confirm with **Install** or **Add**." },
             ],
           },
@@ -210,7 +232,7 @@ export function installGuide(platform: InstallPlatform): InstallGuide {
           {
             steps: [
               { text: "Open this page in Chrome. Tap **⋮**, then **Open in Chrome** or **Open in browser**.", icon: "open-out" },
-              { text: "In Chrome, tap **⋮**, then **Add to Home screen**.", icon: "install" },
+              { text: "In Chrome, tap **⋮**, then **Install and create shortcut** or **Add to Home screen**.", icon: "install" },
               { text: "Tap **Install**." },
             ],
           },
@@ -229,6 +251,8 @@ export function installGuide(platform: InstallPlatform): InstallGuide {
           {
             heading: "On this Mac",
             steps: [{ text: "In the menu bar, choose **File**, then **Add to Dock**.", icon: "add" }],
+            // The user agent freezes the macOS version, so the page can't tell.
+            note: "Add to Dock needs macOS Sonoma or later.",
           },
         ],
         other: [],
@@ -246,7 +270,7 @@ export function installGuide(platform: InstallPlatform): InstallGuide {
         intro: INTRO,
         sections: [
           { heading: "iPhone or iPad", steps: IOS_SAFARI_STEPS },
-          { heading: "Android", steps: ANDROID_CHROME_STEPS },
+          { heading: "Android", steps: ANDROID_CHROME_STEPS, note: ANDROID_CHROME_NOTE },
         ],
         // If the browser does fire the event, the button is real, so allow it.
         canOfferPrompt: true,
@@ -257,6 +281,41 @@ export function installGuide(platform: InstallPlatform): InstallGuide {
 /** The key the device keeps the "already shown" mark under (localStorage). */
 export const INSTALL_SEEN_KEY = "potato.install-prompt.v1";
 export const INSTALL_SEEN_VALUE = "seen";
+
+/** The part of the browser's Storage the mark needs. Passed in, so core touches no browser API and tests can fake it. */
+export interface SeenStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+const PROBE_KEY = `${INSTALL_SEEN_KEY}.probe`;
+
+/**
+ * Whether this device has the mark: true, false, or null when the storage can't be trusted to keep one. A storage
+ * that reads but refuses writes (a full quota, some private modes) counts as null, because a dismissal there would be
+ * lost and the prompt would return on every load. So an unmarked storage is proven with a test write first.
+ */
+export function readSeenMark(storage: SeenStorage): boolean | null {
+  try {
+    if (storage.getItem(INSTALL_SEEN_KEY) === INSTALL_SEEN_VALUE) return true;
+    storage.setItem(PROBE_KEY, "1");
+    storage.removeItem(PROBE_KEY);
+    return false;
+  } catch {
+    return null;
+  }
+}
+
+/** Writes the mark. False when the storage refused it. */
+export function writeSeenMark(storage: SeenStorage): boolean {
+  try {
+    storage.setItem(INSTALL_SEEN_KEY, INSTALL_SEEN_VALUE);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export interface AutoShowInput {
   /** The app is running from the home screen already. */

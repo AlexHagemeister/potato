@@ -1,6 +1,6 @@
 "use client";
 
-import { openInstallSheet, useStandalone } from "../_install/store";
+import { openInstallSheet, useInstallState, useStandalone } from "../_install/store";
 
 /**
  * Where the home-screen steps stay reachable after the prompt is dismissed (issue 138). It opens the shell's sheet.
@@ -9,6 +9,9 @@ import { openInstallSheet, useStandalone } from "../_install/store";
  */
 export function InstallRow() {
   const standalone = useStandalone();
+  // The browser has offered its install prompt (it can come late, after the sheet was closed), so the sheet this
+  // row opens will carry a real Install button.
+  const { promptReady } = useInstallState();
   if (standalone) return null;
   return (
     <section aria-labelledby="install-heading" className="mt-8">
@@ -22,7 +25,9 @@ export function InstallRow() {
       >
         <span className="min-w-0 flex-1">
           <span className="block">Add Potato to your Home Screen</span>
-          <span className="block text-sm text-muted">Open it like an app, full screen.</span>
+          <span className="block text-sm text-muted">
+            {promptReady ? "Ready to install. Tap to add it." : "Open it like an app, full screen."}
+          </span>
         </span>
         <svg
           aria-hidden

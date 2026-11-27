@@ -10,7 +10,7 @@
 // once. The rules for when to show are core's (src/core/install/guide.ts).
 
 import { useSyncExternalStore } from "react";
-import { INSTALL_SEEN_KEY, INSTALL_SEEN_VALUE, shouldAutoShow } from "@/core/install/guide";
+import { readSeenMark, shouldAutoShow, writeSeenMark } from "@/core/install/guide";
 
 /**
  * Chromium's install prompt event. Not in TypeScript's DOM types.
@@ -23,13 +23,15 @@ interface BeforeInstallPromptEvent extends Event {
 
 export interface InstallState {
   open: boolean;
+  /** The sheet opened by itself, not from the Profile tab's row. */
+  auto: boolean;
   /** The browser has offered its install prompt, so the sheet can show a real Install button. */
   promptReady: boolean;
   /** The browser's own install dialog is up. */
   prompting: boolean;
 }
 
-const CLOSED: InstallState = { open: false, promptReady: false, prompting: false };
+const CLOSED: InstallState = { open: false, auto: false, promptReady: false, prompting: false };
 
 let state: InstallState = CLOSED;
 let deferred: BeforeInstallPromptEvent | null = null;
@@ -48,10 +50,14 @@ function subscribe(listener: () => void) {
   };
 }
 
-/** Whether this device has the mark. null when storage can't be read (blocked, or a locked-down browser). */
+/**
+ * Whether this device has the mark. null when storage is blocked, or reads but won't take a write (core proves a
+ * write first), so a dismissal that can't be kept never brings the sheet back on the next load.
+ */
 function readSeen(): boolean | null {
   try {
-    return window.localStorage.getItem(INSTALL_SEEN_KEY) === INSTALL_SEEN_VALUE;
+    // Reading the localStorage property itself throws in some locked-down browsers.
+    return readSeenMark(window.localStorage);
   } catch {
     return null;
   }
@@ -59,13 +65,15 @@ function readSeen(): boolean | null {
 
 function markSeen() {
   try {
-    window.localStorage.setItem(INSTALL_SEEN_KEY, INSTALL_SEEN_VALUE);
+    writeSeenMark(window.localStorage);
   } catch {
     // Nothing to do: without storage the prompt never opens by itself (shouldAutoShow).
   }
 }
 
-const DISPLAY_MODES = ["standalone", "fullscreen", "minimal-ui"].map((mode) => `(display-mode: ${mode})`);
+// The manifest asks for standalone, and a browser without it falls back to minimal-ui. Not fullscreen: an ordinary
+// tab matches that while the browser itself is in fullscreen.
+const DISPLAY_MODES = ["standalone", "minimal-ui"].map((mode) => `(display-mode: ${mode})`);
 
 /** Running from the home screen. iOS sets navigator.standalone; everything else answers the media query. */
 export function isStandalone(): boolean {
@@ -81,12 +89,20 @@ function subscribeStandalone(listener: () => void) {
   };
 }
 
+/** The sheet has not had its one chance to open by itself yet, and will take it. */
+function autoOpenPending(): boolean {
+  return !autoChecked && shouldAutoShow({ standalone: isStandalone(), seen: readSeen() });
+}
+
 // Listening starts when this module loads, ahead of any component, because the browser fires
 // beforeinstallprompt once, at a moment of its own choosing (Chrome waits for some use of the page).
 if (typeof window !== "undefined") {
   window.addEventListener("beforeinstallprompt", (event) => {
-    // Keeps the browser's own banner away, so the offer shows only inside our sheet.
-    event.preventDefault();
+    // Chrome fires this late (after a tap and about 30 seconds), often once the sheet is closed. The browser's own
+    // install banner is cancelled only while our sheet is up, or about to open, to carry the offer instead.
+    // Otherwise the browser is left to show its banner, so the offer is not lost. Either way the event is kept, and
+    // the sheet shows its Install button the next time it opens (the Profile tab's row).
+    if (state.open || autoOpenPending()) event.preventDefault();
     deferred = event as BeforeInstallPromptEvent;
     set({ promptReady: true });
   });
@@ -104,19 +120,20 @@ if (typeof window !== "undefined") {
  */
 export function autoOpenInstallSheet() {
   if (autoChecked) return;
+  const show = autoOpenPending();
   autoChecked = true;
-  if (shouldAutoShow({ standalone: isStandalone(), seen: readSeen() })) set({ open: true });
+  if (show) set({ open: true, auto: true });
 }
 
 /** Opens the sheet on request (the Profile tab's row). */
 export function openInstallSheet() {
-  set({ open: true });
+  set({ open: true, auto: false });
 }
 
 /** Closes the sheet and remembers it on this device, so it never opens by itself again. */
 export function closeInstallSheet() {
   markSeen();
-  set({ open: false });
+  set({ open: false, auto: false });
 }
 
 /** Shows the browser's own install dialog. An event's prompt works once, so the event is spent either way. */

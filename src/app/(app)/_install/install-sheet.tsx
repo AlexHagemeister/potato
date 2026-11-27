@@ -31,13 +31,35 @@ function InstallSheet({ state }: { state: InstallState }) {
 
   // The sheet itself takes focus, so VoiceOver reads it from the top and Tab starts inside it. Not a button: a
   // focused button draws a ring on some browsers, and nothing here should look selected.
+  // When it closes, focus goes back to whatever had it (the Profile tab's row).
   useEffect(() => {
+    const before = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     sheetRef.current?.focus({ preventScroll: true });
+    return () => {
+      if (before?.isConnected) before.focus({ preventScroll: true });
+    };
   }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeInstallSheet();
+      if (e.key === "Escape") {
+        closeInstallSheet();
+        return;
+      }
+      // The sheet is modal, so Tab stays inside it and never reaches the deck's buttons under the backdrop.
+      if (e.key !== "Tab") return;
+      const sheet = sheetRef.current;
+      if (!sheet) return;
+      const stops = Array.from(sheet.querySelectorAll<HTMLElement>("button:not([disabled])"));
+      const first = stops[0];
+      const last = stops[stops.length - 1];
+      if (!first || !last) return;
+      const active = document.activeElement;
+      const inside = active instanceof HTMLElement && stops.includes(active);
+      if (e.shiftKey ? !inside || active === first : !inside || active === last) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -96,7 +118,10 @@ function InstallSheet({ state }: { state: InstallState }) {
               {canInstall ? "Not now" : "Got it"}
             </button>
           </div>
-          <p className="mt-3 text-center text-xs text-muted">These steps stay on your Profile tab.</p>
+          {/* Only when it is true and news: there are steps, and the sheet was not opened from the Profile tab. */}
+          {state.auto && guide.sections.length > 0 && (
+            <p className="mt-3 text-center text-xs text-muted">These steps stay on your Profile tab.</p>
+          )}
         </div>
       </div>
     </div>

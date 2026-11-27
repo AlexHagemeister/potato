@@ -1,5 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { detectInstallPlatform, installGuide, shouldAutoShow, type InstallPlatform } from "./guide";
+import {
+  detectInstallPlatform,
+  INSTALL_SEEN_KEY,
+  INSTALL_SEEN_VALUE,
+  installGuide,
+  readSeenMark,
+  shouldAutoShow,
+  writeSeenMark,
+  type InstallPlatform,
+  type SeenStorage,
+} from "./guide";
 
 // Real user agents, one per case the steps differ for.
 const UA = {
@@ -105,6 +115,23 @@ describe("detectInstallPlatform", () => {
     expect(detect(UA.windowsChrome, 10)).toEqual({ kind: "desktop", browser: "chromium" });
   });
 
+  test("an Android tablet, or a phone asking for the desktop site, is told apart by its touch points", () => {
+    // Chrome on a large Android tablet sends this by default: a Linux desktop user agent with no Android token.
+    const linuxChrome =
+      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
+    expect(detect(linuxChrome, 5)).toEqual({ kind: "android-chrome" });
+    expect(installGuide(detect(linuxChrome, 5)).title).not.toContain("phone");
+    // No touch: a Linux computer.
+    expect(detect(linuxChrome, 0)).toEqual({ kind: "desktop", browser: "chromium" });
+    expect(detect(linuxChrome, 1)).toEqual({ kind: "desktop", browser: "chromium" });
+    // Firefox for Android in desktop mode.
+    expect(detect(UA.linuxFirefox, 5)).toEqual({ kind: "android-firefox" });
+    // Edge keeps its token in desktop mode and must not be taken for Chrome.
+    expect(detect(`${linuxChrome} Edg/142.0.0.0`, 5)).toEqual({ kind: "android-browser" });
+    // A Chromebook has a touch screen and is still a computer.
+    expect(detect(UA.chromeOs, 10)).toEqual({ kind: "desktop", browser: "chromium" });
+  });
+
   test("anything it can't place is unknown", () => {
     expect(detect("")).toEqual({ kind: "unknown" });
     expect(detect("SomeBot/1.0")).toEqual({ kind: "unknown" });
@@ -152,8 +179,17 @@ describe("installGuide", () => {
 
   test("Android Chrome has written steps and may offer the real prompt", () => {
     const guide = installGuide({ kind: "android-chrome" });
-    expect(guide.sections[0]!.steps.map((s) => s.text).join(" ")).toContain("**Add to Home screen**");
+    const text = guide.sections[0]!.steps.map((s) => s.text).join(" ");
+    // Google's current label first, then the older ones.
+    expect(text).toContain("**Install and create shortcut**");
+    expect(text).toContain("**Add to Home screen**");
+    // A Chrome tab inside another app looks like Chrome and has no install item.
+    expect(guide.sections[0]!.note).toContain("Open in Chrome");
     expect(guide.canOfferPrompt).toBe(true);
+  });
+
+  test("Safari on a Mac says which macOS has Add to Dock", () => {
+    expect(installGuide({ kind: "desktop", browser: "safari" }).sections[0]!.note).toContain("Sonoma");
   });
 
   test("Android Firefox never offers the prompt, other Android browsers may", () => {
@@ -207,6 +243,55 @@ describe("installGuide", () => {
         }
       }
     }
+  });
+});
+
+/** A stand-in for the browser's Storage, with switches for the ways a real one fails. */
+function fakeStorage(options: { readThrows?: boolean; writeThrows?: boolean; initial?: Record<string, string> } = {}) {
+  const items = new Map(Object.entries(options.initial ?? {}));
+  const storage: SeenStorage = {
+    getItem(key) {
+      if (options.readThrows) throw new Error("blocked");
+      return items.get(key) ?? null;
+    },
+    setItem(key, value) {
+      if (options.writeThrows) throw new Error("QuotaExceededError");
+      items.set(key, value);
+    },
+    removeItem(key) {
+      items.delete(key);
+    },
+  };
+  return { storage, items };
+}
+
+describe("the seen mark", () => {
+  test("a working storage: unmarked, then marked, and the test write leaves nothing behind", () => {
+    const { storage, items } = fakeStorage();
+    expect(readSeenMark(storage)).toBe(false);
+    expect(items.size).toBe(0);
+    expect(writeSeenMark(storage)).toBe(true);
+    expect(items.get(INSTALL_SEEN_KEY)).toBe(INSTALL_SEEN_VALUE);
+    expect(readSeenMark(storage)).toBe(true);
+  });
+
+  test("a storage that reads but refuses writes can't remember, so the prompt never opens by itself", () => {
+    const { storage } = fakeStorage({ writeThrows: true });
+    expect(readSeenMark(storage)).toBe(null);
+    expect(shouldAutoShow({ standalone: false, seen: readSeenMark(storage) })).toBe(false);
+    // The dismissal is lost without an error, and the next load still stays quiet.
+    expect(writeSeenMark(storage)).toBe(false);
+    expect(shouldAutoShow({ standalone: false, seen: readSeenMark(storage) })).toBe(false);
+  });
+
+  test("a mark already there is read even when writes are refused", () => {
+    const { storage } = fakeStorage({ writeThrows: true, initial: { [INSTALL_SEEN_KEY]: INSTALL_SEEN_VALUE } });
+    expect(readSeenMark(storage)).toBe(true);
+  });
+
+  test("a storage that can't be read at all", () => {
+    const { storage } = fakeStorage({ readThrows: true });
+    expect(readSeenMark(storage)).toBe(null);
   });
 });
 
