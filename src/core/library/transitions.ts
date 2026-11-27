@@ -60,7 +60,8 @@ export function seenRefused(): CoreError {
  *   write on a Seen title, a Discover card's tap on a title already on a list,
  *   an undo of a row that moved).
  * - not_found: the title is on no list now.
- * - stale_value: the title is still Seen, with another rating or review.
+ * - stale_value: the title is still Seen, with another rating or review, or,
+ *   for an undo of a Seen row, edited since at all (issue 94).
  *
  * Nothing was written. Read the title again to show where it is now
  * (readChangedElsewhere).
