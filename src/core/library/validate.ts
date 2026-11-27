@@ -53,19 +53,65 @@ export function validateTitleRef(ref: unknown): Result<TitleId> {
   return ok({ mediaType, tmdbId });
 }
 
-function toDate(value: unknown): Date | null {
-  if (!(value instanceof Date) && typeof value !== "string") return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
+/**
+ * An ISO 8601 date-time with an explicit offset ("Z" or "+05:30"), the form
+ * toISOString and JSON.stringify write. A string without an offset parses in
+ * the host's local time zone, so it names no one moment (issue 27). The deck
+ * engine holds the same pattern for skip_until (ISO_WITH_OFFSET in
+ * ../deck/build-deck.ts): change both together.
+ */
+const ISO_WITH_OFFSET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * No row is older than this: Potato's first commit is from November 2026. An
+ * undo state dated earlier was not returned by an action.
+ */
+export const UNDO_DATE_FLOOR = new Date("2026-01-01T00:00:00.000Z");
+
+/**
+ * How far past the server's clock an undo state's createdAt or updatedAt may
+ * be. Actions stamp rows from the server's clock, so a returned state is never
+ * ahead of it by more than the drift between two servers. A day is far more
+ * than that.
+ */
+export const UNDO_CLOCK_ALLOWANCE_MS = DAY_MS;
+
+/**
+ * How far past the server's clock an undo state's skipUntil may be. A Skip
+ * sets it SKIP_DAYS ahead (two weeks today). A year leaves room to retune
+ * SKIP_DAYS without refusing the undo of a Skip made before the change.
+ */
+export const UNDO_SKIP_ALLOWANCE_MS = 366 * DAY_MS;
+
+/**
+ * A date from an undo state: a Date, or a string with an explicit offset. Null
+ * when it is neither, names no real moment, or falls outside `floor` to
+ * `ceiling`, so no date an action could not have returned reaches the row.
+ */
+function toDate(value: unknown, floor: Date, ceiling: Date): Date | null {
+  let date: Date;
+  if (value instanceof Date) date = new Date(value.getTime());
+  else if (typeof value === "string" && ISO_WITH_OFFSET.test(value)) date = new Date(value);
+  else return null;
+  const time = date.getTime();
+  if (Number.isNaN(time) || time < floor.getTime() || time > ceiling.getTime()) return null;
+  return date;
 }
 
 /**
  * Checks a state handed back for undo. It may have crossed JSON, so dates may
- * be ISO strings. It must name the same title as `ref` and satisfy every rule
- * the table's CHECK constraints hold. Fields other than the record's own
- * (a user id, say) are ignored: the caller's user id always wins.
+ * be ISO strings, each with an explicit offset as JSON.stringify writes them.
+ * It must name the same title as `ref` and satisfy every rule the table's
+ * CHECK constraints hold. Fields other than the record's own (a user id, say)
+ * are ignored: the caller's user id always wins.
+ *
+ * Every date must lie between UNDO_DATE_FLOOR and a little past `now`, the
+ * server's clock (issue 22): restoreTitleState writes these dates into the
+ * row, and an action only ever returns dates its own clock stamped.
  */
-export function parseTitleRecord(input: unknown, ref: TitleId): Result<TitleRecord> {
+export function parseTitleRecord(input: unknown, ref: TitleId, now: Date): Result<TitleRecord> {
   const bad = (message: string) => fail<TitleRecord>({ code: "invalid_snapshot", message });
   if (typeof input !== "object" || input === null) return bad("state must be an object or null");
   const r = input as Record<string, unknown>;
@@ -93,14 +139,15 @@ export function parseTitleRecord(input: unknown, ref: TitleId): Result<TitleReco
 
   let skipUntil: Date | null = null;
   if (status === "skipped") {
-    skipUntil = toDate(r.skipUntil);
+    skipUntil = toDate(r.skipUntil, UNDO_DATE_FLOOR, new Date(now.getTime() + UNDO_SKIP_ALLOWANCE_MS));
     if (!skipUntil) return bad("a skipped state needs a valid skipUntil");
   } else if (r.skipUntil !== null && r.skipUntil !== undefined) {
     return bad("only a skipped state carries skipUntil");
   }
 
-  const createdAt = toDate(r.createdAt);
-  const updatedAt = toDate(r.updatedAt);
+  const stampCeiling = new Date(now.getTime() + UNDO_CLOCK_ALLOWANCE_MS);
+  const createdAt = toDate(r.createdAt, UNDO_DATE_FLOOR, stampCeiling);
+  const updatedAt = toDate(r.updatedAt, UNDO_DATE_FLOOR, stampCeiling);
   if (!createdAt || !updatedAt) return bad("state needs valid createdAt and updatedAt");
 
   return ok({

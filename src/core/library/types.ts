@@ -31,7 +31,9 @@ export interface TitleRecord extends TitleId {
 
 /**
  * A TitleRecord after a trip through JSON (an API response, the UI's undo
- * stack, an MCP call): dates may be ISO strings. restoreTitleState accepts it.
+ * stack, an MCP call): dates may be ISO strings with an explicit offset, as
+ * JSON.stringify writes them ("2026-11-27T10:00:00.000Z"). restoreTitleState
+ * accepts it, and refuses a date string with no offset.
  */
 export type TitleRecordInput = Omit<TitleRecord, "skipUntil" | "createdAt" | "updatedAt"> & {
   skipUntil: Date | string | null;
@@ -56,8 +58,15 @@ export interface UndoInput {
   current: TitleRecord | TitleRecordInput | null;
 }
 
-/** Options every write takes. `now` exists so tests can fix the clock. */
+/** Options every write takes. */
 export interface ActionOptions {
+  /**
+   * The clock the write stamps the row with. It exists so tests can fix the
+   * clock. An adapter (a server action, an API route, the AI connection) must
+   * never fill it from a request: the caller could then date its own rows,
+   * and restoreTitleState compares updated_at to decide what an undo may
+   * touch. Leave it out and the write uses the server's clock (issue 22).
+   */
   now?: Date;
 }
 

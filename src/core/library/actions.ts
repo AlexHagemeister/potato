@@ -8,11 +8,17 @@
 // snapshot, so the previous state comes back atomically with no transaction
 // (the Neon HTTP driver has none). The read takes no row lock: a lock taken in
 // the same statement as the write depends on which CTE the planner runs
-// first. Two writes on the same user's same title at the same instant (a
-// double tap on two devices) can hand the later one a stale `previous`. Undo
-// is safe against that, and against any later change: restoreTitleState is a
+// first. So when two writes on the same user's same title overlap (two
+// devices tapping the same title within the few milliseconds one statement
+// takes), the one that lands second can return a stale `previous`: the row
+// both statements first saw, not the row the other write left and this one
+// replaced.
+//
+// Undo never discards a change made after its action: restoreTitleState is a
 // compare-and-set that refuses to touch a row that is no longer the action's
-// `current`.
+// `current`. It does not repair a stale `previous`. Undoing the second of two
+// overlapping writes puts back the row from before both, so the first write's
+// change, which the second had already replaced, stays lost (issue 22).
 //
 // Timestamps come from the caller's clock (`now`), at millisecond precision,
 // so a state read back into JavaScript matches the stored value exactly. That
@@ -160,15 +166,15 @@ function upsertWrite(userId: string, ref: TitleId, c: StatusColumns, now: Date, 
 
 /**
  * The refusal when an `on_no_list` guard holds (issue 83): the title is on a
- * list, or skipped until later, so the error names where it is. The
- * statement's snapshot (`before`) says so when it saw that row. When it saw
- * none, or a row the deck may show, the guard locked a row committed at the
- * same instant, so one more read finds it. If that row is gone or showable
- * again by then, the title changed twice meanwhile: nothing was saved, and
- * the result is not_found, so the caller can try again.
+ * list, or skipped until later, so the error names where it is. The guard
+ * refused the row it locked, which is not always the row the statement's
+ * snapshot saw: another write may have landed in between, moving the title to
+ * another list or putting a row where there was none (issue 100). So one more
+ * read finds where the title is now. If the row is gone or showable again by
+ * then, the title changed again meanwhile: nothing was saved, and the result
+ * is not_found, so the caller can try again.
  */
-async function onNoListRefused(userId: string, ref: TitleId, before: TitleRecord | null, now: Date): Promise<Outcome> {
-  if (before && !rowVisible(ref, before, now)) return fail({ code: "wrong_state", status: before.status, expected: [] });
+async function onNoListRefused(userId: string, ref: TitleId, now: Date): Promise<Outcome> {
   const row = await getTitleState(userId, ref);
   if (!row.ok) return row;
   if (row.value && !rowVisible(ref, row.value, now)) {
@@ -194,7 +200,7 @@ async function cardAction(
     const { before, written } = await withPrevious(u, r, upsertWrite(u, r, columns.value, now, guard));
     if (written) return ok({ previous: before, current: written });
     // No row back means the guard refused the row it locked. Under REPLACEABLE that can only be a Seen row.
-    return guard === "on_no_list" ? onNoListRefused(u, r, before, now) : fail(seenRefused());
+    return guard === "on_no_list" ? onNoListRefused(u, r, now) : fail(seenRefused());
   });
 }
 
@@ -392,9 +398,9 @@ export async function removeRatingReview(userId: string, ref: TitleId, shown: Sh
   return deleted ? ok({ previous: deleted, current: null }) : shownRefused(before);
 }
 
-/** Parses one side of an undo input. Null stays null. */
-function parseSide(input: unknown, ref: TitleId): Result<TitleRecord | null> {
-  return input === null ? ok(null) : parseTitleRecord(input, ref);
+/** Parses one side of an undo input. Null stays null. `now` is the server's clock, which bounds the state's dates. */
+function parseSide(input: unknown, ref: TitleId, now: Date): Result<TitleRecord | null> {
+  return input === null ? ok(null) : parseTitleRecord(input, ref, now);
 }
 
 /**
@@ -409,8 +415,14 @@ function parseSide(input: unknown, ref: TitleId): Result<TitleRecord | null> {
  * off the Seen list without naming what it erases (issue 43). If the title
  * changed since (another device, a later edit, the AI connection), nothing
  * changes and the result is wrong_state (the row is somewhere else),
- * stale_value (still Seen, with another rating or review), or not_found (the
- * row is gone). So a stale undo never discards a newer change.
+ * stale_value (`current` is Seen and the row is still Seen, but edited since
+ * or holding another rating or review: issue 94), or not_found (the row is
+ * gone). So a stale undo never discards a newer change.
+ *
+ * Each state's dates must be ones an action could have returned: a Date or a
+ * string with an explicit offset, no earlier than UNDO_DATE_FLOOR and no later
+ * than a little past the server's clock (validate.ts, issues 22 and 27).
+ * Anything else is invalid_snapshot and nothing changes.
  *
  * The result is itself an outcome, so passing it back redoes the action.
  */
@@ -421,9 +433,11 @@ export async function restoreTitleState(userId: string, ref: TitleId, undo: Undo
   if (typeof undo !== "object" || undo === null || !("previous" in undo) || !("current" in undo)) {
     return fail({ code: "invalid_snapshot", message: "undo needs the action's previous and current states" });
   }
-  const parsedPrevious = parseSide(undo.previous, r);
+  // The server's own clock, never one the caller passes: it bounds the dates the caller's states may carry.
+  const now = new Date();
+  const parsedPrevious = parseSide(undo.previous, r, now);
   if (!parsedPrevious.ok) return parsedPrevious;
-  const parsedCurrent = parseSide(undo.current, r);
+  const parsedCurrent = parseSide(undo.current, r, now);
   if (!parsedCurrent.ok) return parsedCurrent;
   const p = parsedPrevious.value;
   const c = parsedCurrent.value;
@@ -439,9 +453,12 @@ export async function restoreTitleState(userId: string, ref: TitleId, undo: Undo
             and rating = ${c.rating} and review is not distinct from ${c.review}::text`
       : sql`status = ${c.status} and updated_at = ${c.updatedAt.toISOString()}`
     : null;
-  /** The refusal when the row is no longer the action's `current`. */
+  /**
+   * The refusal when the row is no longer the action's `current`. Still Seen, as `current` was, means the row was
+   * edited since or holds another rating or review: stale_value, as shownRefused says it (issue 94).
+   */
   const refused = (before: TitleRecord | null, current: TitleRecord): Outcome =>
-    before?.status === "seen" && current.status === "seen" && before.updatedAt.getTime() === current.updatedAt.getTime()
+    before?.status === "seen" && current.status === "seen"
       ? fail({ code: "stale_value", status: "seen" })
       : conflict(before, [current.status]);
 
