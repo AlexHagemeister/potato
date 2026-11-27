@@ -8,8 +8,42 @@
 // takes the app down. It can only fire when NODE_ENV is exactly "development"
 // and VERCEL_ENV is unset. Every other value, a missing one included, lets
 // the connection through untouched. Pure: no database or environment access.
+//
+// A known hole, left open on purpose: a local run with VERCEL_ENV set (for
+// example `vercel dev`, or a shell that exports it) is not guarded, and would
+// reach whatever database its URL names without a word. Vercel sets
+// VERCEL_ENV on every deployment, so honouring it is the second, independent
+// lock that keeps the guard from ever firing there. A guard that goes quiet
+// locally costs a warning. One that fires on Vercel costs the app.
 
 import { DEV_DATABASE_NAME, databaseNameFromUrl } from "@/core/auth/dev-user";
+
+/** What a database name may look like in the message. */
+const PRINTABLE_DATABASE_NAME = /^[A-Za-z0-9_-]{1,63}$/;
+
+/**
+ * The database name as the message may show it: the name, or a fixed
+ * placeholder. A malformed URL can put its password or host where the name
+ * is read from (`postgresql:user:pw@host/db` parses with all of that as the
+ * path, and `postgresql:pw` with the password alone). So the name is printed
+ * only when it is plainly shaped and the URL around it is well formed: a
+ * Postgres scheme, a user, and a host, which puts the password before the
+ * host and the name after it.
+ */
+function printableDatabaseName(url: string | undefined, name: string | null): string {
+  if (name === null) return "(none)";
+  if (!PRINTABLE_DATABASE_NAME.test(name)) return "(unreadable)";
+  try {
+    const parsed = new URL(url ?? "");
+    const wellFormed =
+      (parsed.protocol === "postgresql:" || parsed.protocol === "postgres:") &&
+      parsed.username !== "" &&
+      parsed.hostname !== "";
+    return wellFormed ? name : "(unreadable)";
+  } catch {
+    return "(unreadable)";
+  }
+}
 
 export interface DevDatabaseGuardEnv {
   /**
@@ -18,7 +52,10 @@ export interface DevDatabaseGuardEnv {
    * a production build whatever the runtime environment says.
    */
   nodeEnv: string | undefined;
-  /** process.env.VERCEL_ENV. Vercel sets it on every deployment, preview included. */
+  /**
+   * process.env.VERCEL_ENV. Vercel sets it on every deployment, preview
+   * included. Any value turns the guard off, a local one too (see the header).
+   */
   vercelEnv: string | undefined;
   /** The connection URL about to be used. */
   url: string | undefined;
@@ -29,8 +66,9 @@ export interface DevDatabaseGuardEnv {
 /**
  * Null when the connection may open, otherwise the reason to refuse it.
  * Refuses only a local development run (NODE_ENV "development", no
- * VERCEL_ENV) whose URL does not name potato_dev. The message names the
- * database but never the URL, which holds the password.
+ * VERCEL_ENV) whose URL does not name potato_dev. The message never holds
+ * the URL or any part of it but a plainly shaped database name, since the
+ * URL holds the password.
  */
 export function devDatabaseGuardRefusal(env: DevDatabaseGuardEnv): string | null {
   if (env.nodeEnv !== "development") return null;
@@ -39,7 +77,7 @@ export function devDatabaseGuardRefusal(env: DevDatabaseGuardEnv): string | null
   if (name === DEV_DATABASE_NAME) return null;
   return (
     `Refusing to open a database connection in development: ${env.variable} names the database ` +
-    `"${name ?? "(none)"}", not "${DEV_DATABASE_NAME}". ` +
+    `"${printableDatabaseName(env.url, name)}", not "${DEV_DATABASE_NAME}". ` +
     "This checkout is probably missing .env.development.local, so the dev server fell back to " +
     ".env.local, which points at production. Copy .env.development.local from the main checkout " +
     `into this one (it sets DATABASE_URL and DATABASE_URL_UNPOOLED to ${DEV_DATABASE_NAME}), ` +

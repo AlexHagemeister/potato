@@ -76,6 +76,55 @@ describe("devDatabaseGuardRefusal", () => {
     expect(message).not.toContain("host.example");
     expect(message).not.toContain("postgresql://");
   });
+
+  // A malformed URL can parse with the password or host inside the path, so
+  // the parsed "database name" would carry them into the message.
+  test("a malformed URL is still refused, and nothing from it reaches the message", () => {
+    const malformed = [
+      "postgresql:u:secret-pw@host.example/neondb", // no slashes: all of it is the path
+      "postgresql://u:1234/secret-pw@host.example/neondb", // a slash in the password
+      "postgresql:/u:secret-pw@host.example/neondb", // one slash
+      "postgresql:///u:secret-pw@host.example/neondb", // three slashes
+      "postgresql://host.example/u:secret-pw@host.example", // credentials as the path
+      "postgresql://u:p@other.example/secret-pw%40host.example", // encoded, decoded by the parser
+      "postgresql://u:p@other.example/secret-pw%2Fhost.example",
+      "postgresql://u:p@other.example/neondb/secret-pw/host.example", // extra path segments
+      "postgresql://u:p@other.example/potato_dev/secret-pw", // potato_dev as a prefix only
+      "postgresql://u:p@other.example/secret-pw host.example", // a space
+      `postgresql://u:p@other.example/${"secret-pw".repeat(8)}`, // too long to be a name
+      "postgresql:secret-pw", // no host: the password alone, shaped like a name
+      "postgresql:/secret-pw",
+      "postgresql:///secret-pw",
+      "postgresql://u:1234/secret-pw", // cut off after a slash in the password
+      "postgresql://host.example:5432/secret-pw", // no user
+      "https://u:p@other.example/secret-pw", // not Postgres
+      "u:secret-pw@host.example/neondb", // no scheme: "u:" is read as one
+      "file:///secret-pw/host.example",
+    ];
+    for (const url of malformed) {
+      for (const variable of ["DATABASE_URL", "DATABASE_URL_UNPOOLED"]) {
+        const message = devDatabaseGuardRefusal({ ...wrong, url, variable });
+        expect(message).toBeString();
+        expect(message).not.toContain("secret-pw");
+        expect(message).not.toContain("host.example");
+        expect(message).not.toContain("1234");
+        expect(message).not.toContain("@");
+        expect(message).toMatch(/names the database "\((unreadable|none)\)"/);
+      }
+    }
+  });
+
+  test("a plainly shaped name is printed, anything else is a fixed placeholder", () => {
+    const refusal = (name: string) =>
+      devDatabaseGuardRefusal({ ...wrong, url: `postgresql://u:p@host.example/${name}` })!;
+    expect(refusal("neondb")).toContain('"neondb"');
+    expect(refusal("my-db_2")).toContain('"my-db_2"');
+    expect(refusal("a.b")).toContain('"(unreadable)"');
+    expect(refusal("a%20b")).toContain('"(unreadable)"');
+    expect(refusal("a".repeat(64))).toContain('"(unreadable)"');
+    const postgres = devDatabaseGuardRefusal({ ...wrong, url: "postgres://u:p@host.example/neondb" })!;
+    expect(postgres).toContain('"neondb"');
+  });
 });
 
 // The wiring: getDb() and withTransaction() read the real environment, so
