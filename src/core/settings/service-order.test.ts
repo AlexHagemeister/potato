@@ -102,6 +102,7 @@ describe("servicesToShow", () => {
   test("otherwise the popular group, with kept services", () => {
     const shown = servicesToShow(US, { query: "", showAll: false, keepIds: [73] });
     expect(shown.at(-1)?.name).toBe("Tubi TV");
-    expect(shown.some((s) => s.name.endsWith("Channel"))).toBe(false);
+    // Case-insensitive: the fixture has "Paramount Plus Apple TV channel".
+    expect(shown.some((s) => /channel\s*$/i.test(s.name))).toBe(false);
   });
 });
