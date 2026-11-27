@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CHOICES } from "./copy";
+import { CHOICES, EXAMPLE_CARD } from "./copy";
 import { Landing } from "./landing";
 
 const html = renderToStaticMarkup(<Landing signIn={<button type="button">Sign in with Google</button>} />);
@@ -27,9 +27,11 @@ describe("landing page (issue 145)", () => {
     expect(text).toMatch(/ratings and reviews/);
   });
 
-  test("shows an example card", () => {
+  test("shows an example card with a generic star score", () => {
     expect(html).toContain('aria-label="An example card"');
     expect(text).toContain("Example");
+    expect(html).toContain(`aria-label="Example rating ${EXAMPLE_CARD.rating}"`);
+    expect(text).toMatch(new RegExp(`★\\s+${EXAMPLE_CARD.rating.replace(".", "\\.")}`));
   });
 
   test("the sign-in slot is rendered, and it is the only control", () => {
@@ -46,8 +48,8 @@ describe("landing page (issue 145)", () => {
 
   test("shows nothing from TMDB or IMDb, so no attribution is owed here", () => {
     expect(html).not.toMatch(/tmdb\.org|themoviedb|imdb\.com|justwatch/i);
-    // The example card describes the IMDb rating in words; it shows no score.
-    expect(text).not.toMatch(/\b\d\.\d\b/);
+    // The example card's score is invented, so it carries a plain star, never IMDb's name.
+    expect(text).not.toMatch(/imdb/i);
   });
 
   test("no pricing or sign-up pitch", () => {

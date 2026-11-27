@@ -1,4 +1,5 @@
 import { ImageResponse } from "next/og";
+import { ChoiceIcon } from "./(app)/_landing/choice-icon";
 import { CHOICES, TAGLINE } from "./(app)/_landing/copy";
 
 // The link preview image (Open Graph; twitter-image.tsx reuses it). Drawn in
@@ -12,7 +13,6 @@ export const contentType = "image/png";
 
 const BG = "#0b0b0c";
 const FG = "#ededed";
-const MUTED = "#8e8e93";
 const SURFACE = "#161618";
 const RAISED = "#1f1f22";
 const HAIRLINE = "#2a2a2e";
@@ -135,16 +135,10 @@ export default function Image() {
                     background: RAISED,
                     alignItems: "center",
                     justifyContent: "center",
+                    color: c.kind === "watchlist" ? ACCENT : FG,
                   }}
                 >
-                  <div
-                    style={{
-                      width: 14,
-                      height: 14,
-                      borderRadius: 999,
-                      background: c.kind === "watchlist" ? ACCENT : MUTED,
-                    }}
-                  />
+                  <ChoiceIcon kind={c.kind} size={30} />
                 </div>
               ))}
             </div>

@@ -94,7 +94,17 @@ export function ExampleCard() {
             ))}
             <span className="px-1 text-muted">{card.length}</span>
           </p>
-          <p className="mt-2.5 text-[0.8125rem] leading-snug text-foreground/80">{card.synopsis}</p>
+          {/* Where the real card shows the IMDb rating, styled like it
+              (_deck/card-view.tsx ImdbRating), but a plain star: the score is invented. */}
+          <p className="mt-3 flex items-center gap-2.5" aria-label={`Example rating ${card.rating}`}>
+            <span aria-hidden className="rounded-md bg-accent px-1.5 py-0.5 text-sm leading-none font-black text-black">
+              ★
+            </span>
+            <span aria-hidden className="text-2xl leading-none font-bold tabular-nums">
+              {card.rating}
+            </span>
+          </p>
+          <p className="mt-3 text-[0.8125rem] leading-snug text-foreground/80">{card.synopsis}</p>
         </div>
 
         <div aria-hidden className="mt-2 grid grid-cols-4 gap-1.5">

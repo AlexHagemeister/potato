@@ -31,9 +31,10 @@ export const BUILDS: readonly { label: string; words: string }[] = [
 export const BUILDS_FOOTNOTE = "Every choice can be undone, and your lists follow you across devices.";
 
 /**
- * The example card. Made up on purpose: a drawn poster and an invented title,
- * so nothing on it comes from TMDB or IMDb. Its synopsis says what a real card
- * adds, instead of showing a rating that no one gave.
+ * The example card. Made up on purpose: a drawn poster, an invented title,
+ * and an invented score, so nothing on it comes from TMDB or IMDb. The score
+ * sits where a real card shows the IMDb rating, but with a plain star and no
+ * IMDb name or badge, because no one gave it.
  */
 export const EXAMPLE_CARD = {
   badge: "Example",
@@ -41,5 +42,6 @@ export const EXAMPLE_CARD = {
   meta: "2024 · Series",
   genres: ["Sci-fi", "Drama"],
   length: "2 seasons",
-  synopsis: "Real cards show the IMDb rating, where it's streaming in your country, and the trailer.",
+  rating: "8.4",
+  synopsis: "Real cards also show where to stream it and the trailer.",
 } as const;
