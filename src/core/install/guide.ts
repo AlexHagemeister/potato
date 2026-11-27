@@ -320,7 +320,7 @@ export function writeSeenMark(storage: SeenStorage): boolean {
 export interface AutoShowInput {
   /** The app is running from the home screen already. */
   standalone: boolean;
-  /** Whether this device has the mark. null when storage can't be read. */
+  /** Whether this device has the mark. null when storage can't be read or won't save. */
   seen: boolean | null;
 }
 
