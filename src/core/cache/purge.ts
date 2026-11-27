@@ -1,12 +1,16 @@
 // The nightly purge of expired tmdb_cache rows (issue 14). The TMDB client
 // overwrites an expired entry when its key is asked for again, but keys that
 // are never asked for again (most search keys: one per query and page) would
-// stay forever. The daily cron (src/app/api/cron/imdb/route.ts) calls this.
+// stay forever. The daily cron (src/core/imdb/daily-job.ts) calls this.
 //
-// Expired rows are not useless: when a TMDB call fails, the client serves the
-// expired copy instead (src/core/tmdb/client.ts, "serving stale"). So a row is
-// deleted only once it has been expired for the whole grace period, and the
-// grace period is the outage cover kept for titles nobody has opened lately.
+// Some expired rows are still useful. For three kinds of row (title details,
+// a title's watch providers, and the watch-regions list) the TMDB client
+// serves the expired copy when a TMDB call fails (src/core/tmdb/client.ts,
+// "serving stale"). The grace period keeps that outage cover for a month
+// after expiry. The other kinds (search, discover, recommendations, genres,
+// the provider list) are read fresh-only, so for them the grace period buys
+// nothing: they simply wait the same 30 days before they go. One grace period
+// for all kinds keeps the purge free of any knowledge of TMDB's key format.
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -40,8 +44,8 @@ export interface PurgeExpiredCacheOptions {
 /**
  * Deletes cache rows that expired more than `graceMs` ago. Throws before
  * touching the store when the grace period or limit is not a positive
- * finite number, or the clock is not a valid date, since a bad cutoff could
- * delete rows that are still fresh.
+ * finite number, or the clock or the cutoff is not a valid date, since a bad
+ * cutoff could delete rows that are still fresh.
  */
 export async function purgeExpiredCache({
   store,
@@ -58,24 +62,40 @@ export async function purgeExpiredCache({
   const nowMs = now().getTime();
   if (!Number.isFinite(nowMs)) throw new Error("cache purge refused: the clock returned an invalid date");
   const cutoff = new Date(nowMs - graceMs);
+  // A huge but finite grace period still makes an invalid date.
+  if (!Number.isFinite(cutoff.getTime())) throw new Error("cache purge refused: the cutoff is not a valid date");
   const deleted = await store.deleteExpiredBefore(cutoff, limit);
   return { cutoff: cutoff.toISOString(), deleted, hitLimit: deleted >= limit };
 }
 
+/** How long the nightly purge may take before the cron stops waiting for it. */
+export const CACHE_PURGE_TIMEOUT_MS = 20_000;
+
 export type NightlyCachePurgeOutcome = ({ ok: true } & CachePurgeResult) | { ok: false; error: string };
 
 /**
- * The cron's entry point. It never throws: a failed purge is logged and
- * reported, and must not change the outcome of the IMDb load it runs beside.
+ * The cron's entry point. It never throws and never waits longer than
+ * `timeoutMs`: a failed or slow purge is logged and reported, and must not
+ * change the outcome of the IMDb load it runs beside. On a timeout the
+ * statement may still finish in the database; only the wait is cut short.
  */
-export async function runNightlyCachePurge(store: ExpiredEntryDeleter): Promise<NightlyCachePurgeOutcome> {
+export async function runNightlyCachePurge(
+  store: ExpiredEntryDeleter,
+  { timeoutMs = CACHE_PURGE_TIMEOUT_MS }: { timeoutMs?: number } = {},
+): Promise<NightlyCachePurgeOutcome> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs} ms`)), timeoutMs);
+  });
   try {
-    const result = await purgeExpiredCache({ store });
+    const result = await Promise.race([purgeExpiredCache({ store }), timeout]);
     console.log("tmdb cache purge", result);
     return { ok: true, ...result };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     console.error(`TMDB CACHE PURGE FAILED: ${error}`, err);
     return { ok: false, error };
+  } finally {
+    clearTimeout(timer);
   }
 }

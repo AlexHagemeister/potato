@@ -1251,27 +1251,46 @@ try {
     }
   });
 
-  await check("PostgresCacheStore.deleteExpiredBefore deletes only rows expiring strictly before the cutoff, up to the limit", async () => {
-    // A cutoff in 2001 so the purge can reach only this run's own rows, never
-    // another agent's cache in the shared potato_dev.
+  await check("PostgresCacheStore.deleteExpiredBefore deletes rows expiring strictly before the cutoff, up to the limit", async () => {
+    // The delete is table-wide, and potato_dev is shared: another test:db run
+    // at the same time (or a killed run's leftovers) has rows below the same
+    // cutoff, and either run may delete the other's. So the checks are on this
+    // run's own keys and on bounds that hold whoever deletes what, never on
+    // exact table-wide counts.
     const store = new PostgresCacheStore();
     const key = (name: string) => `itest:${runId}:purge-${name}`;
     const cutoff = new Date(Date.UTC(2001, 0, 1));
-    const rows: [string, Date][] = [
-      [key("old-1"), new Date(Date.UTC(2000, 0, 1))],
-      [key("old-2"), new Date(Date.UTC(2000, 0, 2))],
-      [key("old-3"), new Date(Date.UTC(2000, 0, 3))],
+    const old = [key("old-1"), key("old-2"), key("old-3")];
+    const kept: [string, Date][] = [
       [key("at-cutoff"), cutoff],
       [key("after-cutoff"), new Date(Date.UTC(2001, 0, 2))],
       [key("fresh"), new Date(Date.UTC(2030, 0, 1))],
     ];
+    const present = async (keys: string[]) => [...(await store.getMany(keys)).keys()].sort();
     try {
-      for (const [k, expires] of rows) await store.set(k, { k }, expires);
-      assert.equal(await store.deleteExpiredBefore(cutoff, 2), 2, "the limit caps one run, and the count is real");
-      assert.equal(await store.deleteExpiredBefore(cutoff, 10), 1, "the next run takes the rest");
-      assert.equal(await store.deleteExpiredBefore(cutoff, 10), 0);
-      const left = await store.getMany(rows.map(([k]) => k));
-      assert.deepEqual([...left.keys()].sort(), [key("after-cutoff"), key("at-cutoff"), key("fresh")]);
+      const writeOld = () => Promise.all(old.map((k, i) => store.set(k, { k }, new Date(Date.UTC(2000, 0, i + 1)))));
+      await writeOld();
+      for (const [k, expires] of kept) await store.set(k, { k }, expires);
+
+      // The driver's count is real: with a limit of 1 and an eligible row
+      // present, it is exactly 1. If another run emptied the eligible set first
+      // (all three of this run's old rows gone), write them again and retry once.
+      let first = await store.deleteExpiredBefore(cutoff, 1);
+      if (first === 0) {
+        assert.deepEqual(await present(old), [], "a count of 0 while this run's eligible rows still exist means the count is wrong");
+        await writeOld();
+        first = await store.deleteExpiredBefore(cutoff, 1);
+      }
+      assert.equal(first, 1, "limit 1 with eligible rows present deletes exactly 1, and says so");
+
+      // Drain the rest. Each run stays within its limit.
+      for (let i = 0; i < 100; i++) {
+        const n = await store.deleteExpiredBefore(cutoff, 10);
+        assert.ok(n >= 0 && n <= 10, `a run deletes at most its limit (got ${n})`);
+        if (n === 0) break;
+      }
+      assert.deepEqual(await present(old), [], "every row of this run expiring before the cutoff is gone");
+      assert.deepEqual(await present(kept.map(([k]) => k)), kept.map(([k]) => k).sort(), "the row at the cutoff, after it and the fresh one all stay");
     } finally {
       await db.execute(sql`delete from tmdb_cache where key like ${`itest:${runId}:purge-%`}`);
     }

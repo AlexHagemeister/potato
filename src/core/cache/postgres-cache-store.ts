@@ -44,17 +44,21 @@ export class PostgresCacheStore implements CacheStore {
    * and returns how many went. The nightly purge (purge.ts) is the only
    * caller. Every row in tmdb_cache is a copy of a TMDB response, so a
    * deleted row is refetched the next time it is needed. One statement, using
-   * tmdb_cache_expires_at_idx.
+   * tmdb_cache_expires_at_idx. The outer statement repeats the cutoff test, so
+   * a row rewritten with a fresh expiry while the statement runs is skipped
+   * on the recheck instead of deleted.
    */
   async deleteExpiredBefore(cutoff: Date, limit: number): Promise<number> {
+    const before = cutoff.toISOString();
     const result = await this.db().execute(sql`
       delete from tmdb_cache
       where key in (
         select key from tmdb_cache
-        where expires_at < ${cutoff.toISOString()}::timestamptz
+        where expires_at < ${before}::timestamptz
         order by expires_at
         limit ${limit}
-      )`);
+      )
+      and expires_at < ${before}::timestamptz`);
     return result.rowCount ?? 0;
   }
 }

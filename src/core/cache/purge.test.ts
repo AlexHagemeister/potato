@@ -65,6 +65,8 @@ describe("purgeExpiredCache", () => {
       await expect(purgeExpiredCache({ store, now, limit })).rejects.toThrow("limit");
     }
     await expect(purgeExpiredCache({ store, now: () => new Date(Number.NaN) })).rejects.toThrow("invalid date");
+    // Finite, but the cutoff it makes is not a date.
+    await expect(purgeExpiredCache({ store, now, graceMs: 1e300 })).rejects.toThrow("cutoff is not a valid date");
     expect(touched).toBe(false);
   });
 });
@@ -74,6 +76,17 @@ describe("runNightlyCachePurge", () => {
     const store = { deleteExpiredBefore: async () => 7 };
     const outcome = await runNightlyCachePurge(store);
     expect(outcome).toMatchObject({ ok: true, deleted: 7, hitLimit: false });
+  });
+
+  test("a store that never answers is cut off at the timeout, not waited on", async () => {
+    const store = { deleteExpiredBefore: () => new Promise<number>(() => {}) };
+    const original = console.error;
+    console.error = () => {};
+    try {
+      expect(await runNightlyCachePurge(store, { timeoutMs: 50 })).toEqual({ ok: false, error: "timed out after 50 ms" });
+    } finally {
+      console.error = original;
+    }
   });
 
   test("a failing store is reported, not thrown", async () => {
