@@ -158,6 +158,16 @@ export function sheetStillNeeded(settings: { providerIds: readonly number[] }): 
   return settings.providerIds.length === 0;
 }
 
+/**
+ * Whether the page on screen starts over once a save made in the sheet is in. It does when the person left the
+ * deck while that save was still on its way and is still off the deck: the page they reached may have read the
+ * settings before the save landed, and a settings form takes its starting values once, so it would save its old
+ * selection over the sheet's. On the deck nothing reads the settings that way.
+ */
+export function remountAfterSheetSave(facts: { leftDeckWhileSaving: boolean; onDeck: boolean }): boolean {
+  return facts.leftDeckWhileSaving && !facts.onDeck;
+}
+
 // ---- Quiet moments ----
 // The services sheet and, after it, the home-screen prompt each cover the whole screen. Each waits for a moment
 // when it would cover nothing the person is using, by the same rule.

@@ -33,6 +33,10 @@ export interface OnboardingState {
   sheetData: SheetData | null;
   /** Onboarding has finished, and the home-screen prompt waits for the next quiet moment. */
   installWaiting: boolean;
+  /** A sheet save landed after the person left the deck: the page on screen is to be refreshed and started over. */
+  pageRestartDue: boolean;
+  /** Bumped each time the page is started over; the shell keys the page on it (PageRestart). */
+  pageEpoch: number;
 }
 
 const OFF: OnboardingState = {
@@ -42,6 +46,8 @@ const OFF: OnboardingState = {
   sheetVisible: false,
   sheetData: null,
   installWaiting: false,
+  pageRestartDue: false,
+  pageEpoch: 0,
 };
 
 let state: OnboardingState = OFF;
@@ -159,7 +165,49 @@ export function retrySheet() {
 export function cancelServicesSheet() {
   if (!state.sheetOpen) return;
   loadToken++;
+  if (saveOnItsWay) leftDeckWhileSaving = true;
   set({ sheetOpen: false, sheetVisible: false, sheetData: null });
+}
+
+/** Bumped per change made in the sheet, so a burst of taps ends in one refresh. */
+let saveRefreshToken = 0;
+/** A change made in the sheet has not been saved yet. */
+let saveOnItsWay = false;
+/** The sheet was put away (the person left the deck) while a change made in it was still being saved. */
+let leftDeckWhileSaving = false;
+
+/**
+ * A change was made in the sheet (a service or the country), and the form has sent its save. Once that save is
+ * in, the router refreshes, which also empties its cache of other pages. Without this, history Back or Forward
+ * could restore a Profile page rendered before the save, and its form would save its old selection over the
+ * sheet's. If the person left the deck before the save was in, the page they reached may have read the settings
+ * too early, so the shell refreshes and starts that page over instead (`pageRestartDue`, core's
+ * remountAfterSheetSave). The wait starts after a turn of the event loop, so it queues behind the form's action.
+ */
+export function noteSheetChange(refresh: () => void) {
+  const { userId } = state;
+  if (!userId) return;
+  const token = ++saveRefreshToken;
+  saveOnItsWay = true;
+  setTimeout(() => {
+    void settledAction()
+      .catch(() => null)
+      .then(() => {
+        if (token !== saveRefreshToken || state.userId !== userId) return;
+        saveOnItsWay = false;
+        if (leftDeckWhileSaving) {
+          leftDeckWhileSaving = false;
+          set({ pageRestartDue: true });
+        } else {
+          refresh();
+        }
+      });
+  }, 0);
+}
+
+/** The page on screen was refreshed and started over after a late sheet save (or didn't need to be). */
+export function pageRestarted(remounted: boolean) {
+  set({ pageRestartDue: false, pageEpoch: remounted ? state.pageEpoch + 1 : state.pageEpoch });
 }
 
 /**

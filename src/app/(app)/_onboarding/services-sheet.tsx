@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import { SettingsForm } from "../profile/settings-form";
 import type { SheetData } from "./actions";
-import { finishOnboarding, retrySheet } from "./store";
+import { finishOnboarding, noteSheetChange, retrySheet } from "./store";
 
 /**
  * The one onboarding sheet (issue 139): country and streaming services. It holds the Profile tab's own settings
@@ -101,6 +101,17 @@ export function ServicesSheet({ data, onRefresh }: { data: SheetData | null; onR
           </div>
         )}
         {data?.ok && (
+          // Each service tap and country pick saves at once (the form's own actions). The handlers here run after
+          // the form's, and only note that a save went out, so the router's cached pages can be refreshed once it
+          // is in (noteSheetChange).
+          <div
+            onClick={(e) => {
+              if (e.target instanceof Element && e.target.closest('[role="checkbox"]')) noteSheetChange(onRefresh);
+            }}
+            onChange={(e) => {
+              if (e.target instanceof HTMLSelectElement) noteSheetChange(onRefresh);
+            }}
+          >
           <SettingsForm
             initialCountry={data.value.settings.country}
             initialProviderIds={data.value.settings.providerIds}
@@ -108,6 +119,7 @@ export function ServicesSheet({ data, onRefresh }: { data: SheetData | null; onR
             initialServices={data.value.services}
             servicesUnavailable={data.value.servicesUnavailable}
           />
+          </div>
         )}
       </div>
     </div>

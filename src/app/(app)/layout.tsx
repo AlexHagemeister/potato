@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { getIsNewAccount } from "@/core/onboarding/new-account";
 import { getCurrentUserForRequest } from "@/lib/current-user";
 import { InstallPrompt } from "./_install/install-sheet";
-import { Onboarding } from "./_onboarding/onboarding";
+import { Onboarding, PageRestart } from "./_onboarding/onboarding";
 import { SignedOutScreen } from "./_shell/signed-out";
 import { TabBar } from "./_shell/tab-bar";
 
@@ -23,7 +23,9 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
 
   return (
     <div className="fixed inset-0 flex flex-col">
-      <div className="flex min-h-0 flex-1 flex-col">{children}</div>
+      <div className="flex min-h-0 flex-1 flex-col">
+        <PageRestart>{children}</PageRestart>
+      </div>
       <TabBar />
       {/* Signed in only. Layers over the tab, which loads underneath as usual. First-run onboarding (issue 139)
           comes before the home-screen prompt (issue 138), which waits its turn for a new account. */}

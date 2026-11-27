@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, useTransition, type ReactNode } from "react";
 import { chooseLabelSpot, POINTER_OVERLAP, type Box, type LabelSpot } from "@/core/onboarding/placement";
 import {
   currentHint,
@@ -11,6 +11,7 @@ import {
   QUIET_MS_BEFORE_INSTALL,
   QUIET_MS_BEFORE_SHEET,
   quietFor,
+  remountAfterSheetSave,
   startSortTracker,
   trackSorts,
   type Hint,
@@ -25,6 +26,7 @@ import {
   nextHint,
   noteSortEvents,
   openServicesSheet,
+  pageRestarted,
   releaseInstallPrompt,
   startOnboarding,
   stopOnboarding,
@@ -146,6 +148,35 @@ export function Onboarding({ userId, isNew }: { userId: string; isNew: boolean }
   useEffect(() => {
     if (!onDeck && state.sheetOpen) cancelServicesSheet();
   }, [onDeck, state.sheetOpen]);
+
+  // When the sheet shows, the router's cache of other pages goes. A Profile page cached earlier holds the services
+  // as they were then, and history Back restores a cached page as it was: its form would then save that old
+  // selection over whatever the sheet saves. Each change in the sheet refreshes again once saved (noteSheetChange).
+  const sheetShown = state.sheetVisible && onDeck;
+  useEffect(() => {
+    if (sheetShown) router.refresh();
+  }, [sheetShown, router]);
+
+  // A sheet save that landed only after the person left the deck: the page they reached may have read the
+  // settings before it, and its form keeps what it first read. The page is refreshed, and once the fresh data is
+  // in, started over (PageRestart), so its form reads what the sheet saved.
+  const [restarting, startRestart] = useTransition();
+  const restartStarted = useRef(false);
+  useEffect(() => {
+    if (!state.pageRestartDue || restartStarted.current) return;
+    if (!remountAfterSheetSave({ leftDeckWhileSaving: true, onDeck })) {
+      pageRestarted(false);
+      router.refresh();
+      return;
+    }
+    restartStarted.current = true;
+    startRestart(() => router.refresh());
+  }, [state.pageRestartDue, onDeck, router]);
+  useEffect(() => {
+    if (!restartStarted.current || restarting) return;
+    restartStarted.current = false;
+    pageRestarted(true);
+  }, [restarting]);
 
   if (!state.progress && !state.sheetVisible) return null;
   const hint = state.progress ? currentHint(state.progress) : null;
@@ -344,4 +375,14 @@ function useKeepClearPlacement(
     };
   }, [bubble, safeTop, measureKey]);
   return placed;
+}
+
+/**
+ * The shell's page, keyed so onboarding can start it over: only after a services save from the sheet landed once
+ * the person had already left the deck (see Onboarding). Otherwise the key never changes, and pages mount and
+ * stay mounted exactly as without it.
+ */
+export function PageRestart({ children }: { children: ReactNode }) {
+  const { pageEpoch } = useOnboarding();
+  return <Fragment key={pageEpoch}>{children}</Fragment>;
 }

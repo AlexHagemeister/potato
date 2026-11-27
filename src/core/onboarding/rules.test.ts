@@ -15,6 +15,7 @@ import {
   QUIET_MS_BEFORE_SHEET,
   quietFor,
   readDeviceRecord,
+  remountAfterSheetSave,
   sheetStillNeeded,
   SORTS_BEFORE_SHEET,
   startingProgress,
@@ -215,6 +216,19 @@ describe("sheetStillNeeded", () => {
   });
   test("services saved elsewhere meanwhile: nothing left to ask", () => {
     expect(sheetStillNeeded({ providerIds: [8] })).toBe(false);
+  });
+});
+
+describe("remountAfterSheetSave", () => {
+  test("left the deck while the save was on its way, and still away: the page starts over", () => {
+    expect(remountAfterSheetSave({ leftDeckWhileSaving: true, onDeck: false })).toBe(true);
+  });
+  test("left only after the save was in: the refresh alone is enough", () => {
+    expect(remountAfterSheetSave({ leftDeckWhileSaving: false, onDeck: false })).toBe(false);
+  });
+  test("back on the deck by the time it lands: nothing to start over", () => {
+    expect(remountAfterSheetSave({ leftDeckWhileSaving: true, onDeck: true })).toBe(false);
+    expect(remountAfterSheetSave({ leftDeckWhileSaving: false, onDeck: true })).toBe(false);
   });
 });
 
