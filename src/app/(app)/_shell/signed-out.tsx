@@ -1,20 +1,18 @@
 import { SignInButton } from "../../auth-buttons";
+import { Landing } from "../_landing/landing";
 
 /**
- * The one screen a signed-out visitor sees, whatever the URL. The shell layout
- * shows it on a full page load. Each tab page also renders it when signed out,
- * because the layout does not re-run on a tab tap: an expired session would
- * otherwise leave a blank tab under the tab bar. It covers the whole screen,
- * tab bar included.
+ * The one screen a signed-out visitor sees, whatever the URL: the landing
+ * page, which says what Potato is before asking them to sign in (issue 145).
+ * The shell layout shows it on a full page load. Each tab page also renders it
+ * when signed out, because the layout does not re-run on a tab tap: an expired
+ * session would otherwise leave a blank tab under the tab bar. It covers the
+ * whole screen, tab bar included.
+ *
+ * Every signed-out URL gets the same page, a shared title link included: the
+ * layout cannot tell which URL it is on, and someone who follows a link to
+ * Potato is the person the page is for. Sign-in returns to the deck.
  */
 export function SignedOutScreen() {
-  return (
-    <main className="fixed inset-0 z-50 flex bg-background flex-col items-center justify-center gap-10 px-8 pt-[env(safe-area-inset-top)] pb-[calc(env(safe-area-inset-bottom)+2rem)] text-center">
-      <div className="flex flex-col items-center gap-3">
-        <h1 className="text-5xl font-bold tracking-tight">Potato</h1>
-        <p className="text-base text-muted">Decide what to watch, one card at a time.</p>
-      </div>
-      <SignInButton />
-    </main>
-  );
+  return <Landing signIn={<SignInButton />} />;
 }
