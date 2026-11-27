@@ -36,6 +36,8 @@ const CLOSED: InstallState = { open: false, auto: false, promptReady: false, pro
 let state: InstallState = CLOSED;
 let deferred: BeforeInstallPromptEvent | null = null;
 let autoChecked = false;
+/** First-run onboarding (issue 139) holds the sheet's one chance to open by itself until it has finished. */
+let held = false;
 const listeners = new Set<() => void>();
 
 function set(patch: Partial<InstallState>) {
@@ -119,10 +121,28 @@ if (typeof window !== "undefined") {
  * mounted, so the check never runs on the server.
  */
 export function autoOpenInstallSheet() {
-  if (autoChecked) return;
+  if (autoChecked || held) return;
   const show = autoOpenPending();
   autoChecked = true;
   if (show) set({ open: true, auto: true });
+}
+
+/**
+ * For a new person the prompt waits its turn behind onboarding's hints and services sheet (issue 139), instead of
+ * opening over the first card. Onboarding holds it from a layout effect, which runs before the shell's mount effect
+ * calls autoOpenInstallSheet. While held, the sheet still counts as about to open, so the browser's own install
+ * banner is cancelled and the offer rides on the sheet once it opens. Nobody else holds it, so for everyone else
+ * the prompt behaves as before.
+ */
+export function holdInstallAutoOpen() {
+  held = true;
+}
+
+/** Ends the hold. `open` takes the chance the hold kept (onboarding finished); without it the hold just lifts. */
+export function releaseInstallAutoOpen({ open }: { open: boolean }) {
+  if (!held) return;
+  held = false;
+  if (open) autoOpenInstallSheet();
 }
 
 /** Opens the sheet on request (the Profile tab's row). */
