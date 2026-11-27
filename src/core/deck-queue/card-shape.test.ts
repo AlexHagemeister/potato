@@ -61,6 +61,17 @@ describe("cardProblem", () => {
     expect(cardProblem(wire(1, (c) => ((c.streaming as { providers: { offers: string[] }[] }).providers[0].offers = ["cinema"])))).toBeNull();
   });
 
+  test("an imdb kind it does not know passes, with an imdbId that is a string, null, or missing: the badge shows alone", () => {
+    expect(cardProblem(wire(1, (c) => (c.imdb = { kind: "pending", imdbId: "tt1" })))).toBeNull();
+    expect(cardProblem(wire(1, (c) => (c.imdb = { kind: "pending", imdbId: null })))).toBeNull();
+    expect(cardProblem(wire(1, (c) => (c.imdb = { kind: "pending" })))).toBeNull();
+  });
+
+  test("a streaming kind it does not know passes with only country and the JustWatch credit: nothing else is read", () => {
+    expect(cardProblem(wire(1, (c) => (c.streaming = { kind: "maybe", country: "US", attribution: JUSTWATCH_ATTRIBUTION })))).toBeNull();
+    expect(cardProblem(wire(1, (c) => ((c.streaming as Record<string, unknown>).kind = "maybe")))).toBeNull();
+  });
+
   const broken: [string, (c: Record<string, unknown>) => void][] = [
     ["a bad media type", (c) => (c.mediaType = "film")],
     ["a TMDB ID as a string", (c) => (c.tmdbId = "603")],
@@ -72,10 +83,12 @@ describe("cardProblem", () => {
     ["no imdb", (c) => delete c.imdb],
     ["a rated imdb missing its imdbId (issue 129's case)", (c) => delete (c.imdb as Record<string, unknown>).imdbId],
     ["a rated imdb with a string rating", (c) => ((c.imdb as Record<string, unknown>).rating = "7.1")],
-    ["an unknown imdb kind", (c) => (c.imdb = { kind: "pending", imdbId: null })],
+    ["an imdb kind that is not a string", (c) => ((c.imdb as Record<string, unknown>).kind = 3)],
+    ["an unknown imdb kind with a numeric imdbId", (c) => (c.imdb = { kind: "pending", imdbId: 7 })],
     ["no streaming", (c) => delete c.streaming],
     ["streaming without the JustWatch credit", (c) => delete (c.streaming as Record<string, unknown>).attribution],
-    ["an unknown streaming kind", (c) => ((c.streaming as Record<string, unknown>).kind = "maybe")],
+    ["no streaming kind", (c) => delete (c.streaming as Record<string, unknown>).kind],
+    ["an unknown streaming kind without the JustWatch credit", (c) => (c.streaming = { kind: "maybe", country: "US" })],
     ["providers not a list", (c) => ((c.streaming as Record<string, unknown>).providers = null)],
     ["a provider without streams", (c) => delete (c.streaming as { providers: Record<string, unknown>[] }).providers[0].streams],
   ];
@@ -121,9 +134,22 @@ describe("readDeckResponse", () => {
     expect(queue.cursor).toBe("n");
   });
 
-  test("a page of only bad cards is an empty page, not a failure: the cursor still moves on", () => {
-    const read = readDeckResponse(cardsBody([wire(1, (c) => delete c.imdb)], "n2"));
-    expect(read).toEqual({ kind: "page", page: { kind: "cards", cards: [], nextCursor: "n2" }, dropped: [{ index: 0, reason: expect.any(String) }] });
+  test("a page that came with cards and lost every one is a failed page, with the first reason", () => {
+    const read = readDeckResponse(cardsBody([wire(1, (c) => delete c.imdb), wire(2, (c) => (c.tmdbId = "2"))], "n2"));
+    expect(read).toEqual({ kind: "malformed", reason: expect.stringMatching(/^all 2 cards malformed \(first: imdb/) });
+  });
+
+  test("a page with one good card left is a page, not a failure", () => {
+    const read = readDeckResponse(cardsBody([wire(1, (c) => delete c.imdb), wire(2)], "n2"));
+    if (read.kind !== "page" || read.page.kind !== "cards") throw new Error("expected a cards page");
+    expect(read.page.cards.map((c) => c.tmdbId)).toEqual([2]);
+    expect(read.page.nextCursor).toBe("n2");
+    expect(read.dropped).toEqual([{ index: 0, reason: expect.any(String) }]);
+  });
+
+  test("a page the server sent empty stays an empty page: the cursor still moves on", () => {
+    expect(readDeckResponse(cardsBody([], "n2"))).toEqual({ kind: "page", page: { kind: "cards", cards: [], nextCursor: "n2" }, dropped: [] });
+    expect(readDeckResponse(cardsBody([], null))).toEqual({ kind: "page", page: { kind: "cards", cards: [], nextCursor: null }, dropped: [] });
   });
 
   test("locked and no_seeds pages come through as they are", () => {

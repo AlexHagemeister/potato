@@ -3,7 +3,7 @@
 // fails here, in one known place:
 // - A malformed card is dropped, with the reason, and the rest of the page goes on. One bad card must never stall
 //   the deck (issue 41): before this check, a card with a bad identity threw in the queue, the fetch failed, and
-//   every retry asked for the same page again.
+//   every retry asked for the same page again. A page whose every card was dropped reads as a failed page, below.
 // - A malformed envelope (not an object, no ok, an unknown page kind, a page without its cards) reads as a failed
 //   page, which the screen retries as it does any other.
 //
@@ -59,10 +59,13 @@ function imdbProblem(imdb: unknown): string | null {
     if (!isNum(imdb.rating) || !isNum(imdb.votes)) return "imdb rating or votes is not a number";
     return null;
   }
+  if (!isStr(imdb.kind)) return "imdb.kind is not a string";
   if (imdb.kind === "none" || imdb.kind === "unavailable") {
     return isStrOrNull(imdb.imdbId) ? null : "imdb.imdbId is not a string or null";
   }
-  return `unknown imdb.kind ${JSON.stringify(imdb.kind)}`;
+  // A kind this client does not know (a newer server may add one): the card shows the IMDb badge alone, with a link
+  // built from imdbId when there is one, so imdbId may be a string, null, or missing.
+  return imdb.imdbId === undefined || isStrOrNull(imdb.imdbId) ? null : "imdb.imdbId is not a string or null";
 }
 
 /** Why one streaming provider is malformed, or null (CardProvider). Offer names are not checked against a list. */
@@ -79,8 +82,10 @@ function streamingProblem(s: unknown): string | null {
   if (!isObj(s)) return "streaming is not an object";
   if (!isStr(s.country)) return "streaming.country is not a string";
   if (!isObj(s.attribution) || !isStr(s.attribution.text) || !isStr(s.attribution.url)) return "streaming.attribution is malformed";
-  if (s.kind === "unknown") return null;
-  if (s.kind !== "known") return `unknown streaming.kind ${JSON.stringify(s.kind)}`;
+  if (!isStr(s.kind)) return "streaming.kind is not a string";
+  // Only a known answer is read past this point. "unknown", or a kind this client does not know (a newer server may
+  // add one), shows the heading and the JustWatch credit alone.
+  if (s.kind !== "known") return null;
   if (!isBool(s.onMyServices) || !isStrOrNull(s.link)) return "streaming.onMyServices or link is malformed";
   if (!Array.isArray(s.providers)) return "streaming.providers is not a list";
   for (const p of s.providers) {
@@ -113,6 +118,12 @@ function readCards(page: Obj): DeckRead {
     if (reason) dropped.push({ index, reason });
     else cards.push(card as DeckPageCard);
   });
+  // A page that came with cards and lost all of them is a failure, not an empty page: an empty page counts toward
+  // "Still looking", and the deck would ask for the next page with nothing to show for this one. A truly empty page
+  // (no cards sent) stays an empty page.
+  if (page.cards.length > 0 && cards.length === 0) {
+    return { kind: "malformed", reason: `all ${dropped.length} cards malformed (first: ${dropped[0].reason})` };
+  }
   return { kind: "page", page: { kind: "cards", cards, nextCursor }, dropped };
 }
 
