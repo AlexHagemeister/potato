@@ -2,7 +2,7 @@
 // (issues 93 and 110). Not a server module: it lives in the browser, for as long as the page does.
 
 import { sameFilterChoice, type FilterChoice } from "@/core/filters";
-import type { TitleRecord } from "@/core/library/types";
+import type { ActionOutcome, TitleRecord } from "@/core/library/types";
 import { applyTitleRecord, type ListRow } from "@/core/lists";
 import { formatTitleKey } from "@/core/title-id";
 import { LIST_STATUSES, type ListStatus, type TitleId } from "@/core/types";
@@ -63,7 +63,10 @@ export function clearListsStale() {
 /** Whether this server render was shown already, so Back restoring it shows the rows kept here. */
 export const wasShown = (renderId: string) => shownRenders.has(renderId);
 
-/** Notes a fresh render as shown, and starts the rows over from it. */
+/**
+ * Notes a fresh render as shown, and starts the rows over from it, with the Lists saves it may be older than
+ * (withSaves).
+ */
 export function seedShown(renderId: string, from: Shown) {
   if (shownNow && shownNow.userId !== from.userId) {
     shownRenders.clear();
@@ -71,8 +74,117 @@ export function seedShown(renderId: string, from: Shown) {
   }
   shownRenders.add(renderId);
   while (shownRenders.size > MAX_SHOWN_RENDERS) shownRenders.delete(shownRenders.values().next().value as string);
-  setShown(from);
+  forgetSaves(from);
+  setShown({ ...from, lists: withSaves(from.userId, from.lists) });
 }
+
+/*
+ * The Lists screen's own saves (issues 137 and 98). A fresh server render of Lists (the Lists tab, a refresh, Back
+ * after a card's refresh) can have read the lists before one of them reached the server, or before it answered. Its
+ * rows would then show the title where it was before the save, until a reload, while the server holds the save. So
+ * the rows of a fresh render take the saves it may be older than:
+ *
+ * - A save still under way: the change the screen shows before it answers (only + Watchlist moves at once).
+ * - A save that answered: its outcome, but only while the render shows the title exactly as the save found it
+ *   (`previous`). That is proof the render read before the save. A render that shows the title any other way read
+ *   after it, or the title has changed since, and keeps its own row. An answered save is kept only for
+ *   SAVE_REPLAY_MS: a render read before it arrives well within that.
+ *
+ * Saves replay in the order they answered, which is the order the server took them, so a move and its Undo come back
+ * as the Undo left them.
+ */
+type Save = {
+  userId: string;
+  ref: TitleId;
+  /** While under way: how the screen shows it before the save answers. */
+  show?: (lists: Lists) => Lists;
+  /** Once answered: what the save did, and when it answered (Date.now()). */
+  done?: { outcome: ActionOutcome; at: number };
+};
+/** Under way, in the order they started. */
+const savesUnderWay: Save[] = [];
+/** Answered, in the order they answered. */
+const savesAnswered: Save[] = [];
+/** How long an answered save can still be replayed over a fresh render. */
+export const SAVE_REPLAY_MS = 60_000;
+const MAX_SAVES_ANSWERED = 50;
+/** Every Lists save started, from any mount, so a reload can tell one started during its read (lists-screen). */
+let savesStarted = 0;
+export const savesStartedCount = () => savesStarted;
+
+/** A Lists save is starting. `show`, if given, is how the screen shows it before it answers. */
+export function startSave(userId: string, ref: TitleId, show?: (lists: Lists) => Lists): Save {
+  savesStarted++;
+  const save: Save = { userId, ref, show };
+  savesUnderWay.push(save);
+  return save;
+}
+
+/** The save answered: with what it did, or null when it failed (nothing changed on the server). */
+export function finishSave(save: Save, outcome: ActionOutcome | null) {
+  const i = savesUnderWay.indexOf(save);
+  if (i !== -1) savesUnderWay.splice(i, 1);
+  if (!outcome) return;
+  save.done = { outcome, at: Date.now() };
+  savesAnswered.push(save);
+  if (savesAnswered.length > MAX_SAVES_ANSWERED) savesAnswered.shift();
+}
+
+/**
+ * Drops answered saves too old to replay, and another user's. A save a render read after stays: replaying the saves
+ * in order over such a render ends where the server is, and dropping one alone could break that chain (a move kept
+ * and its Undo dropped would replay the move).
+ */
+function forgetSaves(from: Shown) {
+  const now = Date.now();
+  for (let i = savesAnswered.length - 1; i >= 0; i--) {
+    const { userId, done } = savesAnswered[i];
+    if (userId !== from.userId || now - done!.at > SAVE_REPLAY_MS) savesAnswered.splice(i, 1);
+  }
+  for (let i = savesUnderWay.length - 1; i >= 0; i--) if (savesUnderWay[i].userId !== from.userId) savesUnderWay.splice(i, 1);
+}
+
+/**
+ * A fresh render's rows, with the Lists saves it may be older than. The screen shows this for a render before it
+ * seeds the rows, so the first paint is already right.
+ */
+export function withSaves(userId: string, lists: Lists): Lists {
+  const now = Date.now();
+  let out = lists;
+  for (const { userId: owner, ref, done } of savesAnswered) {
+    if (owner !== userId || now - done!.at > SAVE_REPLAY_MS) continue;
+    const row = rowOf(out, formatTitleKey(ref));
+    if (row && sameRow(row, done!.outcome.previous)) out = applyTitleRecord(out, ref, done!.outcome.current, row);
+  }
+  for (const { userId: owner, show } of savesUnderWay) if (owner === userId && show) out = show(out);
+  return out;
+}
+
+/** Whether the row shows the title exactly as `record` has it. */
+function sameRow(row: ListRow, record: TitleRecord | null): boolean {
+  return (
+    record !== null &&
+    row.status === record.status &&
+    row.rating === record.rating &&
+    (row.review ?? null) === (record.review ?? null) &&
+    new Date(row.updatedAt).getTime() === new Date(record.updatedAt).getTime()
+  );
+}
+
+/*
+ * The Lists screen on screen now, if any, by its reload (issue 98). A reload asked for by a screen already left (a
+ * save that came back stale after Back) goes to the screen up now instead: that screen knows its Show more pages and
+ * its own saves, which the left one's read would overwrite.
+ */
+let liveReload: (() => void) | null = null;
+/** Registers the reload of the Lists screen now on screen. Returns its unregister. */
+export function setLiveReload(reload: () => void) {
+  liveReload = reload;
+  return () => {
+    if (liveReload === reload) liveReload = null;
+  };
+}
+export const getLiveReload = () => liveReload;
 const shownListeners = new Set<() => void>();
 
 export function subscribeShown(listener: () => void) {

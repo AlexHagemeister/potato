@@ -22,15 +22,21 @@ import { RatingSheet } from "../_components/rating-sheet";
 import { Stars } from "../_components/stars";
 import { Screen, ScreenTitle } from "../_shell/screen";
 import {
+  finishSave,
+  getLiveReload,
   getServerShown,
   getShown,
+  savesStartedCount,
   seedShown,
+  setLiveReload,
   setShown,
   clearListsStale,
   listsStale,
+  startSave,
   subscribeShown,
   updateLists,
   wasShown,
+  withSaves,
   type ListState,
   type Lists,
   type Shown,
@@ -228,7 +234,9 @@ export function ListsScreen({
   );
   const stored = useSyncExternalStore(subscribeShown, getShown, getServerShown);
   const restored = stored !== null && stored.userId === userId && wasShown(renderId);
-  const shown = restored ? stored : fromRender;
+  // A fresh render shows, from its first paint, the Lists saves its server read may be older than (shown.ts).
+  const fresh = useMemo<Shown>(() => ({ ...fromRender, lists: withSaves(userId, fromRender.lists) }), [fromRender, userId]);
+  const shown = restored ? stored : fresh;
   useEffect(() => {
     if (wasShown(renderId) && getShown()?.userId === userId) return;
     seedShown(renderId, fromRender);
@@ -267,9 +275,8 @@ export function ListsScreen({
   const [refill, setRefill] = useState<Refill | null>(null);
   // Counts list loads, so a slower, older load never overwrites a newer one,
   // or the server data a navigation brought in meanwhile. `restarts` counts the times the screen starts over.
+  // (Writes are counted in shown.ts, across mounts, so a reload that read before one of them can tell.)
   const loadSeq = useRef(0);
-  // Counts this screen's writes, so a reload that read before one of them can tell (reload).
-  const writeSeq = useRef(0);
   const [restarts, setRestarts] = useState(0);
   useEffect(() => {
     loadSeq.current++;
@@ -432,13 +439,17 @@ export function ListsScreen({
     // A write still under way would land after this read, and the read's rows would undo it on screen.
     await writesSettled();
     const here = mounted.current;
+    // This screen was left, and a newer Lists screen is up: it reloads instead (issue 98). Its Show more pages and
+    // its own saves are its to keep, and this one's read would overwrite them.
+    const live = here ? null : getLiveReload();
+    if (live) return live();
     // A filter load under way brings fresh lists if it succeeds. If it fails, it runs this reload then.
     if (here && filteringRef.current) {
       reloadWanted.current = true;
       return;
     }
     const seq = ++loadSeq.current;
-    const writesAt = writeSeq.current;
+    const writesAt = savesStartedCount();
     // On screen: the latest filters, not this closure's, since a write can come back stale after the filters
     // changed. After leaving (a stale save that settled late): the filters of the rows kept for Back.
     const using = here ? filtersRef.current : getShown()?.filters;
@@ -446,9 +457,12 @@ export function ListsScreen({
     if (!using) return;
     const result = await call(() => loadListsAction(using), FILTER_FAILED);
     if (seq !== loadSeq.current || !result.ok) return;
-    // A write made on this screen while the load ran may have landed after the load read: its rows would undo the
-    // write until it lands. Read again instead, once the write has answered (writesSettled).
-    if (writeSeq.current !== writesAt) return void reload();
+    // A write made while the load ran (on this screen or a newer one) may have landed after the load read: its rows
+    // would undo the write until it lands. Read again instead, once the write has answered (writesSettled).
+    if (savesStartedCount() !== writesAt) return void reload();
+    // This screen was left during the read, and a newer Lists screen is up: it reloads instead, as above.
+    const liveNow = mounted.current ? null : getLiveReload();
+    if (liveNow) return liveNow();
     // The rows kept for Back can have moved on meanwhile (a fresh render, a filter load). Only rows for the same
     // user and filters land.
     const now = getShown();
@@ -465,6 +479,13 @@ export function ListsScreen({
     // Rows past the first page are fetched again only on screen. After leaving, Back shows the first pages.
     if (mounted.current) setRefill(Object.keys(jobs).length > 0 ? { filters: using, jobs } : null);
   }
+
+  // This screen is the one on screen: a reload asked for by a screen already left comes here (shown.ts).
+  const reloadRef = useRef(reload);
+  useEffect(() => {
+    reloadRef.current = reload;
+  });
+  useEffect(() => setLiveReload(() => void reloadRef.current()), []);
 
   // A title card's change these rows couldn't take settled while another screen showed (shown.ts, markListsStale).
   useEffect(() => {
@@ -535,16 +556,22 @@ export function ListsScreen({
   }
 
   /**
-   * A write to one title. It counts in writeSeq, so a reload already under way knows its read may be older than this
-   * write, and in writesInFlight, so a reload waits for it before reading. It tells any "You might also like" row
-   * kept for Back to read again (library-changes).
+   * A write to one title. It is noted in shown.ts (startSave): a reload already under way then knows its read may be
+   * older than this write, and a fresh render of Lists takes it (`show` while it is under way, its outcome once it
+   * answers). It counts in writesInFlight, so a reload waits for it before reading. It tells any "You might also
+   * like" row kept for Back to read again (library-changes).
    */
-  async function write<T>(ref: TitleId, action: () => Promise<ActionResult<T>>): Promise<ActionResult<T>> {
-    writeSeq.current++;
+  async function write(
+    ref: TitleId,
+    action: () => Promise<ActionResult<ActionOutcome>>,
+    show?: (lists: Lists) => Lists,
+  ): Promise<ActionResult<ActionOutcome>> {
+    const save = startSave(userId, ref, show);
     const pending = call(action);
     writesInFlight.add(pending);
     const result = await pending;
     writesInFlight.delete(pending);
+    finishSave(save, result.ok ? result.value : null);
     noteTitleChange(ref);
     return result;
   }
@@ -609,10 +636,16 @@ export function ListsScreen({
     const index = lists.passed.rows.findIndex((r) => keyOf(r) === key);
     const next = index >= 0 ? lists.passed.rows[index + 1] : undefined;
     const putBack = (prev: Lists) => insertAt(without(prev, "watchlist", key), "passed", row, index);
-    // Moves on tap, with the row's button disabled until the move saves. A failure puts the row back.
+    // Moves on tap, with the row's button disabled until the move saves. A failure puts the row back. A fresh render
+    // that arrives before the save answers shows the move too (write's `show`, issue 137), but only when it shows the
+    // title on Passed: one that doesn't read after the save, or has filters the title doesn't fit.
+    const move = (prev: Lists) =>
+      prev.passed.rows.some((r) => keyOf(r) === key)
+        ? insertAt(without(prev, "passed", key), "watchlist", { ...row, status: "watchlist" }, 0)
+        : prev;
     setRowPending(key, true);
-    updateLists((prev) => insertAt(without(prev, "passed", key), "watchlist", { ...row, status: "watchlist" }, 0));
-    const result = await write(ref, () => addToWatchlistAction(ref));
+    updateLists(move);
+    const result = await write(ref, () => addToWatchlistAction(ref), move);
     setRowPending(key, false);
     if (!result.ok) {
       updateLists(putBack);
