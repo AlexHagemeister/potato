@@ -381,6 +381,62 @@ try {
     console.log(`        (${refused} of 30 deck Passes landed after the Watchlist write and were refused)`);
   });
 
+  /**
+   * Another device's write, held open: one statement that changes the row at once and commits `seconds` later, so
+   * its row lock is held meanwhile. A statement that starts in between sees the old row in its snapshot, waits on
+   * the lock, and is then checked against the new row. (The HTTP driver has no transactions to hold a lock with.)
+   * It is async so the statement is sent at the call: a Drizzle query on its own waits for its first `await`.
+   */
+  const heldMove = async (ref: TitleId, to: "passed" | "watchlist", seconds: number) =>
+    await db.execute(sql`
+      update title_status set status = ${to}, updated_at = ${tick().toISOString()}
+      where user_id = ${A} and media_type = ${ref.mediaType} and tmdb_id = ${ref.tmdbId}
+      returning ${sql.raw(`pg_sleep(${seconds})`)}`);
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  await check("a refused deck tap names the list the title is on now, not the one its statement first saw (issue 100)", async () => {
+    // The title is on one list. Another device's move to the other list is on its way when the phone's deck Skip
+    // starts: the Skip sees the first list in its snapshot, waits, and is refused against the moved row.
+    for (const [from, to] of [["watchlist", "passed"], ["passed", "watchlist"]] as const) {
+      const ref = fresh();
+      unwrap(await sorts[from === "passed" ? "pass" : "watchlist"](ref, {}));
+      const held = heldMove(ref, to, 1.5);
+      await pause(500);
+      const tap = await sorts.skip(ref, DECK);
+      await held;
+      assert.equal((await state(A, ref))?.status, to, `${from} to ${to}: the move landed and the tap changed nothing`);
+      assert.deepEqual(tap, { ok: false, error: { code: "wrong_state", status: to, expected: [] } }, `${from} to ${to}`);
+    }
+  });
+
+  await check("a refused deck tap on a title removed right after says not_found or the list it left, never an older list (issue 100)", async () => {
+    // As above, and a third write removes the title as soon as the move lands. The tap is refused against the Passed
+    // row, and by the time it reads where the title is, the row is usually gone. If the removal wins the lock
+    // first instead, the tap finds no row and sorts the title.
+    const ref = fresh();
+    unwrap(await sorts.watchlist(ref, {}));
+    const held = heldMove(ref, "passed", 1.5);
+    await pause(400);
+    const tapping = sorts.pass(ref, DECK);
+    await pause(400);
+    const [tap, removed] = await Promise.all([tapping, lib.removeTitle(A, ref), held]);
+    assert.equal(removed.ok, true);
+    const row = await state(A, ref);
+    if (tap.ok) {
+      assert.deepEqual(row, tap.value.current, "the removal went first, so the tap sorted a title on no list");
+      console.log("        (the removal won the lock first: the tap sorted the title)");
+    } else {
+      assert.equal(row, null, "the tap changed nothing and the removal landed");
+      const gone = { code: "not_found" };
+      const passed = { code: "wrong_state", status: "passed", expected: [] };
+      assert.ok(
+        [gone, passed].some((e) => JSON.stringify(e) === JSON.stringify(tap.error)),
+        `expected not_found or wrong_state/passed, got ${JSON.stringify(tap.error)}`,
+      );
+      console.log(`        (the tap was refused with ${tap.error.code})`);
+    }
+  });
+
   await check("Seen it ignores shownOnNoList: it still moves a title off another list, and still refuses a Seen one", async () => {
     for (const on of ["watchlist", "passed", "skipped"] as const) {
       const ref = await sortedElsewhere(on);
@@ -920,6 +976,101 @@ try {
     assert.deepEqual(await state(A, ref), before);
   });
 
+  /** Each bad date, put in place of each date of a real undo, is invalid_snapshot and changes nothing. `stored` is the real date. */
+  async function restoreRefusesDates(bad: [string, (stored: string) => unknown][]) {
+    // A Watchlist row that a Pass replaced: undo would write `previous` back.
+    const ref = fresh();
+    unwrap(await lib.watchlistTitle(A, ref));
+    const act = JSON.parse(JSON.stringify(unwrap(await lib.passTitle(A, ref))));
+    const before = await state(A, ref);
+    // A Skip that a Pass replaced: its skipUntil is checked too.
+    const skipRef = fresh();
+    unwrap(await lib.skipTitle(A, skipRef));
+    const skipAct = JSON.parse(JSON.stringify(unwrap(await lib.passTitle(A, skipRef))));
+    const skipBefore = await state(A, skipRef);
+    const refusal = (r: Awaited<ReturnType<typeof lib.restoreTitleState>>) => (r.ok ? "ok" : r.error.code);
+    for (const [name, make] of bad) {
+      for (const side of ["previous", "current"] as const) {
+        for (const field of ["createdAt", "updatedAt"] as const) {
+          const forged = { ...act, [side]: { ...act[side], [field]: make(act[side][field]) } };
+          assert.equal(refusal(await lib.restoreTitleState(A, ref, forged)), "invalid_snapshot", `${side}.${field} ${name}`);
+          assert.deepEqual(await state(A, ref), before, `${side}.${field} ${name}: nothing changed`);
+        }
+      }
+      // A week ahead is refused for createdAt and updatedAt, which the server's clock stamps. A skipUntil may be that far.
+      if (name === "a week ahead of the clock") continue;
+      const forged = { ...skipAct, previous: { ...skipAct.previous, skipUntil: make(skipAct.previous.skipUntil) } };
+      assert.equal(refusal(await lib.restoreTitleState(A, skipRef, forged)), "invalid_snapshot", `previous.skipUntil ${name}`);
+      assert.deepEqual(await state(A, skipRef), skipBefore, `previous.skipUntil ${name}: nothing changed`);
+    }
+    // The undo values the actions returned still work, and put both rows back exactly.
+    unwrap(await lib.restoreTitleState(A, ref, act));
+    assert.deepEqual(JSON.parse(JSON.stringify(await state(A, ref))), act.previous);
+    unwrap(await lib.restoreTitleState(A, skipRef, skipAct));
+    assert.deepEqual(JSON.parse(JSON.stringify(await state(A, skipRef))), skipAct.previous);
+  }
+
+  await check("restore refuses a date outside its bounds, changing nothing (issue 22)", () =>
+    restoreRefusesDates([
+      ["far in the future", () => "3000-01-01T00:00:00.000Z"],
+      ["a week ahead of the clock", () => new Date(Date.now() + 7 * 86_400_000).toISOString()],
+      ["two years ahead of the clock", () => new Date(Date.now() + 730 * 86_400_000).toISOString()],
+      ["before Potato existed", () => "2025-12-31T23:59:59.999Z"],
+      ["the year 0001", () => "0001-01-01T00:00:00.000Z"],
+      ["a Date past the year 9999", () => new Date(8.64e15)],
+    ]),
+  );
+
+  await check("restore refuses a date string with no offset, or not in ISO form, changing nothing (issue 27)", () =>
+    restoreRefusesDates([
+      ["no offset", (stored) => stored.replace(/Z$/, "")],
+      ["a date with no time", (stored) => stored.slice(0, 10)],
+      ["a space for the T", (stored) => stored.replace("T", " ")],
+    ]),
+  );
+
+  await check("restore takes each date form an outcome can arrive in and puts a Seen row back exactly", async () => {
+    /** The same instant written with a +05:30 offset. */
+    const shiftOffset = (value: unknown): unknown => {
+      if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T.*Z$/.test(value)) return value;
+      return new Date(new Date(value).getTime() + 330 * 60_000).toISOString().replace(/Z$/, "+05:30");
+    };
+    const forms: [string, (outcome: { previous: TitleRecord | null; current: TitleRecord | null }) => unknown][] = [
+      ["Date objects (a server action)", (o) => o],
+      ["toJSON strings (a JSON response)", (o) => JSON.parse(JSON.stringify(o))],
+      ["strings with a +00:00 offset", (o) => JSON.parse(JSON.stringify(o).replace(/(\.\d{3})Z"/g, '$1+00:00"'))],
+      ["strings with another offset", (o) => JSON.parse(JSON.stringify(o), (_key, value) => shiftOffset(value))],
+    ];
+    for (const [name, form] of forms) {
+      for (const clock of ["fixed", "real"] as const) {
+        const at = () => (clock === "fixed" ? { now: tick() } : {});
+        const ref = fresh();
+        unwrap(await lib.watchlistTitle(A, ref, at()));
+        unwrap(await lib.moveTitle(A, ref, { from: "watchlist", to: "seen", rating: 8.5, review: "  Kept as typed. " }, at()));
+        const seen = await state(A, ref);
+        const edit = unwrap(await lib.updateRatingReview(A, ref, { rating: 2, review: null }, { rating: 8.5, review: "  Kept as typed. " }, at()));
+        assert.deepEqual(edit.previous, seen);
+        const undone = await lib.restoreTitleState(A, ref, form(edit) as never);
+        assert.equal(undone.ok, true, `${name}, ${clock} clock: ${JSON.stringify(undone)}`);
+        assert.deepEqual(await state(A, ref), seen, `${name}, ${clock} clock: rating, review, and both dates are back exactly`);
+      }
+    }
+  });
+
+  await check("the database writes every date in a returned row with an explicit offset (issue 27)", async () => {
+    // rows.ts reads these strings with new Date, which is only safe while each carries its offset.
+    const ref = fresh();
+    unwrap(await lib.skipTitle(A, ref, { now: tick() }));
+    const res = await db.execute(
+      sql`select row_to_json(t) as row from title_status t where user_id = ${A} and media_type = ${ref.mediaType} and tmdb_id = ${ref.tmdbId}`,
+    );
+    const raw = (res.rows[0] as { row: unknown }).row;
+    const row = (typeof raw === "string" ? JSON.parse(raw) : raw) as Record<string, unknown>;
+    for (const column of ["created_at", "updated_at", "skip_until"]) {
+      assert.match(String(row[column]), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/, column);
+    }
+  });
+
   console.log("Stale undo (compare-and-set)");
 
   await check("undo works with the default clock (no now passed), as the app will call it", async () => {
@@ -942,8 +1093,14 @@ try {
     unwrap(await lib.updateRatingReview(A, ref, { rating: 5, review: "Rewatched." }, { rating: 4 }, { now: tick() })); // elsewhere
     const after = await state(A, ref);
     const r = await lib.restoreTitleState(A, ref, JSON.parse(JSON.stringify(seen)));
-    assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "seen", expected: ["seen"] } });
+    // Still Seen, changed since: stale_value, not a wrong_state that names Seen as both where it is and what was expected (issue 94).
+    assert.deepEqual(r, { ok: false, error: { code: "stale_value", status: "seen" } });
     assert.deepEqual(await state(A, ref), after, "the later rating and review survive");
+    // The same when later edits put the old rating and review back: the row is still a newer one.
+    unwrap(await lib.updateRatingReview(A, ref, { rating: 4, review: null }, { rating: 5, review: "Rewatched." }, { now: tick() }));
+    const sameValues = await state(A, ref);
+    assert.deepEqual(await lib.restoreTitleState(A, ref, seen), { ok: false, error: { code: "stale_value", status: "seen" } });
+    assert.deepEqual(await state(A, ref), sameValues);
   });
 
   await check("a stale undo of a first action refuses to delete a row edited since", async () => {
@@ -952,7 +1109,7 @@ try {
     unwrap(await lib.updateRatingReview(A, ref, { review: "Added later." }, { rating: 3 }, { now: tick() }));
     const after = await state(A, ref);
     const r = await lib.restoreTitleState(A, ref, first);
-    assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "seen", expected: ["seen"] } });
+    assert.deepEqual(r, { ok: false, error: { code: "stale_value", status: "seen" } });
     assert.deepEqual(await state(A, ref), after);
   });
 
@@ -965,6 +1122,30 @@ try {
     const r = await lib.restoreTitleState(A, ref, toWatchlist);
     assert.deepEqual(r, { ok: false, error: { code: "wrong_state", status: "skipped", expected: ["watchlist"] } });
     assert.deepEqual(await state(A, ref), after);
+  });
+
+  await check("a stale undo is wrong_state, not stale_value, unless the row was Seen then and is Seen now", async () => {
+    // The undo's row was Seen, and the title has left Seen since.
+    const left = fresh();
+    const seen = unwrap(await lib.markSeen(A, left, { rating: 4, review: "Once." }, { now: tick() }));
+    unwrap(await lib.removeRatingReview(A, left, { rating: 4, review: "Once." }));
+    unwrap(await lib.watchlistTitle(A, left, { now: tick() }));
+    const leftAfter = await state(A, left);
+    assert.deepEqual(await lib.restoreTitleState(A, left, seen), {
+      ok: false,
+      error: { code: "wrong_state", status: "watchlist", expected: ["seen"] },
+    });
+    assert.deepEqual(await state(A, left), leftAfter);
+    // The undo's row was on the Watchlist, and the title is Seen now.
+    const became = fresh();
+    const listed = unwrap(await lib.watchlistTitle(A, became, { now: tick() }));
+    unwrap(await lib.markSeen(A, became, { rating: 5, review: "Later." }, { now: tick() }));
+    const becameAfter = await state(A, became);
+    assert.deepEqual(await lib.restoreTitleState(A, became, listed), {
+      ok: false,
+      error: { code: "wrong_state", status: "seen", expected: ["watchlist"] },
+    });
+    assert.deepEqual(await state(A, became), becameAfter, "the rating and review written since survive");
   });
 
   await check("a stale undo of a removal refuses to overwrite a row added back since", async () => {

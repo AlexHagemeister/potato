@@ -26,6 +26,9 @@ export function recordFromJson(json: unknown): TitleRecord | null {
   if (json === null || json === undefined) return null;
   // The neon driver parses json columns, but accept text too in case a driver change stops that.
   const r = (typeof json === "string" ? JSON.parse(json) : json) as Record<string, unknown>;
+  // Every date column is timestamptz, which row_to_json writes with an explicit offset ("+00:00"), so new Date
+  // reads the one moment it names. This is not checked here: the statement has already committed, and refusing
+  // its row would report a write that landed as a failure. The database suite checks the form instead (issue 27).
   const date = (v: unknown) => new Date(v as string);
   return {
     mediaType: r.media_type as TitleRecord["mediaType"],
