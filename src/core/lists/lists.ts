@@ -89,11 +89,13 @@ export function createTitleInfoLookup(
     const base: TitleInfo[] = [...found.values()];
     // The two reads are independent (one sets providerIds, the other imdb), so they run at once. Either failing
     // fails the lookup, as before.
+    // Built before either read starts, so a throw here can't leave the other read's promise unwatched.
+    const ratingsInput = context.imdbRatings
+      ? { store: ratings(), ids: new Map(base.map((i) => [formatTitleKey(i), i.imdbId])) }
+      : null;
     const [withProviders, withRatings] = await Promise.all([
       context.country ? tmdb.attachProviderIds(base, context.country) : base,
-      context.imdbRatings
-        ? attachImdbRatings(ratings(), base, new Map(base.map((i) => [formatTitleKey(i), i.imdbId])), getRatingsForFilter)
-        : null,
+      ratingsInput ? attachImdbRatings(ratingsInput.store, base, ratingsInput.ids, getRatingsForFilter) : null,
     ]);
     const infos = withProviders.map((info, i): TitleInfo => {
       if (!withRatings) return info;
