@@ -3,7 +3,7 @@ import { fail, ok, type Result } from "../result";
 import { TMDB_MAX_PAGE } from "../tmdb/constants";
 import type { ResultPage, TitleSummary } from "../tmdb/types";
 import type { MediaType, UserTitleState } from "../types";
-import { SEARCH_QUERY_MAX_LENGTH } from "./constants";
+import { SEARCH_PAGES_PER_REQUEST, SEARCH_QUERY_MAX_LENGTH } from "./constants";
 import { createSearchService } from "./service";
 import type { SearchPage } from "./types";
 
@@ -28,9 +28,13 @@ function summary(mediaType: MediaType, tmdbId: number, overrides: Partial<TitleS
 
 interface Fake {
   page?: ResultPage<TitleSummary>;
+  /** TMDB's answer by page number, for tests that read more than one page. Wins over `page`. */
+  pages?: Record<number, ResultPage<TitleSummary>>;
   states?: UserTitleState[];
   statesResult?: Result<UserTitleState[]>;
   tmdbThrows?: boolean;
+  /** Throw on this page only. */
+  tmdbThrowsOn?: number;
 }
 
 function fakeService(fake: Fake = {}) {
@@ -40,7 +44,8 @@ function fakeService(fake: Fake = {}) {
     tmdb: {
       async searchTitles(query, page = 1) {
         calls.tmdb.push([query, page]);
-        if (fake.tmdbThrows) throw new Error("TMDB 503 for /search/multi");
+        if (fake.tmdbThrows || fake.tmdbThrowsOn === page) throw new Error("TMDB 503 for /search/multi");
+        if (fake.pages) return fake.pages[page] ?? { results: [], page, totalPages: 0 };
         return fake.page ?? { results: [], page, totalPages: 0 };
       },
     },
@@ -137,6 +142,89 @@ describe("searchTitles: results", () => {
     const r = await service.searchTitles(USER, "   ");
     expect(r).toEqual(ok({ query: "", results: [], page: 1, totalPages: 0 }));
     expect(calls).toEqual({ tmdb: [], states: [] });
+  });
+});
+
+/** A TMDB page that held only people: nothing survives the module's filter. */
+function peoplePage(page: number, total: number): ResultPage<TitleSummary> {
+  return { results: [], page, totalPages: total };
+}
+
+function titlesPage(page: number, total: number, ...ids: number[]): ResultPage<TitleSummary> {
+  return { results: ids.map((id) => summary("movie", id)), page, totalPages: total };
+}
+
+describe("searchTitles: pages with no titles (#46)", () => {
+  test("a first page of only people reads on to the page with titles", async () => {
+    const { service, calls } = fakeService({ pages: { 1: peoplePage(1, 5), 2: titlesPage(2, 5, 7, 8), 3: titlesPage(3, 5, 9) } });
+    const r = await service.searchTitles(USER, "kevin white");
+    expect(r.ok && r.value).toMatchObject({ page: 2, totalPages: 5, results: [{ tmdbId: 7 }, { tmdbId: 8 }] });
+    expect(calls.tmdb).toEqual([
+      ["kevin white", 1],
+      ["kevin white", 2],
+    ]);
+    expect(calls.states).toEqual([USER]);
+  });
+
+  test("a page with titles asks TMDB once", async () => {
+    const { service, calls } = fakeService({ pages: { 1: titlesPage(1, 5, 1), 2: titlesPage(2, 5, 2) } });
+    await service.searchTitles(USER, "dune");
+    expect(calls.tmdb).toEqual([["dune", 1]]);
+  });
+
+  test("reads at most the cap, then returns no results with the last page read and TMDB's page count", async () => {
+    const pages: Record<number, ResultPage<TitleSummary>> = {};
+    for (let n = 1; n <= 10; n++) pages[n] = peoplePage(n, 10);
+    const { service, calls } = fakeService({ pages });
+    const r = await service.searchTitles(USER, "maria garcia");
+    expect(r.ok && r.value).toEqual({ query: "maria garcia", results: [], page: SEARCH_PAGES_PER_REQUEST, totalPages: 10 });
+    expect(calls.tmdb).toHaveLength(SEARCH_PAGES_PER_REQUEST);
+    // The next request (Show more) starts after the last page read and reads on from there.
+    const next = await service.searchTitles(USER, "maria garcia", SEARCH_PAGES_PER_REQUEST + 1);
+    expect(next.ok && next.value.page).toBe(Math.min(10, 2 * SEARCH_PAGES_PER_REQUEST));
+  });
+
+  test("stops at TMDB's last page: no results there means no matches", async () => {
+    const { service, calls } = fakeService({ pages: { 1: peoplePage(1, 2), 2: peoplePage(2, 2), 3: titlesPage(3, 2, 1) } });
+    const r = await service.searchTitles(USER, "brian moore");
+    expect(r.ok && r.value).toEqual({ query: "brian moore", results: [], page: 2, totalPages: 2 });
+    expect(calls.tmdb).toEqual([
+      ["brian moore", 1],
+      ["brian moore", 2],
+    ]);
+  });
+
+  test("nothing matched at all asks TMDB once", async () => {
+    const { service, calls } = fakeService({ pages: {} });
+    const r = await service.searchTitles(USER, "zzqx");
+    expect(r.ok && r.value).toEqual({ query: "zzqx", results: [], page: 1, totalPages: 0 });
+    expect(calls.tmdb).toHaveLength(1);
+  });
+
+  test("a later starting page (Show more) reads on too", async () => {
+    const { service, calls } = fakeService({ pages: { 4: peoplePage(4, 9), 5: titlesPage(5, 9, 3) } });
+    const r = await service.searchTitles(USER, "steve jones", 4);
+    expect(r.ok && r.value).toMatchObject({ page: 5, totalPages: 9, results: [{ tmdbId: 3 }] });
+    expect(calls.tmdb).toEqual([
+      ["steve jones", 4],
+      ["steve jones", 5],
+    ]);
+  });
+
+  test("a page past TMDB's count asks once and reads no further", async () => {
+    const { service, calls } = fakeService({ pages: { 7: peoplePage(7, 3) } });
+    const r = await service.searchTitles(USER, "x", 7);
+    expect(r.ok && r.value).toMatchObject({ results: [], page: 7, totalPages: 3 });
+    expect(calls.tmdb).toHaveLength(1);
+  });
+
+  test("a TMDB failure while reading on throws, and no further page is asked", async () => {
+    const { service, calls } = fakeService({ pages: { 1: peoplePage(1, 5), 3: titlesPage(3, 5, 1) }, tmdbThrowsOn: 2 });
+    await expect(service.searchTitles(USER, "x")).rejects.toThrow("TMDB 503");
+    expect(calls.tmdb).toEqual([
+      ["x", 1],
+      ["x", 2],
+    ]);
   });
 });
 

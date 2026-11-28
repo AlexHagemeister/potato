@@ -84,6 +84,19 @@ function Message({ title, children, action }: { title: string; children?: ReactN
   );
 }
 
+function MoreButton({ more, label, onClick }: { more: Results["more"]; label: string; onClick: () => Promise<void> }) {
+  return (
+    <button
+      type="button"
+      onClick={() => void onClick()}
+      disabled={more === "loading"}
+      className="rounded-full bg-surface-raised px-6 py-3 font-medium disabled:opacity-50"
+    >
+      {more === "loading" ? "Loading…" : more === "error" ? "Couldn't load more. Try again" : label}
+    </button>
+  );
+}
+
 function RowsSkeleton() {
   return (
     <ul aria-label="Loading" aria-busy="true" className="animate-pulse">
@@ -282,8 +295,14 @@ export function SearchScreen({ initialQuery }: { initialQuery: string }) {
           The movie database didn&apos;t answer.
         </Message>
       )}
-      {view.kind === "results" && view.results.length === 0 && (
+      {view.kind === "results" && view.results.length === 0 && view.page.page >= view.page.totalPages && (
         <Message title="No matches">Nothing found for &ldquo;{view.page.query}&rdquo;. Check the spelling, or try fewer words.</Message>
+      )}
+      {/* TMDB pages can hold only people (dropped), and core reads only a few pages per request (#46): later pages may still hold titles. */}
+      {view.kind === "results" && view.results.length === 0 && view.page.page < view.page.totalPages && (
+        <Message title="No movies or series yet" action={!view.stale && <MoreButton more={view.more} label="Keep looking" onClick={loadMore} />}>
+          The first results for &ldquo;{view.page.query}&rdquo; are all people.
+        </Message>
       )}
       {view.kind === "results" && view.results.length > 0 && (
         <>
@@ -294,14 +313,7 @@ export function SearchScreen({ initialQuery }: { initialQuery: string }) {
           </ul>
           {!view.stale && view.page.page < view.page.totalPages && (
             <div className="mt-4 text-center">
-              <button
-                type="button"
-                onClick={() => void loadMore()}
-                disabled={view.more === "loading"}
-                className="rounded-full bg-surface-raised px-6 py-3 font-medium disabled:opacity-50"
-              >
-                {view.more === "loading" ? "Loading…" : view.more === "error" ? "Couldn't load more. Try again" : "Show more"}
-              </button>
+              <MoreButton more={view.more} label="Show more" onClick={loadMore} />
             </div>
           )}
         </>
