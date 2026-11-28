@@ -702,6 +702,38 @@ describe("a failed sort brings back the Undo its toast replaced (issue 44 item 1
     expect(undosSent()).toHaveLength(0);
   });
 
+  // A new deck between the tap and the failure changes nothing, as for any Undo: only a settings change ends the
+  // Undo window (core's deckInputChange), and Check again keeps it. The failed card and the Undone card both land
+  // on top of the new deck.
+  const newDecks: { name: string; change: () => void }[] = [
+    { name: "a new mode", change: () => store.chooseDeck({ ...DEFAULT_DECK_CHOICE, mode: "top_rated" }) },
+    {
+      name: "new filters",
+      change: () => store.chooseDeck({ ...DEFAULT_DECK_CHOICE, filters: { ...DEFAULT_DECK_CHOICE.filters, type: "tv" } }),
+    },
+    { name: "Check again (a new deal)", change: () => store.startOver() },
+  ];
+  for (const { name, change } of newDecks) {
+    test(`${name} after the tap: the failed sort still brings the earlier Undo back, onto the new deck`, async () => {
+      await passFirst();
+      store.sortCard("watchlist", CARDS[1]);
+      change();
+      await settle();
+      // The later sort's own toast outlives the new deck, as before this change.
+      expect(snapshot().toast?.message).toBe("Added to Watchlist");
+      answerSort(1, FAILED);
+      await settle();
+      expect(top()).toBe(102);
+      expect(snapshot().notice?.message).toBe("Couldn't save. Try again.");
+      expect(snapshot().toast?.message).toBe("Passed");
+      await store.undoLastSort();
+      expect(undosSent()).toEqual([{ ref: REF_A, outcome: OUTCOME_A }]);
+      expect(top()).toBe(101);
+      await store.undoLastSort();
+      expect(undosSent()).toHaveLength(1);
+    });
+  }
+
   test("a new user after the tap: the old user's failed sort brings nothing back", async () => {
     await passFirst();
     store.sortCard("watchlist", CARDS[1]);

@@ -259,7 +259,9 @@ export function TitleScreen({ card }: { card: Card }) {
       return;
     }
     const before = state;
-    // The Undo on offer now. It comes down with the tap and comes back if the save fails (undoAfterFailedTap).
+    // The Undo on offer now. It comes down with the tap and comes back if the save fails (undoAfterFailedTap),
+    // however long the save took: the buttons wait for it (busy), so nothing else can have happened meanwhile. The
+    // deck differs: it moves on at once, so there the Undo comes back only within the failed sort's own toast.
     const kept = toast;
     // Shows at once. The save runs behind it and rolls back if it fails.
     setState({ status: STATUS_OF[kind], rating: null, review: null, skipUntil: null });

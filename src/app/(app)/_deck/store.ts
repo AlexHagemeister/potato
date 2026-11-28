@@ -1,7 +1,8 @@
 "use client";
 
 // The Discover screen's client state: the card queue, the page fetches, the
-// optimistic sorts, and the last sort's Undo. It lives at module scope, not in
+// optimistic sorts, and the one Undo on offer (the last sort's, or the sort
+// before it when the last one's save failed). It lives at module scope, not in
 // a component, so switching tabs and coming back shows the same card at once,
 // with no refetch. It is scoped to one user: a different user id resets it.
 // A change to the user's country or services (the settings key) refreshes the
@@ -583,7 +584,7 @@ export function dismissToast(id: number) {
   set({ toast: null });
 }
 
-/** Ends the last sort's Undo window. */
+/** Ends the Undo window: the Undo on offer goes, and with it the one a failed save could have brought back. */
 function dropUndo() {
   lastSort = null;
   clearTimeout(toastTimer);
@@ -594,7 +595,12 @@ function dropUndo() {
  * The last sort's save failed, so its own Undo goes away. The Undo its toast replaced comes back, for a full
  * window, so a failed tap never costs the Undo of the tap before it (issue 44, VISION invariant 2). Only a sort
  * whose Undo was still on offer at the failed tap comes back, and only while the failed sort is still the last one:
- * not after its toast ran out, its Undo was tapped, a newer sort was made, or the deck was refreshed.
+ * not after its toast ran out (so not when the save took longer than TOAST_MS to fail), its Undo was tapped, a
+ * newer sort was made, or the settings or the user changed. A new mode, new filters, or a new deal in between
+ * change nothing here, as for any Undo (core's deckInputChange): the earlier card comes back on top of the new deck.
+ *
+ * The title card has no such time limit (title-screen.tsx): its buttons wait for the save, so nothing else can
+ * happen in between, while the deck moves on and its Undo window is the toast's.
  */
 function undoFailedLastSort() {
   const earlier = lastSort?.displaced ?? null;
@@ -721,7 +727,8 @@ export async function markCardSeen(card: DeckPageCard, rating: number, review: s
 }
 
 /**
- * Undoes the last sort: core restores the title's previous state, and the
+ * Undoes the sort whose Undo is on offer (the last sort, or the one before it
+ * when the last one's save failed): core restores the title's previous state, and the
  * card comes back on top at once, unless that state keeps it out of the deck
  * (issue 54). The sort's outcome names the state: when the title was on a
  * list before the sort (the card was stale: it was put on a list elsewhere
