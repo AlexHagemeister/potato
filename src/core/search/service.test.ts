@@ -3,7 +3,7 @@ import { fail, ok, type Result } from "../result";
 import { TMDB_MAX_PAGE } from "../tmdb/constants";
 import type { ResultPage, TitleSummary } from "../tmdb/types";
 import type { MediaType, UserTitleState } from "../types";
-import { SEARCH_PAGES_PER_REQUEST, SEARCH_QUERY_MAX_LENGTH } from "./constants";
+import { SEARCH_PAGES_PER_REQUEST, SEARCH_QUERY_MAX_LENGTH, SEARCH_STATUS_MAX_TITLES } from "./constants";
 import { createSearchService } from "./service";
 import type { SearchPage } from "./types";
 
@@ -265,6 +265,73 @@ describe("searchTitles: bad input and failures", () => {
   test("a library error is passed through", async () => {
     const r = await fakeService({ statesResult: fail({ code: "unknown_user" }), page: { results: [summary("movie", 1)], page: 1, totalPages: 1 } })
       .service.searchTitles(USER, "dune");
+    expect(r).toEqual(fail({ code: "unknown_user" }));
+  });
+});
+
+describe("getStatuses (#69)", () => {
+  test("each title's status now, in the order asked, by the same rule as a result row, without asking TMDB", async () => {
+    const states: UserTitleState[] = [
+      { mediaType: "movie", tmdbId: 1, status: "watchlist" },
+      // Same ID, other media type: never matched.
+      { mediaType: "tv", tmdbId: 2, status: "seen" },
+      { mediaType: "movie", tmdbId: 3, status: "skipped", skipUntil: new Date(NOW.getTime() + 60_000) },
+      { mediaType: "movie", tmdbId: 4, status: "skipped", skipUntil: new Date(NOW.getTime() - 60_000) },
+    ];
+    const { service, calls } = fakeService({ states });
+    const r = await service.getStatuses(USER, [
+      { mediaType: "movie", tmdbId: 2 },
+      { mediaType: "movie", tmdbId: 1 },
+      { mediaType: "movie", tmdbId: 3 },
+      { mediaType: "movie", tmdbId: 4 },
+    ]);
+    expect(r).toEqual(
+      ok([
+        { mediaType: "movie", tmdbId: 2, status: null },
+        { mediaType: "movie", tmdbId: 1, status: "watchlist" },
+        { mediaType: "movie", tmdbId: 3, status: "skipped" },
+        { mediaType: "movie", tmdbId: 4, status: null },
+      ]),
+    );
+    expect(calls).toEqual({ tmdb: [], states: [USER] });
+  });
+
+  test("only the identity of each title is read and returned", async () => {
+    const { service } = fakeService();
+    const r = await service.getStatuses(USER, [{ mediaType: "tv", tmdbId: 7, title: "x", status: "seen" }]);
+    expect(r).toEqual(ok([{ mediaType: "tv", tmdbId: 7, status: null }]));
+  });
+
+  test("no titles reads nothing", async () => {
+    const { service, calls } = fakeService();
+    expect(await service.getStatuses(USER, [])).toEqual(ok([]));
+    expect(calls).toEqual({ tmdb: [], states: [] });
+  });
+
+  test("bad input returns a typed error and reads nothing", async () => {
+    const tooMany = Array.from({ length: SEARCH_STATUS_MAX_TITLES + 1 }, (_, i) => ({ mediaType: "movie", tmdbId: i + 1 }));
+    const cases: [string, unknown][] = [
+      ["", []],
+      [USER, null],
+      [USER, { mediaType: "movie", tmdbId: 1 }],
+      [USER, [{ mediaType: "film", tmdbId: 1 }]],
+      [USER, [{ mediaType: "movie", tmdbId: 0 }]],
+      [USER, [{ mediaType: "movie", tmdbId: "1" }]],
+      [USER, tooMany],
+    ];
+    for (const [user, titles] of cases) {
+      const { service, calls } = fakeService();
+      const r = await service.getStatuses(user, titles);
+      expect(r.ok).toBe(false);
+      if (user) expect(!r.ok && r.error.code).toBe("invalid_search_query");
+      expect(calls).toEqual({ tmdb: [], states: [] });
+    }
+    const { service } = fakeService();
+    expect((await service.getStatuses(USER, tooMany.slice(1))).ok).toBe(true);
+  });
+
+  test("a library error is passed through", async () => {
+    const r = await fakeService({ statesResult: fail({ code: "unknown_user" }) }).service.getStatuses(USER, [{ mediaType: "movie", tmdbId: 1 }]);
     expect(r).toEqual(fail({ code: "unknown_user" }));
   });
 });

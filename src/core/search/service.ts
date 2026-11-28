@@ -12,10 +12,10 @@ import { fail, ok, validateUserId, type Result } from "../result";
 import type { TmdbClient } from "../tmdb/client";
 import { TMDB_MAX_PAGE } from "../tmdb/constants";
 import { posterUrl, ROW_POSTER_SIZE } from "../tmdb/images";
-import { tryFormatTitleKey } from "../title-id";
-import type { UserTitleState } from "../types";
-import { SEARCH_PAGES_PER_REQUEST, SEARCH_QUERY_MAX_LENGTH } from "./constants";
-import type { SearchPage, SearchResult } from "./types";
+import { titleIdError, toTitleId, tryFormatTitleKey } from "../title-id";
+import type { TitleId, TitleStatus, UserTitleState } from "../types";
+import { SEARCH_PAGES_PER_REQUEST, SEARCH_QUERY_MAX_LENGTH, SEARCH_STATUS_MAX_TITLES } from "./constants";
+import type { SearchPage, SearchResult, SearchStatus } from "./types";
 
 /** The TMDB call the service makes. The app passes getTmdb(). */
 export type SearchTmdb = Pick<TmdbClient, "searchTitles">;
@@ -73,25 +73,57 @@ export function createSearchService(deps: SearchServiceDeps) {
       found = await tmdb.searchTitles(q.value, read);
     }
 
-    const statusByKey = new Map(states.value.map((s) => [tryFormatTitleKey(s), s.status]));
-    const visible = createVisibilityCheck(states.value, clock());
-    const results = found.results.map((t): SearchResult => {
-      const status = statusByKey.get(tryFormatTitleKey(t)) ?? null;
-      return {
+    const statusOf = statusReader(states.value, clock());
+    const results = found.results.map(
+      (t): SearchResult => ({
         mediaType: t.mediaType,
         tmdbId: t.tmdbId,
         title: t.title,
         year: t.year,
         posterUrl: posterUrl(t.posterPath, ROW_POSTER_SIZE),
         overview: t.overview,
-        // A skip that has run out puts the title back in the deck: it shows as untouched, the way the deck sees it.
-        status: status === "skipped" && visible(t) ? null : status,
-      };
-    });
+        status: statusOf(t),
+      }),
+    );
     return ok({ query: q.value, results, page: read, totalPages: first.totalPages });
   }
 
-  return { searchTitles };
+  /**
+   * The user's status for each of these titles now, by the same rule as a
+   * result's `status`, in the order asked. No TMDB call: a screen still showing
+   * results it read earlier uses it to bring a row up to date after the title
+   * was sorted on a card opened from it (#69). At most
+   * SEARCH_STATUS_MAX_TITLES titles. Bad input returns a typed error.
+   */
+  async function getStatuses(userId: string, titles: unknown): Promise<Result<SearchStatus[]>> {
+    const u = validateUserId(userId);
+    if (!u.ok) return u;
+    if (!Array.isArray(titles)) return invalid("titles must be a list");
+    if (titles.length > SEARCH_STATUS_MAX_TITLES) return invalid(`at most ${SEARCH_STATUS_MAX_TITLES} titles at once`);
+    for (const t of titles) {
+      const error = titleIdError(t);
+      if (error) return invalid(error);
+    }
+    const refs = (titles as TitleId[]).map(toTitleId);
+    if (refs.length === 0) return ok([]);
+    const states = await library.getUserTitleStates(u.value);
+    if (!states.ok) return states;
+    const statusOf = statusReader(states.value, clock());
+    return ok(refs.map((ref) => ({ ...ref, status: statusOf(ref) })));
+  }
+
+  return { searchTitles, getStatuses };
+}
+
+/** A title's status for a result row, from the user's rows at `now`. */
+function statusReader(states: readonly UserTitleState[], now: Date): (ref: TitleId) => TitleStatus | null {
+  const statusByKey = new Map(states.map((s) => [tryFormatTitleKey(s), s.status]));
+  const visible = createVisibilityCheck(states, now);
+  return (ref) => {
+    const status = statusByKey.get(tryFormatTitleKey(ref)) ?? null;
+    // A skip that has run out puts the title back in the deck: it shows as untouched, the way the deck sees it.
+    return status === "skipped" && visible(ref) ? null : status;
+  };
 }
 
 function invalid<T>(message: string): Result<T> {

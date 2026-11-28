@@ -29,3 +29,8 @@ export interface SearchPage {
   /** 0 when nothing matched. A page past it is empty. */
   totalPages: number;
 }
+
+/** A title's status as a result row shows it (SearchResult.status), read again without searching. */
+export interface SearchStatus extends TitleId {
+  status: TitleStatus | null;
+}

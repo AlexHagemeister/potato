@@ -6,7 +6,7 @@ import { getUserTitleStates } from "../library";
 import type { Result } from "../result";
 import { getTmdb } from "../tmdb/app-client";
 import { createSearchService, type SearchService } from "./service";
-import type { SearchPage } from "./types";
+import type { SearchPage, SearchStatus } from "./types";
 
 export * from "./constants";
 export * from "./types";
@@ -27,4 +27,9 @@ function appService(): SearchService {
  */
 export function searchTitles(userId: string, query: unknown, page: unknown = 1): Promise<Result<SearchPage>> {
   return appService().searchTitles(userId, query, page);
+}
+
+/** The user's status for each of these titles now, as a result row shows it. See createSearchService. */
+export function getSearchStatuses(userId: string, titles: unknown): Promise<Result<SearchStatus[]>> {
+  return appService().getStatuses(userId, titles);
 }
