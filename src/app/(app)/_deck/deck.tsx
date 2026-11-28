@@ -182,7 +182,8 @@ export function Deck({
   const top = useRef<HTMLDivElement>(null);
 
   useEffect(() => startDeck(userId, settingsKey, savedChoice), [userId, settingsKey, savedChoice]);
-  // Back in the foreground without a remount: catch sorts made meanwhile on another device.
+  // Back in the foreground without a remount: what a tab return does (re-check a gated deck, catch sorts made
+  // meanwhile on another device, retry a failed fetch).
   useEffect(() => {
     const onVisible = () => {
       if (document.visibilityState === "visible") resumeDeck();

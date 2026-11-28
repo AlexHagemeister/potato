@@ -15,9 +15,9 @@ import { getCurrentUserForRequest } from "@/lib/current-user";
 //   POST /api/deck/hidden   { titles: [{ mediaType, tmdbId }, ...] }
 //
 // 200 { ok: true, hidden }   the titles to drop, a subset of those sent
-// 400 { ok: false, error }   invalid: not a list of at most MAX_HIDDEN_CHECK titles
+// 400 { ok: false, error }   invalid: not JSON, or not a list of at most MAX_HIDDEN_CHECK titles
 // 401 { ok: false, error }   signed_out
-// 503 { ok: false, error }   unavailable: the database failed. The deck keeps its cards.
+// 503 { ok: false, error }   unavailable: the database failed, or core refused for another reason (logged). The deck keeps its cards.
 export const dynamic = "force-dynamic";
 
 export type HiddenResponse =
@@ -46,7 +46,11 @@ export async function POST(request: Request): Promise<Response> {
     if (result.error.code === "unknown_user" || result.error.code === "invalid_user") {
       return reply({ ok: false, error: "signed_out" }, 401);
     }
-    return reply({ ok: false, error: "invalid" }, 400);
+    if (result.error.code === "invalid_title") return reply({ ok: false, error: "invalid" }, 400);
+    // Any other refusal (an error code added later) reads as a failure, and is logged so it shows (issue 55), as
+    // in GET /api/deck.
+    console.error("deck: hiddenTitles refused:", result.error);
+    return reply({ ok: false, error: "unavailable" }, 503);
   } catch (err) {
     console.error("deck: hiddenTitles failed:", err);
     return reply({ ok: false, error: "unavailable" }, 503);

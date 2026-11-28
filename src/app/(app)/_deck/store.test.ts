@@ -1,4 +1,4 @@
-// The Discover store's Undo paths (issue 84, item 4). These pin the store's behavior as it is today, so a change to
+// The Discover store's Undo paths (issue 84, item 4), and its return to the foreground (resumeDeck, issue 55). These pin the store's behavior as it is today, so a change to
 // how Undo is sent (issue 112) shows up here first. They are not a statement of the ideal: where today's behavior is
 // questionable, the test says so and names the issue.
 //
@@ -37,6 +37,7 @@ mock.module("./actions", () => ({
     return undoAnswer();
   },
   markSeenAction: () => seenAnswer(),
+  undoCardSortAction: notMocked("undoCardSortAction"),
   sortCardAction: notMocked("sortCardAction"),
   sortDeckCardAction: notMocked("sortDeckCardAction"),
   saveDeckChoiceAction: notMocked("saveDeckChoiceAction"),
@@ -134,6 +135,11 @@ function deferred<T>(): Deferred<T> {
 
 /** Sort requests in the order sent. Each answers when its test resolves it. */
 let sortRequests: { body: { kind: string; title: unknown }; reply: Deferred<Response> }[] = [];
+/** What GET /api/deck answers, when a test sets it. Null: a page of CARDS. */
+let deckAnswer: (() => Promise<Response>) | null = null;
+/** The titles each sorted-elsewhere check asked about, and what the check answers (null: none hidden). */
+let hiddenChecks: unknown[] = [];
+let hiddenAnswer: (() => Promise<Response>) | null = null;
 
 const realFetch = globalThis.fetch;
 
@@ -145,9 +151,13 @@ beforeAll(() => {
       sortRequests.push({ body: JSON.parse(String(init?.body)), reply });
       return reply.promise;
     }
-    if (url.startsWith("/api/deck/hidden")) return Response.json({ ok: true, hidden: [] });
+    if (url.startsWith("/api/deck/hidden")) {
+      hiddenChecks.push(JSON.parse(String(init?.body)).titles);
+      return hiddenAnswer ? hiddenAnswer() : Response.json({ ok: true, hidden: [] });
+    }
     if (url.startsWith("/api/deck/choice")) return Response.json({ ok: true });
     if (url.startsWith("/api/deck")) {
+      if (deckAnswer) return deckAnswer();
       const body: DeckResponse = { ok: true, page: { kind: "cards", cards: CARDS, nextCursor: null } };
       return Response.json(body);
     }
@@ -174,6 +184,9 @@ let userSeq = 0;
 beforeEach(async () => {
   undoCalls = [];
   sortRequests = [];
+  deckAnswer = null;
+  hiddenChecks = [];
+  hiddenAnswer = null;
   undoAnswer = async () => ({ ok: true, outcome: { previous: null, current: null } });
   // A fresh user each test resets the store's module state (the queue, the last sort, the toast).
   store.startDeck(`user-${++userSeq}`, "US:", DEFAULT_DECK_CHOICE);
@@ -743,5 +756,66 @@ describe("a failed sort brings back the Undo its toast replaced (issue 44 item 1
     expect(snapshot().toast).toBeNull();
     await store.undoLastSort();
     expect(undosSent()).toHaveLength(0);
+  });
+});
+
+// Issue 55 item 2: the app comes back to the foreground with Discover open (no remount), which is resumeDeck. It does
+// what a return to the tab does (startDeck with the same user and settings).
+describe("back in the foreground with Discover open (resumeDeck)", () => {
+  const LOCKED: DeckResponse = { ok: true, page: { kind: "locked", mode: "for_you", ratedCount: 2, required: 5, remaining: 3 } };
+
+  test("a locked deck asks again, and opens when ratings made elsewhere unlocked it", async () => {
+    deckAnswer = async () => Response.json(LOCKED);
+    store.startDeck(`user-${++userSeq}`, "US:", DEFAULT_DECK_CHOICE);
+    await settle();
+    expect(snapshot().gate?.kind).toBe("locked");
+    deckAnswer = null;
+    store.resumeDeck();
+    await settle();
+    expect(snapshot().gate).toBeNull();
+    expect(top()).toBe(101);
+  });
+
+  test("a locked deck still locked stays locked", async () => {
+    deckAnswer = async () => Response.json(LOCKED);
+    store.startDeck(`user-${++userSeq}`, "US:", DEFAULT_DECK_CHOICE);
+    await settle();
+    store.resumeDeck();
+    await settle();
+    expect(snapshot().gate?.kind).toBe("locked");
+    expect(top()).toBeNull();
+  });
+
+  test("after a failed page fetch, it tries again (back online)", async () => {
+    deckAnswer = async () => {
+      throw new TypeError("offline");
+    };
+    store.startDeck(`user-${++userSeq}`, "US:", DEFAULT_DECK_CHOICE);
+    await settle();
+    expect(snapshot().failed).toBe(true);
+    deckAnswer = null;
+    store.resumeDeck();
+    await settle();
+    expect(snapshot().failed).toBe(false);
+    expect(top()).toBe(101);
+  });
+
+  test("with cards queued, it checks them for sorts made elsewhere and drops those", async () => {
+    hiddenAnswer = async () => Response.json({ ok: true, hidden: [{ mediaType: "movie", tmdbId: 101 }] });
+    store.resumeDeck();
+    await settle();
+    expect(hiddenChecks).toHaveLength(1);
+    expect(top()).toBe(102);
+    expect(queued(101)).toBe(false);
+  });
+
+  test("a gated deck sends no sorted-elsewhere check", async () => {
+    deckAnswer = async () => Response.json(LOCKED);
+    store.startDeck(`user-${++userSeq}`, "US:", DEFAULT_DECK_CHOICE);
+    await settle();
+    hiddenChecks = [];
+    store.resumeDeck();
+    await settle();
+    expect(hiddenChecks).toHaveLength(0);
   });
 });
