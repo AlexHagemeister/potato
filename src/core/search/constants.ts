@@ -14,3 +14,10 @@ export const SEARCH_QUERY_MAX_LENGTH = 200;
  * call (cached like any search), so this bounds what one request can cost.
  */
 export const SEARCH_PAGES_PER_REQUEST = 3;
+
+/**
+ * Most titles one status read (getStatuses) takes. A screen asks only for the
+ * titles sorted since it read its results, usually one, so this only bounds
+ * the input.
+ */
+export const SEARCH_STATUS_MAX_TITLES = 100;
