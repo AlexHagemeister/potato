@@ -255,7 +255,9 @@ export type ActedOn = { row: ListRow; filters: FilterChoice };
  * on screen take it where applyTitleRecord puts it. `actedOn` supplies the title and poster when the rows no longer
  * show the title (they started over meanwhile), but only while the rows have the filters it was shown under, since
  * nothing on the phone can tell whether it fits others (issues 121 and 155). Rows under other filters are left as
- * they are: their load read the server after the save (writesSettled).
+ * they are. On one Lists screen their filter load read the server after the save, because Next sends a page's server
+ * actions one at a time (the filter load does not wait on writesSettled). After a navigation that queue can be
+ * bypassed, and a filter load can read before the save: issue 168.
  */
 export function placeTitle(ref: TitleId, record: TitleRecord | null, actedOn: ActedOn) {
   if (!shownNow) return;
@@ -286,15 +288,19 @@ export function rowAsRecord(row: ListRow): TitleRecord {
 
 /**
  * The lists with `row` moved to `to` before its save answers, through the same rule. The move is the newest change
- * these rows know of, so it is dated later than every row they show, not by the phone's clock alone: a clock behind
- * the server's would sort it below rows changed just before, and the save's answer then keeps it there (in place).
+ * these rows know of, so it is dated 1 ms after the newest row they show, never by the phone's clock (PR 177 review).
+ * A clock behind the server's would sort it below rows changed just before. A clock ahead would date it in the
+ * future, so a change the server stamps while the save is under way (a title card's) would sort below it. Either
+ * way the save's answer keeps the row where it is (in place), and the order would differ from a reload. The phone's
+ * clock is used only when the lists show no row at all.
  * Only to a list whose rows carry no rating or review: a move to Seen waits for its save.
  */
 export function showMoved(lists: Lists, row: ListRow, to: "watchlist" | "passed"): Lists {
-  let newest = Date.now();
+  let newest = -Infinity;
   for (const status of LIST_STATUSES) {
     for (const r of lists[status].rows) newest = Math.max(newest, new Date(r.updatedAt).getTime() + 1);
   }
+  if (newest === -Infinity) newest = Date.now();
   return applyTitleRecord(lists, row, rowAsRecord({ ...row, status: to, rating: null, review: null, updatedAt: new Date(newest) }));
 }
 

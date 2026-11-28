@@ -504,6 +504,20 @@ describe("one placement rule for a changed row (issue 119)", () => {
     expect(shownLists().watchlist.rows[0].updatedAt).toEqual(NOW);
   });
 
+  test("+ Watchlist with the phone's clock ahead of the server's: a change stamped meanwhile sorts above it (PR 177 review)", () => {
+    seed(newUser());
+    // The phone's clock reads a year ahead of the server's.
+    setSystemTime(new Date("2027-11-25T10:00:00Z"));
+    setShown({ ...getShown()!, lists: showMoved(shownLists(), row(MATRIX, "passed", 4), "watchlist") });
+    expect(keys(shownLists(), "watchlist")).toEqual(["movie:603", "movie:13", "movie:550", "movie:155"]);
+    // While its save is under way, a title card puts the series on the Watchlist, stamped by the server later.
+    applyTitleChange(A_SERIES, record(A_SERIES, "watchlist", NOW));
+    expect(keys(shownLists(), "watchlist")).toEqual(["tv:1399", "movie:603", "movie:13", "movie:550", "movie:155"]);
+    // The Matrix's save answers with the earlier server time: it stays below the series, as a reload shows them.
+    placeTitle(MATRIX, record(MATRIX, "watchlist", new Date("2026-11-25T09:59:00Z")), actedOn(MATRIX, "passed", 4));
+    expect(keys(shownLists(), "watchlist")).toEqual(["tv:1399", "movie:603", "movie:13", "movie:550", "movie:155"]);
+  });
+
   test("a fresh render replays the screen's real + Watchlist through the same rule", () => {
     const userId = newUser();
     const tapped = row(MATRIX, "passed", 4);
