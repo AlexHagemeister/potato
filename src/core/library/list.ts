@@ -7,7 +7,7 @@
 // database page would leave pages short. Loading the whole list avoids both.
 
 import { createFilterMatcher } from "../deck/build-deck";
-import { formatTitleKey } from "../title-id";
+import { formatTitleKey, titleIdError } from "../title-id";
 import { LIST_STATUSES, type Candidate, type DeckFilters, type ListStatus } from "../types";
 import { fail, ok, type Result } from "../result";
 import {
@@ -213,10 +213,13 @@ export function decodeCursor(cursor: unknown): CursorKey | null {
     if (!Array.isArray(parsed) || parsed.length < 2) return null;
     const [sort, ...values] = parsed as unknown[];
     if (!(LIST_SORTS as readonly unknown[]).includes(sort)) return null;
-    // Must match sortKey's length for this sort.
-    const expectedValues = (sort as string).startsWith("rating_") ? 4 : 3;
-    if (values.length !== expectedValues) return null;
-    if (!values.every((v) => (typeof v === "number" && Number.isFinite(v)) || typeof v === "string")) return null;
+    // Must match sortKey's shape for this sort: one or two finite numbers (a time, or a rating then a negated time),
+    // then the title's identity.
+    const leading = (sort as string).startsWith("rating_") ? 2 : 1;
+    if (values.length !== leading + 2) return null;
+    if (!values.slice(0, leading).every((v) => typeof v === "number" && Number.isFinite(v))) return null;
+    const [mediaType, tmdbId] = values.slice(leading);
+    if (titleIdError({ mediaType, tmdbId }) !== null) return null;
     return { sort: sort as ListSort, values: values as (number | string)[] };
   } catch {
     return null;

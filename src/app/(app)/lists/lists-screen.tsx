@@ -13,7 +13,7 @@ import {
 } from "@/core/filters";
 import type { ActionOutcome } from "@/core/library/types";
 import { listFromParam, type ListRow, type ListRowsPage } from "@/core/lists";
-import { formatTitleKey } from "@/core/title-id";
+import { formatTitleKey, toTitleId } from "@/core/title-id";
 import type { ListStatus, TitleId } from "@/core/types";
 import { FilterControl } from "../_components/filter-control";
 import { noteTitleChange } from "../library-changes";
@@ -72,7 +72,6 @@ const EMPTY: Record<ListStatus, { title: string; note: string }> = {
 const TOAST_MS = 5000;
 
 const keyOf = formatTitleKey;
-const refOf = (t: TitleId): TitleId => ({ mediaType: t.mediaType, tmdbId: t.tmdbId });
 const displayTitle = (row: ListRow) => row.title ?? "Title unavailable";
 const subtitleOf = (row: ListRow) => [row.year, row.mediaType === "movie" ? "Movie" : "Series"].filter(Boolean).join(" · ");
 
@@ -590,7 +589,7 @@ export function ListsScreen({
   }
 
   async function saveMarkSeen(row: ListRow, rating: number, review: string): Promise<string | null> {
-    const ref = refOf(row);
+    const ref = toTitleId(row);
     const key = keyOf(row);
     const actedOn: ActedOn = { row, filters: loaded };
     const result = await write(ref, () => markSeenAction(ref, rating, review));
@@ -605,7 +604,7 @@ export function ListsScreen({
   }
 
   async function saveEdit(row: ListRow, rating: number, review: string): Promise<string | null> {
-    const ref = refOf(row);
+    const ref = toTitleId(row);
     // `row` is the row the sheet opened with (fixed in `sheet`, not reread), so core saves the edit only while the
     // title still has that rating and review (issue 103). A Seen row always has a rating.
     if (row.rating === null) return "Couldn't save. Try again.";
@@ -620,7 +619,7 @@ export function ListsScreen({
   }
 
   async function addToWatchlist(row: ListRow) {
-    const ref = refOf(row);
+    const ref = toTitleId(row);
     const key = keyOf(row);
     const actedOn: ActedOn = { row, filters: loaded };
     // The row below it, which the toast keeps clear of once this one leaves Passed.

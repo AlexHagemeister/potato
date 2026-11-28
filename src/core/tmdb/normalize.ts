@@ -143,7 +143,7 @@ const TYPE_RANK: Record<string, number> = { Trailer: 0, Teaser: 1 };
  */
 export function pickTrailer(videos: readonly RawVideo[]): string | null {
   const eligible = videos.filter(
-    (v) => v.site === "YouTube" && typeof v.key === "string" && v.key !== "" && v.type !== undefined && v.type in TYPE_RANK,
+    (v) => v.site === "YouTube" && typeof v.key === "string" && v.key !== "" && v.type !== undefined && Object.hasOwn(TYPE_RANK, v.type),
   );
   if (eligible.length === 0) return null;
   const published = (v: RawVideo) => {
