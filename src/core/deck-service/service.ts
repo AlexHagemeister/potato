@@ -403,7 +403,7 @@ export function createDeckService(deps: DeckServiceDeps) {
     if (!u.ok) return u;
     const error = titleIdError(ref);
     if (error) return fail({ code: "invalid_title", message: error });
-    const id: TitleId = { mediaType: ref.mediaType, tmdbId: ref.tmdbId };
+    const id = toTitleId(ref);
 
     const [settings, state, details] = await Promise.all([
       library.getUserSettings(u.value),

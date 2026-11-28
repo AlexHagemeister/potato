@@ -5,10 +5,11 @@ import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } fro
 import type { Card, CardUserState } from "@/core/deck-service/types";
 import { cardUserState } from "@/core/deck-service/user-state";
 import type { ActionOutcome, TitleRecord } from "@/core/library/types";
-import type { TitleId, TitleStatus } from "@/core/types";
+import { toTitleId } from "@/core/title-id";
+import type { TitleStatus } from "@/core/types";
 import { RatingSheet } from "../../../_components/rating-sheet";
 import { Stars } from "../../../_components/stars";
-import { markSeenAction, sortCardAction, undoSortAction, type DeckActionResult, type SortKind } from "../../../_deck/actions";
+import { markSeenAction, sortCardAction, undoCardSortAction, type DeckActionResult, type SortKind } from "../../../_deck/actions";
 import { CardView } from "../../../_deck/card-view";
 import { DeckButtons } from "../../../_deck/deck-buttons";
 import { NoticePill, UndoPill } from "../../../_components/toast-pills";
@@ -158,7 +159,7 @@ function markListsStaleUnlessShowing() {
 
 export function TitleScreen({ card }: { card: Card }) {
   const router = useRouter();
-  const ref: TitleId = { mediaType: card.mediaType, tmdbId: card.tmdbId };
+  const ref = toTitleId(card);
   // getCard has already applied core's rules (an expired skip is null).
   const [state, setState] = useState<CardUserState | null>(card.userState);
   const [busy, setBusy] = useState(false);
@@ -173,13 +174,18 @@ export function TitleScreen({ card }: { card: Card }) {
   const seq = useRef(0);
   /** The latest change landed where the Lists rows kept for Back couldn't take it: refresh Lists on leaving (landed). */
   const changed = useRef(false);
-  /** A stale refusal couldn't read where the title is now: reload the card once the rating sheet closes. */
-  const refreshOnClose = useRef(false);
+  /**
+   * A stale refusal couldn't read where the title is now: reload the card from the server, but only once nothing on
+   * screen would be lost. A reload starts the screen over (page.tsx keys it on the title's state), so it waits while
+   * the rating sheet is open (the user's text), a notice is up (why nothing was saved), or an Undo is on offer
+   * (issue 80). A later write or refusal that carries the title's true row cancels it.
+   */
+  const refreshWhenClear = useRef(false);
   useEffect(() => {
-    if (sheet !== null || !refreshOnClose.current) return;
-    refreshOnClose.current = false;
+    if (sheet !== null || notice !== null || toast !== null || !refreshWhenClear.current) return;
+    refreshWhenClear.current = false;
     router.refresh();
-  }, [sheet, router]);
+  }, [sheet, notice, toast, router]);
 
   /** Back has taken this card off the screen. A save can still settle after that (issue 93). */
   const gone = useRef(false);
@@ -239,7 +245,7 @@ export function TitleScreen({ card }: { card: Card }) {
     landed(outcome.current);
     // The write carries the title's true row, so a reload queued by an earlier refusal is no longer needed. It would
     // start the screen over and drop the Undo toast shown below.
-    refreshOnClose.current = false;
+    refreshWhenClear.current = false;
     setState(cardUserState(ref, outcome.current, new Date()));
     setNotice(null);
     setToast({ id: ++seq.current, message: state?.status === "seen" && kind === "seen" ? "Rating saved" : DONE_LABEL[kind], outcome });
@@ -301,7 +307,7 @@ export function TitleScreen({ card }: { card: Card }) {
     if (!result.ok) {
       // Marked Seen elsewhere: the card behind the sheet shows that now, and the sheet stays open with the
       // message, so a review the user typed is still there to copy. Cancel closes it.
-      if (result.stale) showTrueState(result, true);
+      if (result.stale) showTrueState(result);
       return result.error;
     }
     setSheet(null);
@@ -310,20 +316,19 @@ export function TitleScreen({ card }: { card: Card }) {
   }
 
   /**
-   * A write refused because the title changed elsewhere: show where it is now, from the row the refusal carries.
-   * If the row couldn't be read, reload the card from the server instead. A reload starts the screen over (page.tsx
-   * keys this screen on the title's state), so while the rating sheet stays open with the user's text, it waits
-   * until the sheet closes, and a later successful write cancels it (done, removeSeen).
+   * A write or Undo refused because the title changed elsewhere: show where it is now, from the row the refusal
+   * carries. If the row couldn't be read, reload the card from the server instead, once the sheet, the notice the
+   * caller shows, and any Undo on offer are gone (refreshWhenClear), so the reload drops none of them (issue 80).
    */
-  function showTrueState(result: { current?: ActionOutcome["current"] }, sheetStaysOpen = false) {
+  function showTrueState(result: { current?: ActionOutcome["current"] }) {
     if (result.current === undefined) {
       noteTitleChange(ref);
       changed.current = true;
       if (gone.current) refreshAfterLeaving();
-      else if (sheetStaysOpen) refreshOnClose.current = true;
-      else router.refresh();
+      else refreshWhenClear.current = true;
       return;
     }
+    refreshWhenClear.current = false;
     landed(result.current);
     setState(cardUserState(ref, result.current, new Date()));
   }
@@ -344,7 +349,7 @@ export function TitleScreen({ card }: { card: Card }) {
     // Seen it above, the card behind shows where the title is now, and the sheet stays open with the message and the
     // text. It keeps what it opened with, so a second Save is refused too: saving over the other device's change
     // (a removal made on purpose, or a newer review) would erase something the user never saw.
-    if (result.stale) showTrueState(result, true);
+    if (result.stale) showTrueState(result);
     return result.error;
   }
 
@@ -362,7 +367,7 @@ export function TitleScreen({ card }: { card: Card }) {
     if (result.ok) {
       setSheet(null);
       landed(result.value.current);
-      refreshOnClose.current = false; // as in done(): the true row is here, and a reload would drop the Undo toast
+      refreshWhenClear.current = false; // as in done(): the true row is here, and a reload would drop the Undo toast
       setState(cardUserState(ref, result.value.current, new Date()));
       setNotice(null);
       setToast({ id: ++seq.current, message: "Rating removed", outcome: result.value });
@@ -386,17 +391,21 @@ export function TitleScreen({ card }: { card: Card }) {
     setBusy(true);
     let result: DeckActionResult;
     try {
-      result = await undoSortAction(ref, outcome);
+      result = await undoCardSortAction(ref, outcome);
     } catch {
       result = { ok: false, error: "Couldn't undo. Check your connection." };
     }
     setBusy(false);
     if (result.ok) {
       landed(result.outcome.current);
+      refreshWhenClear.current = false; // as in done(): the true row is here
       setState(cardUserState(ref, result.outcome.current, new Date()));
       setNotice(null);
     } else {
       setState(after);
+      // Refused because the title changed since (another device): `after` is stale too, so show where it is now
+      // (issue 49). Any other failure changed nothing, so `after` is still true.
+      if (result.stale) showTrueState(result);
       fail(result.error);
     }
   }

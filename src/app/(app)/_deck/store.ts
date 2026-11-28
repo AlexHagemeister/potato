@@ -227,12 +227,7 @@ export function startDeck(userId: string, settingsKey: string, savedChoice: Deck
     reset(userId, settingsKey, savedChoice);
   } else if (!rebase(settingsKey, state.choice)) {
     // A refresh above already dropped the queued cards, so only a kept queue needs the check.
-    if (state.gate) {
-      fetchEpoch++;
-      set({ gate: null, queue: restartCursor(state.queue) });
-    } else {
-      void dropSortedElsewhere();
-    }
+    recheckKept();
   }
   // Coming back to the tab is also a retry after a failed fetch.
   void fill();
@@ -241,11 +236,29 @@ export function startDeck(userId: string, settingsKey: string, savedChoice: Deck
 /**
  * The app came back to the foreground with Discover open (the home-screen app
  * resumed, or the browser tab shown again). Discover did not remount, so
- * startDeck did not run: check for titles sorted meanwhile on another device.
+ * startDeck did not run. Does what startDeck does for a return with the same
+ * user and settings (issue 55): re-checks a locked or no_seeds deck, or drops
+ * titles sorted meanwhile on another device, and fills the queue, which is
+ * also a retry after a failed fetch (back online).
  */
 export function resumeDeck() {
-  if (!state.userId || state.gate) return;
-  void dropSortedElsewhere();
+  if (!state.userId) return;
+  recheckKept();
+  void fill();
+}
+
+/**
+ * A return to a kept deck. A locked or no_seeds deck asks again, since ratings
+ * made elsewhere may unlock it. Otherwise the queued titles are checked for
+ * sorts made elsewhere (dropSortedElsewhere). The caller fills the queue.
+ */
+function recheckKept() {
+  if (state.gate) {
+    fetchEpoch++;
+    set({ gate: null, queue: restartCursor(state.queue) });
+  } else {
+    void dropSortedElsewhere();
+  }
 }
 
 /**

@@ -35,7 +35,8 @@ export type SortKind = "pass" | "skip" | "watchlist" | "seen";
 export type DeckActionResult =
   | { ok: true; outcome: ActionOutcome }
   /**
-   * `stale` means the title changed elsewhere (another device, the AI connection) and nothing was saved.
+   * `stale` means the title changed elsewhere (another device, the AI connection) and nothing was saved, or for an
+   * Undo, nothing was undone.
    * `current` is the title's row as it is now, when it could be read, so a card can show where the title is.
    */
   | { ok: false; error: string; stale?: boolean; current?: TitleRecord | null };
@@ -63,6 +64,16 @@ const ALREADY_ON: Record<Exclude<TitleStatus, "seen">, string> = {
 
 const SIGNED_OUT = "You're signed out. Sign in again to save.";
 
+/**
+ * A Discover card's tap refused because the title changed again while the tap was saving: core's not_found from
+ * a guard that locked a row which was gone, or showable again, by the time it looked (issue 100). Nothing was
+ * saved and the title is on no list, so the card comes back and the tap can be made again.
+ */
+const CHANGED_MEANWHILE = "Couldn't save: this title changed just now. Try again.";
+
+/** An Undo refused because the title changed since the action it undoes (core's compare-and-set). */
+const UNDO_STALE: ReadonlySet<CoreError["code"]> = new Set(["wrong_state", "stale_value", "not_found"]);
+
 /** Presentation only: the words the screen shows for each core error. */
 function messageFor(error: CoreError, undo: boolean): string {
   switch (error.code) {
@@ -77,6 +88,8 @@ function messageFor(error: CoreError, undo: boolean): string {
     case "stale_value":
     case "not_found":
       if (undo) return "Couldn't undo: this title changed since.";
+      // A documented race, not a fault (core's onNoListRefused), so it is not logged as one.
+      if (error.code === "not_found") return CHANGED_MEANWHILE;
       break;
   }
   console.error("deck action rejected:", error);
@@ -92,24 +105,41 @@ interface CardRefusal {
   readCurrent: boolean;
 }
 
+/** How an Undo's refusal is answered: whether to read the title's row for the screen, as for a card write. */
+interface UndoRefusal {
+  ref: TitleId;
+  /** The title card shows the row from the refusal (issue 49). The deck takes the card out again, so it skips the read. */
+  readCurrent: boolean;
+}
+
 /**
  * Runs one write as the signed-in user. For a card write, core's wrong_state means the card was stale: the title
  * is Seen already, or, for a Discover card, on any list or skipped (issue 83). `card.stale` words it, and the
- * result can carry the title's row as it is now. Undo passes no `card`: its wrong_state means its own
- * compare-and-set refused.
+ * result can carry the title's row as it is now. Undo passes no `card` but `undo`: its wrong_state, stale_value,
+ * or not_found means its own compare-and-set refused because the title changed since, which is stale too.
  */
-async function run(fn: (userId: string) => Promise<Result<ActionOutcome>>, card: CardRefusal | null): Promise<DeckActionResult> {
+async function run(
+  fn: (userId: string) => Promise<Result<ActionOutcome>>,
+  card: CardRefusal | null,
+  undoOf: UndoRefusal | null = null,
+): Promise<DeckActionResult> {
   const undo = card === null;
   const user = await getCurrentUserForRequest();
   if (!user) return { ok: false, error: SIGNED_OUT };
+  /** A stale refusal, with the title's row as it is now when it is wanted and could be read. */
+  const staleResult = async (error: string, ref: TitleId, readCurrent: boolean): Promise<DeckActionResult> => {
+    if (!readCurrent) return { ok: false, error, stale: true };
+    const now = await getTitleState(user.id, ref).catch(() => null);
+    return { ok: false, error, stale: true, ...(now?.ok ? { current: now.value } : {}) };
+  };
   try {
     const result = await fn(user.id);
     if (result.ok) return { ok: true, outcome: result.value };
     if (card && result.error.code === "wrong_state") {
-      const error = card.stale(result.error.status);
-      if (!card.readCurrent) return { ok: false, error, stale: true };
-      const now = await getTitleState(user.id, card.ref).catch(() => null);
-      return { ok: false, error, stale: true, ...(now?.ok ? { current: now.value } : {}) };
+      return staleResult(card.stale(result.error.status), card.ref, card.readCurrent);
+    }
+    if (undoOf && UNDO_STALE.has(result.error.code)) {
+      return staleResult(messageFor(result.error, true), undoOf.ref, undoOf.readCurrent);
     }
     return { ok: false, error: messageFor(result.error, undo) };
   } catch (err) {
@@ -142,7 +172,8 @@ function sortTitle(kind: Exclude<SortKind, "seen">, userId: string, ref: TitleId
 export async function sortCardAction(kind: Exclude<SortKind, "seen">, ref: TitleId): Promise<DeckActionResult> {
   return run((userId) => sortTitle(kind, userId, ref, false), {
     ref,
-    stale: () => STALE_SORT[kind] ?? STALE_SORT.pass,
+    // An unknown kind never gets here: sortTitle refuses it with invalid_move, not wrong_state.
+    stale: () => STALE_SORT[kind],
     readCurrent: true,
   });
 }
@@ -155,7 +186,7 @@ export async function sortCardAction(kind: Exclude<SortKind, "seen">, ref: Title
 export async function sortDeckCardAction(kind: Exclude<SortKind, "seen">, ref: TitleId): Promise<DeckActionResult> {
   return run((userId) => sortTitle(kind, userId, ref, true), {
     ref,
-    stale: (status) => (status === "seen" ? (STALE_SORT[kind] ?? STALE_SORT.pass) : ALREADY_ON[status]),
+    stale: (status) => (status === "seen" ? STALE_SORT[kind] : ALREADY_ON[status]),
     readCurrent: false,
   });
 }
@@ -170,9 +201,21 @@ export async function markSeenAction(ref: TitleId, rating: number, review: strin
   });
 }
 
-/** Undo: puts the title back the way it was before the sort, if nothing changed it since. */
+/**
+ * Undo on Discover: puts the title back the way it was before the sort, if nothing changed it since. A refusal
+ * because it changed is `stale`. The deck takes the card out again either way, so it skips the read.
+ */
 export async function undoSortAction(ref: TitleId, outcome: UndoInput): Promise<DeckActionResult> {
-  return run((userId) => restoreTitleState(userId, ref, outcome), null);
+  return run((userId) => restoreTitleState(userId, ref, outcome), null, { ref, readCurrent: false });
+}
+
+/**
+ * Undo on a title card (Search, Lists). The same undo, but a refusal because the title changed since carries the
+ * title's row as it is now, so the card can show where it really is instead of the state it held before the Undo
+ * (issue 49).
+ */
+export async function undoCardSortAction(ref: TitleId, outcome: UndoInput): Promise<DeckActionResult> {
+  return run((userId) => restoreTitleState(userId, ref, outcome), null, { ref, readCurrent: true });
 }
 
 /** Saves the Discover mode and filters to the profile, so they follow the user across devices. Core validates the choice. */
