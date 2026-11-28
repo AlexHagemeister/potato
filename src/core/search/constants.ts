@@ -6,3 +6,11 @@
  * input out of the cache table's index.
  */
 export const SEARCH_QUERY_MAX_LENGTH = 200;
+
+/**
+ * Most TMDB search pages one search request reads. TMDB's search finds people
+ * too, and they are dropped, so a page can hold no titles; the service reads
+ * on until it has one, up to this many pages (#46). Each page is one TMDB
+ * call (cached like any search), so this bounds what one request can cost.
+ */
+export const SEARCH_PAGES_PER_REQUEST = 3;

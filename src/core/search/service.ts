@@ -14,7 +14,7 @@ import { TMDB_MAX_PAGE } from "../tmdb/constants";
 import { posterUrl, ROW_POSTER_SIZE } from "../tmdb/images";
 import { tryFormatTitleKey } from "../title-id";
 import type { UserTitleState } from "../types";
-import { SEARCH_QUERY_MAX_LENGTH } from "./constants";
+import { SEARCH_PAGES_PER_REQUEST, SEARCH_QUERY_MAX_LENGTH } from "./constants";
 import type { SearchPage, SearchResult } from "./types";
 
 /** The TMDB call the service makes. The app passes getTmdb(). */
@@ -44,6 +44,13 @@ export function createSearchService(deps: SearchServiceDeps) {
    * page without asking TMDB. Bad input (user, query, page) returns a typed
    * error. A TMDB outage throws, so a caller can tell "nothing matched" from
    * "search is down".
+   *
+   * TMDB's search also finds people, which are dropped, so a TMDB page can
+   * hold no titles though later pages do (#46). An empty page reads on, up to
+   * SEARCH_PAGES_PER_REQUEST pages in all. The returned `page` is the last
+   * page read, so the next request starts after it, and `totalPages` stays
+   * TMDB's: empty results with `page < totalPages` mean "none yet, there are
+   * more pages", not "no matches".
    */
   async function searchTitles(userId: string, query: unknown, page: unknown = 1): Promise<Result<SearchPage>> {
     const u = validateUserId(userId);
@@ -55,8 +62,16 @@ export function createSearchService(deps: SearchServiceDeps) {
     if (q.value === "") return ok({ query: "", results: [], page: p.value, totalPages: 0 });
 
     // Independent reads, in parallel.
-    const [found, states] = await Promise.all([tmdb.searchTitles(q.value, p.value), library.getUserTitleStates(u.value)]);
+    const [first, states] = await Promise.all([tmdb.searchTitles(q.value, p.value), library.getUserTitleStates(u.value)]);
     if (!states.ok) return states;
+    // Read on past pages with no titles, one page at a time, within TMDB's page count and the per-request cap.
+    let found = first;
+    let read = p.value;
+    const lastPage = Math.min(first.totalPages, TMDB_MAX_PAGE, p.value + SEARCH_PAGES_PER_REQUEST - 1);
+    while (found.results.length === 0 && read < lastPage) {
+      read += 1;
+      found = await tmdb.searchTitles(q.value, read);
+    }
 
     const statusByKey = new Map(states.value.map((s) => [tryFormatTitleKey(s), s.status]));
     const visible = createVisibilityCheck(states.value, clock());
@@ -73,7 +88,7 @@ export function createSearchService(deps: SearchServiceDeps) {
         status: status === "skipped" && visible(t) ? null : status,
       };
     });
-    return ok({ query: q.value, results, page: found.page, totalPages: found.totalPages });
+    return ok({ query: q.value, results, page: read, totalPages: first.totalPages });
   }
 
   return { searchTitles };
