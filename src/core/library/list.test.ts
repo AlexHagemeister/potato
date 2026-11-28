@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Candidate } from "../types";
-import { applyListFilters, decodeCursor, encodeCursor, filtersNeedDetails, pageRows, parseListQuery, withDetails } from "./list";
-import { MAX_LIST_LIMIT, type TitleRecord } from "./types";
+import { applyListFilters, decodeCursor, encodeCursor, filtersNeedDetails, pageRows, parseListQuery, sortKey, withDetails } from "./list";
+import { LIST_SORTS, MAX_LIST_LIMIT, type TitleRecord } from "./types";
 
 function rec(tmdbId: number, over: Partial<TitleRecord> = {}): TitleRecord {
   return {
@@ -122,6 +122,37 @@ describe("cursors", () => {
     expect(decodeCursor(enc({ sort: "updated_desc" }))).toBeNull();
     expect(decodeCursor(enc(["updated_desc", null, "movie", 1]))).toBeNull();
     expect(decodeCursor("")).toBeNull();
+  });
+
+  test("every cursor a page can hand out reads back, in every sort, rated or not", () => {
+    const rows = [rec(7), rec(8, { mediaType: "tv", status: "seen", rating: 9.5 }), rec(2_147_483_647, { rating: 0.5 })];
+    for (const sort of LIST_SORTS) {
+      for (const row of rows) {
+        const key = { sort, values: sortKey(row, sort) };
+        expect(decodeCursor(encodeCursor(key))).toEqual(key);
+      }
+    }
+  });
+
+  test("reject a value of the wrong kind in any position (issue 22 item 5)", () => {
+    const enc = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url");
+    const t = 1_767_312_000_000;
+    // The time, or the rating and negated time, must be numbers.
+    expect(decodeCursor(enc(["updated_desc", "x", "movie", 1]))).toBeNull();
+    expect(decodeCursor(enc(["created_asc", "1", "movie", 1]))).toBeNull();
+    expect(decodeCursor(enc(["rating_desc", "9", -t, "movie", 1]))).toBeNull();
+    expect(decodeCursor(enc(["rating_desc", 9, "tv", "movie", 1]))).toBeNull();
+    // The identity must be a real one: a media type, then a TMDB ID.
+    expect(decodeCursor(enc(["updated_desc", t, 1, "movie"]))).toBeNull();
+    expect(decodeCursor(enc(["updated_desc", t, "person", 1]))).toBeNull();
+    expect(decodeCursor(enc(["updated_desc", t, "movie", "1"]))).toBeNull();
+    expect(decodeCursor(enc(["updated_desc", t, "movie", 0]))).toBeNull();
+    expect(decodeCursor(enc(["updated_desc", t, "movie", 1.5]))).toBeNull();
+    expect(decodeCursor(enc(["updated_desc", t, "movie", 2_147_483_648]))).toBeNull();
+    expect(decodeCursor(enc(["rating_asc", 9, -t, "tv", -3]))).toBeNull();
+    // The same shapes with the right kinds read.
+    expect(decodeCursor(enc(["updated_desc", t, "movie", 1]))).toEqual({ sort: "updated_desc", values: [t, "movie", 1] });
+    expect(decodeCursor(enc(["rating_asc", 0, -t, "tv", 3]))).toEqual({ sort: "rating_asc", values: [0, -t, "tv", 3] });
   });
 });
 

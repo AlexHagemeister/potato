@@ -86,12 +86,24 @@ export function createTitleInfoLookup(
     if (!context?.country && !context?.imdbRatings) return found;
     // Keyed by the requested ref, as lookupTitles keys it. Both attach steps keep order and length.
     const keys = [...found.keys()];
-    let infos: TitleInfo[] = [...found.values()];
-    if (context.country) infos = await tmdb.attachProviderIds(infos, context.country);
-    if (context.imdbRatings) {
-      const ids = new Map(infos.map((i) => [formatTitleKey(i), i.imdbId]));
-      infos = await attachImdbRatings(ratings(), infos, ids, getRatingsForFilter);
-    }
+    const base: TitleInfo[] = [...found.values()];
+    // The two reads are independent (one sets providerIds, the other imdb), so they run at once. Either failing
+    // fails the lookup, as before.
+    const [withProviders, withRatings] = await Promise.all([
+      context.country ? tmdb.attachProviderIds(base, context.country) : base,
+      context.imdbRatings
+        ? attachImdbRatings(ratings(), base, new Map(base.map((i) => [formatTitleKey(i), i.imdbId])), getRatingsForFilter)
+        : null,
+    ]);
+    const infos = withProviders.map((info, i): TitleInfo => {
+      if (!withRatings) return info;
+      // As attachImdbRatings leaves it: the rating when the dataset has one, else no imdb field at all.
+      const merged: TitleInfo = { ...info };
+      const imdb = withRatings[i].imdb;
+      if (imdb) merged.imdb = imdb;
+      else delete merged.imdb;
+      return merged;
+    });
     return new Map(keys.map((key, i) => [key, infos[i]]));
   };
 }

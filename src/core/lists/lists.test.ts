@@ -151,5 +151,42 @@ describe("createTitleInfoLookup", () => {
       const lookup = createTitleInfoLookup(tmdbWith([rated]), () => new MemoryRatingsStore());
       await expect(lookup(refs, { imdbRatings: true })).rejects.toThrow(/not loaded/);
     });
+
+    test("with a country too, the streaming and ratings reads run at once, not one after the other", async () => {
+      const started: string[] = [];
+      let releaseProviders = () => {};
+      const tmdb = {
+        lookupTitles: tmdbWith([rated]).lookupTitles,
+        attachProviderIds: async <T extends Candidate>(cs: readonly T[]): Promise<T[]> => {
+          started.push("providers");
+          await new Promise<void>((resolve) => (releaseProviders = resolve));
+          return cs.map((c) => ({ ...c, providerIds: [8] }));
+        },
+      };
+      const store = ratings();
+      const spy = () => ({
+        hasAnyRatings: () => store.hasAnyRatings(),
+        getMany: (ids: readonly string[]) => (started.push("ratings"), store.getMany(ids)),
+      });
+      const pending = createTitleInfoLookup(tmdb, spy)(refs, { country: "US", imdbRatings: true });
+      // The providers read is still held, and the ratings read has already started.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(started).toEqual(["providers", "ratings"]);
+      releaseProviders();
+      const found = await pending;
+      expect(found.get("movie:603")).toMatchObject({ providerIds: [8], imdb: { rating: 8.7, votes: 2_000_000 } });
+    });
+
+    test("with a country too, a ratings failure still fails the lookup", async () => {
+      const lookup = createTitleInfoLookup(tmdbWith([rated]), () => new MemoryRatingsStore());
+      await expect(lookup(refs, { country: "US", imdbRatings: true })).rejects.toThrow(/not loaded/);
+    });
+
+    test("a title with no rating carries no imdb field, with or without a country", async () => {
+      for (const context of [{ imdbRatings: true }, { country: "US", imdbRatings: true }]) {
+        const found = await createTitleInfoLookup(tmdbWith([rated, unmapped]), ratings)(refs, context);
+        expect("imdb" in found.get("tv:1399")!).toBe(false);
+      }
+    });
   });
 });

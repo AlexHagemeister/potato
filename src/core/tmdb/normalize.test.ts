@@ -117,6 +117,13 @@ describe("pickTrailer", () => {
     expect(pickTrailer([{ site: "Vimeo", key: "x", type: "Trailer" }, v("", { type: "Trailer" })])).toBeNull();
     expect(pickTrailer([])).toBeNull();
   });
+
+  test("a video type named like an object's built-in key is not a trailer (issue 24 item 8)", () => {
+    for (const type of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+      expect(pickTrailer([v("odd", { type })])).toBeNull();
+      expect(pickTrailer([v("odd", { type, official: true }), v("real", { type: "Teaser" })])).toBe("real");
+    }
+  });
 });
 
 describe("normalizeProviders", () => {

@@ -231,6 +231,14 @@ export function rowVisible(
  * An ISO 8601 date-time with an explicit offset ("Z" or "+05:30"), as
  * toISOString and Postgres row_to_json write them. A string without an offset
  * parses in the host's local time zone, so it does not count as a time.
+ *
+ * That is stricter than "stays away too long" (hiddenKeys): a skipped row
+ * whose skipUntil is an offsetless string never becomes a time, so its title
+ * stays off the deck until something writes that row again (a tap on its
+ * title card in Search, say). Nothing writes that form today: skipUntil
+ * reaches the engine as a Date from the database, or as JSON of one
+ * (toISOString, always "Z"). A new source of skip dates must keep the offset,
+ * or this check hides its titles for good.
  */
 const ISO_WITH_OFFSET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
 
