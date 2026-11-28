@@ -238,6 +238,72 @@ export function updateLists(change: (lists: Lists) => Lists) {
   if (shownNow) setShown({ ...shownNow, lists: change(shownNow.lists) });
 }
 
+/*
+ * Where a changed row lands (issue 119). Every change these rows take goes through one rule, core's applyTitleRecord:
+ * a title card's save (applyTitleChange), the Lists screen's own saves and their Undos (placeTitle), the move
+ * + Watchlist shows before its save answers (showMoved), and the saves a fresh render replays (withSaves). So a change
+ * lands in the same place whichever screen made it. Re-sorting an in-place edit (issue 118) is then a change in core
+ * alone. A list order by some key other than the time of the last change would also need showMoved's provisional
+ * time replaced by that key.
+ */
+
+/** A row the Lists screen acted on, and the filters the rows showed it under. */
+export type ActedOn = { row: ListRow; filters: FilterChoice };
+
+/**
+ * A Lists save, or its Undo, answered: `record` is the title's row as the server now holds it (null: no row). The rows
+ * on screen take it where applyTitleRecord puts it. `actedOn` supplies the title and poster when the rows no longer
+ * show the title (they started over meanwhile), but only while the rows have the filters it was shown under, since
+ * nothing on the phone can tell whether it fits others (issues 121 and 155). Rows under other filters are left as
+ * they are. On one Lists screen their filter load read the server after the save, because Next sends a page's server
+ * actions one at a time (the filter load does not wait on writesSettled). After a navigation that queue can be
+ * bypassed, and a filter load can read before the save: issue 168.
+ */
+export function placeTitle(ref: TitleId, record: TitleRecord | null, actedOn: ActedOn) {
+  if (!shownNow) return;
+  const known = sameFilterChoice(actedOn.filters, shownNow.filters) ? actedOn.row : null;
+  const lists = applyTitleRecord(shownNow.lists, ref, record, known);
+  if (lists !== shownNow.lists) setShown({ ...shownNow, lists });
+}
+
+/**
+ * The row as a TitleRecord, for a change the server has not stamped: a move shown before its save answers, or a
+ * failed save's put-back. applyTitleRecord reads only the status, rating, review, and time; the other fields are
+ * placeholders and are never shown or sent.
+ */
+export function rowAsRecord(row: ListRow): TitleRecord {
+  const updatedAt = new Date(row.updatedAt);
+  return {
+    mediaType: row.mediaType,
+    tmdbId: row.tmdbId,
+    status: row.status,
+    rating: row.rating,
+    review: row.review,
+    reviewVisibility: "private",
+    skipUntil: null,
+    createdAt: updatedAt,
+    updatedAt,
+  };
+}
+
+/**
+ * The lists with `row` moved to `to` before its save answers, through the same rule. The move is the newest change
+ * these rows know of, so it is dated 1 ms after the newest row they show, never by the phone's clock (PR 177 review).
+ * A clock behind the server's would sort it below rows changed just before. A clock ahead would date it in the
+ * future, so a change the server stamps while the save is under way (a title card's) would sort below it. Either
+ * way the save's answer keeps the row where it is (in place), and the order would differ from a reload. The phone's
+ * clock is used only when the lists show no row at all.
+ * Only to a list whose rows carry no rating or review: a move to Seen waits for its save.
+ */
+export function showMoved(lists: Lists, row: ListRow, to: "watchlist" | "passed"): Lists {
+  let newest = -Infinity;
+  for (const status of LIST_STATUSES) {
+    for (const r of lists[status].rows) newest = Math.max(newest, new Date(r.updatedAt).getTime() + 1);
+  }
+  if (newest === -Infinity) newest = Date.now();
+  return applyTitleRecord(lists, row, rowAsRecord({ ...row, status: to, rating: null, review: null, updatedAt: new Date(newest) }));
+}
+
 /**
  * A title card saved a change (issues 93 and 110): `record` is the title's row as the server now holds it. Back to
  * Lists then shows the title where it is now at once, not the row from before the card, so an Edit tapped right after

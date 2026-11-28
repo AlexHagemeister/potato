@@ -11,7 +11,7 @@ import {
   sameFilterChoice,
   type FilterChoice,
 } from "@/core/filters";
-import type { ActionOutcome, TitleRecord } from "@/core/library/types";
+import type { ActionOutcome } from "@/core/library/types";
 import { listFromParam, type ListRow, type ListRowsPage } from "@/core/lists";
 import { formatTitleKey } from "@/core/title-id";
 import type { ListStatus, TitleId } from "@/core/types";
@@ -32,11 +32,15 @@ import {
   setShown,
   clearListsStale,
   listsStale,
+  placeTitle,
+  rowAsRecord,
+  showMoved,
   startSave,
   subscribeShown,
   updateLists,
   wasShown,
   withSaves,
+  type ActedOn,
   type ListState,
   type Lists,
   type Shown,
@@ -169,30 +173,13 @@ function toLists(pages: Record<ListStatus, ListRowsPage>): Lists {
   return out;
 }
 
-// Screen-state helpers. They only move rows the server already returned
-// between the three on-screen lists. Every rule lives in core.
-function without(lists: Lists, status: ListStatus, key: string): Lists {
-  return { ...lists, [status]: { ...lists[status], rows: lists[status].rows.filter((r) => keyOf(r) !== key) } };
-}
-function insertAt(lists: Lists, status: ListStatus, row: ListRow, index: number): Lists {
-  const rows = lists[status].rows.filter((r) => keyOf(r) !== keyOf(row));
-  const at = index < 0 || index > rows.length ? 0 : index;
-  return { ...lists, [status]: { ...lists[status], rows: [...rows.slice(0, at), row, ...rows.slice(at)] } };
-}
-function replaced(lists: Lists, status: ListStatus, row: ListRow): Lists {
-  return { ...lists, [status]: { ...lists[status], rows: lists[status].rows.map((r) => (keyOf(r) === keyOf(row) ? row : r)) } };
-}
+// Where a changed row lands is one rule, in core (applyTitleRecord, through shown.ts: placeTitle and showMoved).
+// This screen never places a row itself (issue 119).
 /** A list with the next page added, skipping rows it already shows. */
 function appendPage(list: ListState, page: ListRowsPage): ListState {
   const have = new Set(list.rows.map(keyOf));
   return { rows: [...list.rows, ...page.rows.filter((r) => !have.has(keyOf(r)))], nextCursor: page.nextCursor };
 }
-/** The row as the server now holds it. */
-function withRecord(row: ListRow, record: TitleRecord | null): ListRow {
-  if (!record) return row;
-  return { ...row, status: record.status as ListStatus, rating: record.rating, review: record.review, updatedAt: record.updatedAt };
-}
-
 interface Toast {
   id: number;
   message: string;
@@ -577,14 +564,17 @@ export function ListsScreen({
     return result;
   }
 
-  /** Undo for a move or an edit: restore the row in core, then put the screen back. */
-  function undoer(ref: TitleId, outcome: ActionOutcome, putBack: (lists: Lists) => Lists) {
+  /**
+   * Undo for a move or an edit: restore the row in core, then show the row the Undo restored, where the one rule puts
+   * it (placeTitle). For a move that is back where its time sorts it, as a reload shows it; for an edit, in place.
+   */
+  function undoer(ref: TitleId, outcome: ActionOutcome, actedOn: ActedOn) {
     return async () => {
       setToast(null);
       const result = await write(ref, () => undoAction(ref, outcome), undefined, outcome);
       // On failure nothing was undone, so the screen already matches the server.
       if (!result.ok) return failed(result);
-      updateLists(putBack);
+      placeTitle(ref, result.value.current, actedOn);
     };
   }
 
@@ -602,18 +592,15 @@ export function ListsScreen({
   async function saveMarkSeen(row: ListRow, rating: number, review: string): Promise<string | null> {
     const ref = refOf(row);
     const key = keyOf(row);
+    const actedOn: ActedOn = { row, filters: loaded };
     const result = await write(ref, () => markSeenAction(ref, rating, review));
     if (!result.ok) return result.stale ? refusedInSheet(result) : result.error;
+    // The row below it, which the toast keeps clear of once this one leaves the Watchlist.
     const index = lists.watchlist.rows.findIndex((r) => keyOf(r) === key);
-    const moved = withRecord(row, result.value.current);
     const next = index >= 0 ? lists.watchlist.rows[index + 1] : undefined;
-    updateLists((prev) => insertAt(without(prev, "watchlist", key), "seen", moved, 0));
+    placeTitle(ref, result.value.current, actedOn);
     setSheet(null);
-    show(
-      "Moved to Seen",
-      undoer(ref, result.value, (prev) => insertAt(without(prev, "seen", key), "watchlist", row, index)),
-      next && keyOf(next),
-    );
+    show("Moved to Seen", undoer(ref, result.value, actedOn), next && keyOf(next));
     return null;
   }
 
@@ -623,45 +610,41 @@ export function ListsScreen({
     // title still has that rating and review (issue 103). A Seen row always has a rating.
     if (row.rating === null) return "Couldn't save. Try again.";
     const shown = { rating: row.rating, review: row.review };
+    const actedOn: ActedOn = { row, filters: loaded };
     const result = await write(ref, () => editRatingAction(ref, rating, review, shown));
     if (!result.ok) return result.stale ? refusedInSheet(result) : result.error;
-    updateLists((prev) => replaced(prev, "seen", withRecord(row, result.value.current)));
+    placeTitle(ref, result.value.current, actedOn);
     setSheet(null);
-    show("Rating saved", undoer(ref, result.value, (prev) => replaced(prev, "seen", row)), keyOf(row));
+    show("Rating saved", undoer(ref, result.value, actedOn), keyOf(row));
     return null;
   }
 
   async function addToWatchlist(row: ListRow) {
     const ref = refOf(row);
     const key = keyOf(row);
+    const actedOn: ActedOn = { row, filters: loaded };
+    // The row below it, which the toast keeps clear of once this one leaves Passed.
     const index = lists.passed.rows.findIndex((r) => keyOf(r) === key);
     const next = index >= 0 ? lists.passed.rows[index + 1] : undefined;
-    const putBack = (prev: Lists) => insertAt(without(prev, "watchlist", key), "passed", row, index);
     // Moves on tap, with the row's button disabled until the move saves. A failure puts the row back. A fresh render
     // that arrives before the save answers shows the move too (write's `showUnderWay`, issue 137), but only when it shows
     // the title on Passed. One that doesn't read after the save, has filters the title doesn't fit, or holds the row
     // only past its first page (issue 98 leftover, filed separately).
-    const move = (prev: Lists) =>
-      prev.passed.rows.some((r) => keyOf(r) === key)
-        ? insertAt(without(prev, "passed", key), "watchlist", { ...row, status: "watchlist" }, 0)
-        : prev;
+    const move = (prev: Lists) => (prev.passed.rows.some((r) => keyOf(r) === key) ? showMoved(prev, row, "watchlist") : prev);
     setRowPending(key, true);
     updateLists(move);
     const result = await write(ref, () => addToWatchlistAction(ref), move);
     setRowPending(key, false);
     if (!result.ok) {
-      updateLists(putBack);
+      // Back on Passed, where its own time sorts it: where it was.
+      placeTitle(ref, rowAsRecord(row), actedOn);
       return failed(result);
     }
-    // The whole move again, not only the saved record: the rows can have started over meanwhile with the title still
-    // on Passed. A fresh render shows the move already (withSaves), but a filter load does not, nor does a fresh
+    // The saved row, wherever the rows show the title now: the rows can have started over meanwhile with the title
+    // still on Passed. A fresh render shows the move already (withSaves), but a filter load does not, nor does a fresh
     // render that holds the row only past its first page.
-    const saved = withRecord({ ...row, status: "watchlist" }, result.value.current);
-    updateLists((prev) => {
-      const at = prev.watchlist.rows.findIndex((r) => keyOf(r) === key);
-      return insertAt(without(prev, "passed", key), "watchlist", saved, at);
-    });
-    show("Moved to Watchlist", undoer(ref, result.value, putBack), next && keyOf(next));
+    placeTitle(ref, result.value.current, actedOn);
+    show("Moved to Watchlist", undoer(ref, result.value, actedOn), next && keyOf(next));
   }
 
   async function showMore() {
