@@ -428,3 +428,320 @@ describe("a second sort replaces the Undo toast", () => {
     expect(queued(101)).toBe(true);
   });
 });
+
+describe("a failed sort brings back the Undo its toast replaced (issue 44 item 1)", () => {
+  const REF_A = { mediaType: "movie", tmdbId: 101 };
+  const OUTCOME_A = { previous: null, current: row(101, { status: "passed" }) };
+  const FAILED: DeckActionResult = { ok: false, error: "Couldn't save. Try again." };
+
+  /** Pass on card 101, saved. Returns its toast. */
+  async function passFirst(outcome: UndoInput = OUTCOME_A as never) {
+    store.sortCard("pass", CARDS[0]);
+    answerSort(0, { ok: true, outcome });
+    await settle();
+    return snapshot().toast!;
+  }
+
+  test("the failed card comes back with its error, and the earlier sort's Undo is offered again and works once", async () => {
+    const first = await passFirst();
+    store.sortCard("watchlist", CARDS[1]);
+    expect(snapshot().toast?.message).toBe("Added to Watchlist");
+    answerSort(1, FAILED);
+    await settle();
+
+    expect(top()).toBe(102);
+    expect(snapshot().notice?.message).toBe("Couldn't save. Try again.");
+    // The earlier sort's words, as a new toast with a full window of its own.
+    expect(snapshot().toast?.message).toBe("Passed");
+    expect(snapshot().toast?.id).not.toBe(first.id);
+
+    await store.undoLastSort();
+    expect(undosSent()).toEqual([{ ref: REF_A, outcome: OUTCOME_A }]);
+    expect(top()).toBe(101);
+    expect(snapshot().toast).toBeNull();
+    // Spent: no second Undo, of this sort or any other.
+    await store.undoLastSort();
+    expect(undosSent()).toHaveLength(1);
+  });
+
+  test("no connection (the request throws): the same", async () => {
+    await passFirst();
+    store.sortCard("skip", CARDS[1]);
+    sortRequests[1].reply.reject(new TypeError("Failed to fetch"));
+    await settle();
+    expect(top()).toBe(102);
+    expect(snapshot().notice?.message).toBe("Couldn't save. Check your connection.");
+    expect(snapshot().toast?.message).toBe("Passed");
+    await store.undoLastSort();
+    expect(undosSent()).toEqual([{ ref: REF_A, outcome: OUTCOME_A }]);
+  });
+
+  test("refused as stale: the refused card stays out, and the earlier Undo is still offered (another title)", async () => {
+    await passFirst();
+    store.sortCard("pass", CARDS[1]);
+    answerSort(1, { ok: false, stale: true, error: "Already on your Watchlist." });
+    await settle();
+    expect(queued(102)).toBe(false);
+    expect(snapshot().notice?.message).toBe("Already on your Watchlist.");
+    expect(snapshot().toast?.message).toBe("Passed");
+    await store.undoLastSort();
+    expect(undosSent()).toEqual([{ ref: REF_A, outcome: OUTCOME_A }]);
+  });
+
+  test("the Undo brought back sends the earlier sort's outcome exactly: a Seen row's rating, review, and dates", async () => {
+    const outcome = { previous: PREVIOUS.seen(101), current: row(101, { status: "watchlist" }) };
+    store.sortCard("watchlist", CARDS[0]);
+    answerSort(0, { ok: true, outcome: structuredClone(outcome) as never });
+    await settle();
+    store.sortCard("pass", CARDS[1]);
+    answerSort(1, FAILED);
+    await settle();
+    expect(snapshot().toast?.message).toBe("Added to Watchlist");
+    await store.undoLastSort();
+    expect(undosSent()).toEqual([{ ref: REF_A, outcome }]);
+    // Back on the Seen list, so the card stays out of the deck (VISION invariant 3).
+    expect(queued(101)).toBe(false);
+  });
+
+  test("the same card sorted again and failing again: the earlier Undo comes back each time", async () => {
+    await passFirst();
+    store.sortCard("watchlist", CARDS[1]);
+    answerSort(1, FAILED);
+    await settle();
+    store.sortCard("watchlist", CARDS[1]);
+    expect(snapshot().toast?.message).toBe("Added to Watchlist");
+    answerSort(2, FAILED);
+    await settle();
+    expect(snapshot().toast?.message).toBe("Passed");
+    await store.undoLastSort();
+    expect(undosSent()).toEqual([{ ref: REF_A, outcome: OUTCOME_A }]);
+  });
+
+  describe("both sorts fail: no Undo is offered and none is sent", () => {
+    const orders: { name: string; run: () => Promise<void> }[] = [
+      {
+        name: "the earlier one first",
+        run: async () => {
+          answerSort(0, FAILED);
+          await settle();
+          answerSort(1, FAILED);
+        },
+      },
+      {
+        name: "the later one first",
+        run: async () => {
+          answerSort(1, FAILED);
+          await settle();
+          // Brought back while its own save was still on its way.
+          expect(snapshot().toast?.message).toBe("Passed");
+          answerSort(0, FAILED);
+        },
+      },
+      {
+        name: "both answers in the same tick",
+        run: async () => {
+          answerSort(0, FAILED);
+          answerSort(1, FAILED);
+        },
+      },
+      {
+        name: "both in the same tick, the later answer first",
+        run: async () => {
+          answerSort(1, FAILED);
+          answerSort(0, FAILED);
+        },
+      },
+    ];
+    for (const { name, run } of orders) {
+      test(name, async () => {
+        store.sortCard("pass", CARDS[0]);
+        store.sortCard("watchlist", CARDS[1]);
+        await run();
+        await settle();
+        expect(snapshot().toast).toBeNull();
+        expect(queued(101)).toBe(true);
+        expect(queued(102)).toBe(true);
+        await store.undoLastSort();
+        expect(undosSent()).toHaveLength(0);
+      });
+    }
+  });
+
+  test("brought back while its own save is still on its way: the Undo waits for that save, then sends its outcome", async () => {
+    store.sortCard("pass", CARDS[0]);
+    store.sortCard("watchlist", CARDS[1]);
+    answerSort(1, FAILED);
+    await settle();
+    expect(snapshot().toast?.message).toBe("Passed");
+    const undoing = store.undoLastSort();
+    await settle();
+    expect(undosSent()).toHaveLength(0);
+    answerSort(0, { ok: true, outcome: OUTCOME_A });
+    await undoing;
+    expect(undosSent()).toEqual([{ ref: REF_A, outcome: OUTCOME_A }]);
+    expect(top()).toBe(101);
+  });
+
+  test("the Undo brought back runs out with its toast: a later failed sort does not bring it back again", async () => {
+    await passFirst();
+    store.sortCard("watchlist", CARDS[1]);
+    answerSort(1, FAILED);
+    await settle();
+    store.dismissToast(snapshot().toast!.id);
+    expect(snapshot().toast).toBeNull();
+    store.sortCard("skip", CARDS[1]);
+    answerSort(2, FAILED);
+    await settle();
+    expect(snapshot().toast).toBeNull();
+    await store.undoLastSort();
+    expect(undosSent()).toHaveLength(0);
+  });
+
+  test("an Undo that had run out before the failed tap stays gone", async () => {
+    const first = await passFirst();
+    store.dismissToast(first.id);
+    store.sortCard("watchlist", CARDS[1]);
+    answerSort(1, FAILED);
+    await settle();
+    expect(snapshot().toast).toBeNull();
+    await store.undoLastSort();
+    expect(undosSent()).toHaveLength(0);
+  });
+
+  test("an Undo already used is never offered again: undo, sort again, and that sort fails", async () => {
+    await passFirst();
+    await store.undoLastSort();
+    expect(undosSent()).toHaveLength(1);
+    store.sortCard("watchlist", CARDS[0]);
+    answerSort(1, FAILED);
+    await settle();
+    expect(snapshot().toast).toBeNull();
+    await store.undoLastSort();
+    expect(undosSent()).toHaveLength(1);
+  });
+
+  test("Undo tapped on the later sort, which then fails: the earlier Undo does not come back", async () => {
+    await passFirst();
+    store.sortCard("watchlist", CARDS[1]);
+    const undoing = store.undoLastSort();
+    answerSort(1, FAILED);
+    await undoing;
+    await settle();
+    expect(snapshot().toast).toBeNull();
+    expect(undosSent()).toHaveLength(0);
+    await store.undoLastSort();
+    expect(undosSent()).toHaveLength(0);
+  });
+
+  test("the later sort saved: the earlier Undo is gone for good, even when a third sort fails after the toast ran out", async () => {
+    await passFirst();
+    store.sortCard("watchlist", CARDS[1]);
+    answerSort(1, { ok: true, outcome: { previous: null, current: row(102, { status: "watchlist" }) } });
+    await settle();
+    store.dismissToast(snapshot().toast!.id);
+    store.sortCard("skip", CARDS[2]);
+    answerSort(2, FAILED);
+    await settle();
+    expect(snapshot().toast).toBeNull();
+    await store.undoLastSort();
+    expect(undosSent()).toHaveLength(0);
+  });
+
+  test("three sorts, the last fails: the second sort's Undo comes back, never the first's", async () => {
+    await passFirst();
+    const outcomeB = { previous: null, current: row(102, { status: "watchlist" }) };
+    store.sortCard("watchlist", CARDS[1]);
+    store.sortCard("skip", CARDS[2]);
+    answerSort(1, { ok: true, outcome: outcomeB });
+    answerSort(2, FAILED);
+    await settle();
+    expect(snapshot().toast?.message).toBe("Added to Watchlist");
+    await store.undoLastSort();
+    expect(undosSent()).toEqual([{ ref: { mediaType: "movie", tmdbId: 102 }, outcome: outcomeB }]);
+    await store.undoLastSort();
+    expect(undosSent()).toHaveLength(1);
+  });
+
+  test("three sorts, the last two fail: one sort deep, so the first sort's Undo does not come back", async () => {
+    await passFirst();
+    store.sortCard("watchlist", CARDS[1]);
+    store.sortCard("skip", CARDS[2]);
+    answerSort(1, FAILED);
+    await settle();
+    answerSort(2, FAILED);
+    await settle();
+    expect(snapshot().toast).toBeNull();
+    await store.undoLastSort();
+    expect(undosSent()).toHaveLength(0);
+  });
+
+  test("three sorts, the last fails and then the second: still one sort deep, the first sort's Undo does not come back", async () => {
+    await passFirst();
+    store.sortCard("watchlist", CARDS[1]);
+    store.sortCard("skip", CARDS[2]);
+    answerSort(2, FAILED);
+    await settle();
+    expect(snapshot().toast?.message).toBe("Added to Watchlist");
+    answerSort(1, FAILED);
+    await settle();
+    expect(snapshot().toast).toBeNull();
+    await store.undoLastSort();
+    expect(undosSent()).toHaveLength(0);
+  });
+
+  test("a settings change after the tap drops both Undos: the failed sort brings nothing back", async () => {
+    await passFirst();
+    store.sortCard("watchlist", CARDS[1]);
+    // The same user with other services: the queued cards' streaming data is stale, which ends the Undo window.
+    store.startDeck(`user-${userSeq}`, "US:8", DEFAULT_DECK_CHOICE);
+    expect(snapshot().toast).toBeNull();
+    answerSort(1, FAILED);
+    await settle();
+    expect(snapshot().toast).toBeNull();
+    await store.undoLastSort();
+    expect(undosSent()).toHaveLength(0);
+  });
+
+  // A new deck between the tap and the failure changes nothing, as for any Undo: only a settings change ends the
+  // Undo window (core's deckInputChange), and Check again keeps it. The failed card and the Undone card both land
+  // on top of the new deck.
+  const newDecks: { name: string; change: () => void }[] = [
+    { name: "a new mode", change: () => store.chooseDeck({ ...DEFAULT_DECK_CHOICE, mode: "top_rated" }) },
+    {
+      name: "new filters",
+      change: () => store.chooseDeck({ ...DEFAULT_DECK_CHOICE, filters: { ...DEFAULT_DECK_CHOICE.filters, type: "tv" } }),
+    },
+    { name: "Check again (a new deal)", change: () => store.startOver() },
+  ];
+  for (const { name, change } of newDecks) {
+    test(`${name} after the tap: the failed sort still brings the earlier Undo back, onto the new deck`, async () => {
+      await passFirst();
+      store.sortCard("watchlist", CARDS[1]);
+      change();
+      await settle();
+      // The later sort's own toast outlives the new deck, as before this change.
+      expect(snapshot().toast?.message).toBe("Added to Watchlist");
+      answerSort(1, FAILED);
+      await settle();
+      expect(top()).toBe(102);
+      expect(snapshot().notice?.message).toBe("Couldn't save. Try again.");
+      expect(snapshot().toast?.message).toBe("Passed");
+      await store.undoLastSort();
+      expect(undosSent()).toEqual([{ ref: REF_A, outcome: OUTCOME_A }]);
+      expect(top()).toBe(101);
+      await store.undoLastSort();
+      expect(undosSent()).toHaveLength(1);
+    });
+  }
+
+  test("a new user after the tap: the old user's failed sort brings nothing back", async () => {
+    await passFirst();
+    store.sortCard("watchlist", CARDS[1]);
+    store.startDeck(`user-${++userSeq}`, "US:", DEFAULT_DECK_CHOICE);
+    answerSort(1, FAILED);
+    await settle();
+    expect(snapshot().toast).toBeNull();
+    await store.undoLastSort();
+    expect(undosSent()).toHaveLength(0);
+  });
+});

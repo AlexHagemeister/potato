@@ -16,6 +16,7 @@ import { Screen } from "../../../_shell/screen";
 import { editRatingAction, removeRatingAction } from "../../../lists/actions";
 import { noteTitleChange } from "../../../library-changes";
 import { applyTitleChange, markListsStale } from "../../../lists/shown";
+import { undoAfterFailedTap } from "./kept-undo";
 import { SimilarRow } from "./similar-row";
 
 // The full card for one title, opened from Search, Lists, or another title's "You might also like" row. The same card and
@@ -24,7 +25,8 @@ import { SimilarRow } from "./similar-row";
 // after a tap, showing where the title now is, since there is no next card.
 // Each button calls the same server action the deck does, and core decides
 // what it does to the title's row. Pass, Skip, and Watchlist show at once and
-// roll back with an error if the save fails. Seen it waits for the save, like
+// roll back with an error if the save fails, and the Undo that was on offer
+// at the tap is offered again (issue 44). Seen it waits for the save, like
 // the deck. Undo restores the row exactly as it was (VISION invariant 2).
 // Core decides what the card shows for a row (cardUserState): getCard applies
 // it on the server, and this screen applies it to each action's outcome.
@@ -258,6 +260,10 @@ export function TitleScreen({ card }: { card: Card }) {
       return;
     }
     const before = state;
+    // The Undo on offer now. It comes down with the tap and comes back if the save fails (undoAfterFailedTap),
+    // however long the save took: the buttons wait for it (busy), so nothing else can have happened meanwhile. The
+    // deck differs: it moves on at once, so there the Undo comes back only within the failed sort's own toast.
+    const kept = toast;
     // Shows at once. The save runs behind it and rolls back if it fails.
     setState({ status: STATUS_OF[kind], rating: null, review: null, skipUntil: null });
     setToast(null);
@@ -275,6 +281,7 @@ export function TitleScreen({ card }: { card: Card }) {
     else {
       setState(before);
       if (result.stale) showTrueState(result);
+      setToast(undoAfterFailedTap(kept, result, () => ++seq.current));
       fail(result.error);
     }
   }

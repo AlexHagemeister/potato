@@ -1,7 +1,8 @@
 "use client";
 
 // The Discover screen's client state: the card queue, the page fetches, the
-// optimistic sorts, and the last sort's Undo. It lives at module scope, not in
+// optimistic sorts, and the one Undo on offer (the last sort's, or the sort
+// before it when the last one's save failed). It lives at module scope, not in
 // a component, so switching tabs and coming back shows the same card at once,
 // with no refetch. It is scoped to one user: a different user id resets it.
 // A change to the user's country or services (the settings key) refreshes the
@@ -76,7 +77,7 @@ const DONE_LABEL: Record<SortKind, string> = {
   seen: "Marked as seen",
 };
 
-/** The last sort's confirmation, with its Undo. */
+/** The confirmation of the sort an Undo is on offer for, with its Undo: the last sort, or the one before it when the last one failed. */
 export interface Toast {
   id: number;
   message: string;
@@ -96,11 +97,20 @@ export interface Notice {
 type SortResult = { ok: true; outcome: UndoInput } | { ok: false; error: string; stale?: boolean };
 
 interface LastSort {
+  /** Its toast's id. A toast put back after a later sort failed gets a new one. */
   id: number;
   card: DeckPageCard;
+  /** The toast's words, to show again if a later sort fails. */
+  message: string;
   pending: Promise<SortResult>;
   /** The sort's result once its save settles. Its outcome says what an Undo restores. */
   settled: SortResult | null;
+  /**
+   * The sort whose Undo this one's toast replaced while it was still on offer. If this sort's save fails, that
+   * Undo is offered again (issue 44). One sort deep: it holds no `displaced` of its own. Null once that sort's own
+   * save fails. Read only when this sort's save fails.
+   */
+  displaced: LastSort | null;
 }
 
 export type DeckView =
@@ -574,11 +584,30 @@ export function dismissToast(id: number) {
   set({ toast: null });
 }
 
-/** Ends the last sort's Undo window. */
+/** Ends the Undo window: the Undo on offer goes, and with it the one a failed save could have brought back. */
 function dropUndo() {
   lastSort = null;
   clearTimeout(toastTimer);
   if (state.toast) set({ toast: null });
+}
+
+/**
+ * The last sort's save failed, so its own Undo goes away. The Undo its toast replaced comes back, for a full
+ * window, so a failed tap never costs the Undo of the tap before it (issue 44, VISION invariant 2). Only a sort
+ * whose Undo was still on offer at the failed tap comes back, and only while the failed sort is still the last one:
+ * not after its toast ran out (so not when the save took longer than TOAST_MS to fail), its Undo was tapped, a
+ * newer sort was made, or the settings or the user changed. A new mode, new filters, or a new deal in between
+ * change nothing here, as for any Undo (core's deckInputChange): the earlier card comes back on top of the new deck.
+ *
+ * The title card has no such time limit (title-screen.tsx): its buttons wait for the save, so nothing else can
+ * happen in between, while the deck moves on and its Undo window is the toast's.
+ */
+function undoFailedLastSort() {
+  const earlier = lastSort?.displaced ?? null;
+  if (!earlier) return dropUndo();
+  lastSort = earlier;
+  // The new toast's id, so the toast running out ends this Undo too (dismissToast).
+  earlier.id = showToast(earlier.message);
 }
 
 /** An error stays up until dismissed or the next sort, so a sheet on top can't hide it until it expires. */
@@ -593,8 +622,12 @@ export function dismissNotice(id: number) {
 /** A sort was made: the previous error is old news. Its toast offers Undo. */
 function sorted(kind: SortKind, card: DeckPageCard, pending: Promise<SortResult>) {
   if (state.notice) set({ notice: null });
-  const id = showToast(DONE_LABEL[kind]);
-  const sort: LastSort = { id, card, pending, settled: null };
+  // The Undo still on offer, if any. It comes back if this sort's save fails (undoFailedLastSort).
+  const displaced = lastSort;
+  if (displaced) displaced.displaced = null;
+  const message = DONE_LABEL[kind];
+  const id = showToast(message);
+  const sort: LastSort = { id, card, message, pending, settled: null, displaced };
   lastSort = sort;
   void pending.then((result) => {
     sort.settled = result;
@@ -605,7 +638,8 @@ function sorted(kind: SortKind, card: DeckPageCard, pending: Promise<SortResult>
 /**
  * Pass, Skip, or Watchlist. The next card shows at once and the write runs
  * behind it. If the write fails, the card comes back on top with an error
- * notice. If the settings changed meanwhile, the card's streaming data is
+ * notice, and the Undo of the sort before it is offered again if this tap
+ * replaced it (issue 44). If the settings changed meanwhile, the card's streaming data is
  * stale, so the deck deals it again later with fresh data instead. If the
  * title was put on a list, or skipped, elsewhere while the card was on
  * screen, core refuses (issues 74 and 83): the card stays gone and a notice
@@ -630,8 +664,10 @@ export function sortCard(kind: Exclude<SortKind, "seen">, card: DeckPageCard) {
       saving.delete(key);
       touch(key);
       if (!result.ok) {
-        // Only this sort's own Undo goes away. A newer sort keeps its toast.
-        if (lastSort?.card === card) dropUndo();
+        // Only this sort's own Undo goes away. A newer sort keeps its toast, but can no longer bring this one's
+        // Undo back. If this was the last sort, the Undo its toast replaced is offered again (issue 44).
+        if (lastSort?.card === card) undoFailedLastSort();
+        else if (lastSort?.displaced?.card === card) lastSort.displaced = null;
         if (result.stale) {
           // The title was sorted elsewhere and core left it there (issues 74 and 83). It is on a list or skipped
           // until later, so the card stays out of the deck (VISION invariant 3), even if an Undo tapped meanwhile
@@ -691,7 +727,8 @@ export async function markCardSeen(card: DeckPageCard, rating: number, review: s
 }
 
 /**
- * Undoes the last sort: core restores the title's previous state, and the
+ * Undoes the sort whose Undo is on offer (the last sort, or the one before it
+ * when the last one's save failed): core restores the title's previous state, and the
  * card comes back on top at once, unless that state keeps it out of the deck
  * (issue 54). The sort's outcome names the state: when the title was on a
  * list before the sort (the card was stale: it was put on a list elsewhere
