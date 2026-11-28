@@ -46,8 +46,9 @@ type View = { kind: "idle" } | { kind: "loading" } | Failed | (Results & { stale
 
 /**
  * The results showing when a result was opened, and where the list was scrolled, so Back from its card shows them
- * again (#69). One at a time: only the last opened result's screen comes back. It lives as long as the page does,
- * so a reload starts over.
+ * again (#69). Kept by a result tap, and dropped by any other link tapped on Search (a tab) and by a query edit, so
+ * only Back to the screen a result was opened from shows them. It lives as long as the page does, so a reload
+ * starts over.
  */
 let kept: { results: Fetched & Results; scrollTop: number } | null = null;
 
@@ -173,7 +174,9 @@ export function SearchScreen({ initialQuery }: { initialQuery: string }) {
   /** The box's text changed (typing, Clear). */
   function edit(next: string) {
     setQuery(next);
-    if (next.trim() !== trimmed) setRestoredFor(null);
+    if (next.trim() === trimmed) return;
+    setRestoredFor(null);
+    kept = null;
   }
 
   const answered = fetched && fetched.query === trimmed && fetched.attempt === attempt;
@@ -213,6 +216,8 @@ export function SearchScreen({ initialQuery }: { initialQuery: string }) {
       const link = e.target instanceof Element ? e.target.closest<HTMLAnchorElement>("a[href]") : null;
       if (!link) return;
       clearTimeout(urlTimer.current);
+      // Rows are kept only for Back from a result's card: a result tap keeps them again just after this (keep).
+      kept = null;
       const to = new URL(link.href);
       if (to.origin === window.location.origin && to.pathname === "/search" && !to.search) {
         setQuery("");
