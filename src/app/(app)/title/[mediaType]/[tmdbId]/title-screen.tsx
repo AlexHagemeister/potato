@@ -177,15 +177,16 @@ export function TitleScreen({ card }: { card: Card }) {
   /**
    * A stale refusal couldn't read where the title is now: reload the card from the server, but only once nothing on
    * screen would be lost. A reload starts the screen over (page.tsx keys it on the title's state), so it waits while
-   * the rating sheet is open (the user's text), a notice is up (why nothing was saved), or an Undo is on offer
-   * (issue 80). A later write or refusal that carries the title's true row cancels it.
+   * the rating sheet is open (the user's text), a notice is up (why nothing was saved), an Undo is on offer, or a
+   * save is on its way, whose answer would land on the screen the reload replaced (issue 80). A later write or
+   * refusal that carries the title's true row cancels it.
    */
   const refreshWhenClear = useRef(false);
   useEffect(() => {
-    if (sheet !== null || notice !== null || toast !== null || !refreshWhenClear.current) return;
+    if (busy || sheet !== null || notice !== null || toast !== null || !refreshWhenClear.current) return;
     refreshWhenClear.current = false;
     router.refresh();
-  }, [sheet, notice, toast, router]);
+  }, [busy, sheet, notice, toast, router]);
 
   /** Back has taken this card off the screen. A save can still settle after that (issue 93). */
   const gone = useRef(false);

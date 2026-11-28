@@ -115,7 +115,7 @@ interface UndoRefusal {
 /**
  * Runs one write as the signed-in user. For a card write, core's wrong_state means the card was stale: the title
  * is Seen already, or, for a Discover card, on any list or skipped (issue 83). `card.stale` words it, and the
- * result can carry the title's row as it is now. Undo passes no `card` but `undo`: its wrong_state, stale_value,
+ * result can carry the title's row as it is now. Undo passes no `card` but `undoOf`: its wrong_state, stale_value,
  * or not_found means its own compare-and-set refused because the title changed since, which is stale too.
  */
 async function run(

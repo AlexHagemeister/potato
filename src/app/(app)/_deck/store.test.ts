@@ -1,4 +1,4 @@
-// The Discover store's Undo paths (issue 84, item 4). These pin the store's behavior as it is today, so a change to
+// The Discover store's Undo paths (issue 84, item 4), and its return to the foreground (resumeDeck, issue 55). These pin the store's behavior as it is today, so a change to
 // how Undo is sent (issue 112) shows up here first. They are not a statement of the ideal: where today's behavior is
 // questionable, the test says so and names the issue.
 //
